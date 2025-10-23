@@ -1,0 +1,30 @@
+@import "tailwindcss";
+@import "@fontsource/poppins";
+@import "@fontsource/inter";
+
+:root {
+  --primary-gradient: linear-gradient(135deg, #38bdf8, #6366f1, #ec4899);
+}
+
+body {
+  @apply bg-gray-900 text-white overflow-hidden;
+  font-family: 'Poppins', sans-serif;
+}
+
+@keyframes fadeUp {
+  0% {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-60px);
+    opacity: 0;
+  }
+}
+
+.animate-fadeUp {
+  animation: fadeUp 4s ease forwards;
+}

@@ -1,0 +1,44 @@
+/* Subtle, layered blob motion */
+@keyframes blob-slow {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(2vmin, -1vmin) scale(1.05); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes blob-medium {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-2vmin, 1vmin) scale(1.08); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes blob-fast {
+  0% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(1vmin, 2vmin) scale(1.06); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+.animate-blob-slow { animation: blob-slow 12s ease-in-out infinite; }
+.animate-blob-medium { animation: blob-medium 10s ease-in-out infinite; }
+.animate-blob-fast { animation: blob-fast 8s ease-in-out infinite; }
+
+/* Siri-style ring pulsing */
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.08); opacity: 0.85; }
+  100% { transform: scale(1); opacity: 0.6; }
+}
+
+.pulse-ring {
+  animation: pulse-ring 2.2s ease-in-out infinite;
+  filter: saturate(130%);
+}
+
+@keyframes colorShift {
+  0% { background: radial-gradient(circle, rgba(198,75,248,0.6), rgba(255,102,196,0.15)); }
+  33% { background: radial-gradient(circle, rgba(255,59,59,0.5), rgba(255,138,214,0.12)); }
+  66% { background: radial-gradient(circle, rgba(255,255,255,0.35), rgba(178,59,224,0.20)); }
+  100% { background: radial-gradient(circle, rgba(198,75,248,0.6), rgba(255,102,196,0.15)); }
+}
+.animate-colorShift {
+  animation: colorShift 12s ease-in-out infinite;
+}

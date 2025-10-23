@@ -1,0 +1,17 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Build
+/dist
+/build
+/*.log
+
+# Environment
+.env
+.DS_Store
+
+# Electron
+/out
+/electron-builder.yml

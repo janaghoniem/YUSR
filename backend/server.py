@@ -45,6 +45,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Suppress noisy device-polling / HTTP-request logs ──
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 # Store pending responses (for HTTP API)
 pending_responses = {}
 
@@ -673,5 +677,6 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="info",
+        access_log=False  # ✅ Disable uvicorn's built-in HTTP access logging
     )

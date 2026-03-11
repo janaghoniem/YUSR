@@ -69,7 +69,7 @@ class ExecutionResult(BaseModel):
     """Execution result message"""
     status: str  # success, failed, pending
     details: str = ""
-    # metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
 
 # Channel names for pub/sub

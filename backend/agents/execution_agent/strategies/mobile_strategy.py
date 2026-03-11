@@ -75,7 +75,7 @@ class MobileReActStrategy:
         # Initialize Groq LLM
         from groq import AsyncGroq
         
-        api_key = "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" 
+        api_key = "" 
         self.llm_client = AsyncGroq(api_key=api_key)
         self.model = "llama-3.3-70b-versatile"
         

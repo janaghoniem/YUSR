@@ -4,11 +4,10 @@ language_agent.py - GROQ API VERSION - FIXED JSON PARSING
 """
 
 import os, re, json, uuid, time, sys
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple, Any
 import asyncio
 import logging
 from groq import Groq
-from typing import List, Dict
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from agents.utils.protocol import AgentMessage, MessageType, AgentType, ClarificationMessage
@@ -62,6 +61,12 @@ def generate_chat_title(user_input: str, response_text: str, max_length: int = 5
         title = title[:max_length-3] + "..."
     
     return title if title else "Chat"
+def normalize_arabic(text: str) -> str:
+    t = (text or "").strip().lower()
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    t = re.sub(r"\s+", " ", t)
+    return t
 
 # -----------------------
 # Groq API Call
@@ -90,6 +95,12 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
 # SYSTEM PROMPT
 # -----------------------
 SYSTEM_PROMPT = """You are a Conversational Clarity Agent. Your role is to determine if a user's request is a "Question" (to be answered) or a "Task" (to be executed).
+
+### LANGUAGE CONSISTENCY (MANDATORY)
+- Detect the language of the user's latest message (Arabic or English).
+- Always write `response_text` in that same language.
+- If the user starts in Arabic, do NOT switch to English unless the user explicitly switches.
+- Keep mixed-language app names/commands exactly as spoken (e.g., "افتح calculator").
 
 ### CORE PRINCIPLE
 Ask clarification questions ONLY when missing information makes task execution impossible. If reasonable defaults exist or the task can proceed without the information, mark it complete immediately.
@@ -131,7 +142,8 @@ Output ONLY valid JSON with this structure. NO BACKSLASHES IN STRINGS:
 {
     "is_complete": boolean,
     "response_text": "Brief answer/confirmation/single clarification question",
-    "original_task": "Exact user input with backslashes converted to forward slashes (null if is_complete is false)"
+    "original_task": "Exact user input with backslashes converted to forward slashes (null if is_complete is false)",
+    "personal_info": "One-sentence summary of personal info revealed (name, age, location, hobby, preference, etc.), or null if none"
 }
 
 ### PATH FORMATTING RULE
@@ -142,27 +154,31 @@ Always convert Windows backslashes to forward slashes in original_task:
 
 **Example 1: Question - Answer it**
 Input: "What is a calculator?"
-Output: {"is_complete": false, "response_text": "A calculator is a tool for performing mathematical calculations. Would you like me to open it?", "original_task": null}
+Output: {"is_complete": false, "response_text": "A calculator is a tool for performing mathematical calculations. Would you like me to open it?", "original_task": null, "personal_info": null}
 
 **Example 2: Task with explicit target - Complete**
 Input: "Open calculator"
-Output: {"is_complete": true, "response_text": "Opening calculator.", "original_task": "Open calculator"}
+Output: {"is_complete": true, "response_text": "Opening calculator.", "original_task": "Open calculator", "personal_info": null}
 
 **Example 3: Task with filepath - Complete**
 Input: "summarize the content of the file C:\\Users\\uscs\\Downloads\\coordinator to do.txt"
-Output: {"is_complete": true, "response_text": "I'll summarize that file for you.", "original_task": "summarize the content of the file C:/Users/uscs/Downloads/coordinator to do.txt"}
+Output: {"is_complete": true, "response_text": "I'll summarize that file for you.", "original_task": "summarize the content of the file C:/Users/uscs/Downloads/coordinator to do.txt", "personal_info": null}
 
 **Example 4: Task with time context - Complete**
 Input: "set an alarm for 7 am tomorrow"
-Output: {"is_complete": true, "response_text": "Setting alarm for 7 AM tomorrow.", "original_task": "set an alarm for 7 am tomorrow"}
+Output: {"is_complete": true, "response_text": "Setting alarm for 7 AM tomorrow.", "original_task": "set an alarm for 7 am tomorrow", "personal_info": null}
 
 **Example 5: Vague task blocking execution - Incomplete**
 Input: "send the message"
-Output: {"is_complete": false, "response_text": "Who should I send the message to?", "original_task": null}
+Output: {"is_complete": false, "response_text": "Who should I send the message to?", "original_task": null, "personal_info": null}
 
 **Example 6: Task with inferrable defaults - Complete**
 Input: "search for AI news"
-Output: {"is_complete": true, "response_text": "Searching for AI news.", "original_task": "search for AI news"}
+Output: {"is_complete": true, "response_text": "Searching for AI news.", "original_task": "search for AI news", "personal_info": null}
+
+**Example 7: Personal info detected**
+Input: "My name is Jana and I'm a computer science student"
+Output: {"is_complete": false, "response_text": "Nice to meet you, Jana! How can I help you today?", "original_task": null, "personal_info": "User's name is Jana and she is a computer science student"}
 
 ### TASK TO CLASSIFY:"""
 
@@ -179,6 +195,8 @@ class LanguageAgent:
         self.save_path = CONV_SAVE_PATH
         self.tasks_path = TASKS_SAVE_PATH
         self.system_prompt = {"role": "system", "content": SYSTEM_PROMPT}
+        self.preferred_language = "en"
+        self.awaiting_user_response = None
         
         # Initialize MongoDB client for persistent storage
         try:
@@ -221,6 +239,8 @@ class LanguageAgent:
             
             if doc and "messages" in doc:
                 messages = doc["messages"]
+                self.preferred_language = doc.get("preferred_language") or "en"
+                self.awaiting_user_response = doc.get("awaiting_user_response")
                 logger.info(f"✅ Loaded {len(messages)} messages from session {self.session_id}")
                 
                 if not messages or messages[0].get("role") != "system":
@@ -233,6 +253,113 @@ class LanguageAgent:
         except Exception as e:
             logger.error(f"❌ Failed to load conversation: {e}")
             return [self.system_prompt]
+
+    def set_preferred_language(self, lang: Optional[str]):
+        normalized = (lang or "").strip().lower()
+        if normalized.startswith("ar"):
+            self.preferred_language = "ar"
+        elif normalized.startswith("en"):
+            self.preferred_language = "en"
+
+    def _build_turn_messages(self, current_lang: str) -> List[Dict[str, str]]:
+        messages = list(self.memory)
+        turn_instruction = {
+            "role": "system",
+            "content": (
+                f"For this turn, respond strictly in {'Arabic' if current_lang == 'ar' else 'English'}. "
+                "Keep app names, brand names, and commands exactly as the user said them. "
+                "Return strict JSON only."
+            )
+        }
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        messages.insert(insert_at, turn_instruction)
+        return messages
+
+    def _repair_response_language(self, response: str, user_text: str, target_lang: str) -> str:
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You repair JSON responses. Return strict JSON only with the same schema. "
+                    "Rewrite only response_text into the requested language. Preserve original_task and personal_info."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Target language: {'Arabic' if target_lang == 'ar' else 'English'}\n"
+                    f"Original user input: {user_text}\n"
+                    f"Current JSON: {response}"
+                )
+            }
+        ]
+        repaired = call_groq_api(repair_messages, max_tokens=220)
+        return repaired or response
+
+    def resolve_contextual_follow_up(self, user_text: str) -> Optional[Dict[str, Any]]:
+        context = self.awaiting_user_response or {}
+        metadata = context.get("metadata") if isinstance(context, dict) else {}
+        if not isinstance(metadata, dict):
+            return None
+
+        structured = metadata.get("structured_response")
+        if not isinstance(structured, dict):
+            return None
+
+        text = normalize_arabic(user_text)
+        read_intents = [
+            "اقراها", "اقريها", "اقراهم", "اقريهم", "اقرا النتائج", "اقرا النتايج",
+            "اقراها بصوت عالي", "اقريها بصوت عالي", "اقراهم بصوت عالي", "اقريهم بصوت عالي",
+            "read it", "read them", "read it out loud", "read them out loud", "read aloud",
+            "read the results", "read results",
+        ]
+        explain_intents = ["اشرحها", "اشرح النتائج", "اشرح النتايج", "explain it", "explain the results"]
+
+        is_read = any(k in text for k in read_intents)
+        is_explain = any(k in text for k in explain_intents)
+
+        if not is_read and not is_explain:
+            return None
+
+        lang = self.preferred_language or "en"
+        if is_read:
+            response = "تمام، هاقرا النتائج حالًا." if lang == "ar" else "Sure, I'll read the results now."
+            return {
+                "status": "completed",
+                "response": response,
+                "structured_response": structured,
+                "followup_action": "read_aloud",
+                "user_language": lang,
+            }
+
+        response = "تمام، هاشرح النتائج باختصار." if lang == "ar" else "Sure, I'll explain the results briefly."
+        return {
+            "status": "completed",
+            "response": response,
+            "structured_response": structured,
+            "followup_action": "explain",
+            "user_language": lang,
+        }
+
+    def remember_assistant_output(self, text: str, expects_reply: bool = False, metadata: Optional[Dict] = None):
+        clean_text = sanitize_text(text)
+        if not clean_text:
+            return
+        self._remember_language(clean_text)
+        self.memory.append({"role": "assistant", "content": clean_text})
+        if len(self.memory) > 21:
+            preserved = [self.memory[0]]
+            for msg in self.memory[1:]:
+                if msg.get("role") == "system" and "Previous Context" in msg.get("content", ""):
+                    preserved.append(msg)
+                    break
+            preserved.extend(self.memory[-20:])
+            self.memory = preserved
+        self.awaiting_user_response = {
+            "question": clean_text,
+            "metadata": metadata or {}
+        } if expects_reply else None
+        self.save_memory()
     
     def _save_conversation(self):
         """Save conversation to MongoDB"""
@@ -247,6 +374,8 @@ class LanguageAgent:
                 {
                     "$set": {
                         "messages": self.memory,
+                        "preferred_language": self.preferred_language,
+                        "awaiting_user_response": self.awaiting_user_response,
                         "timestamp": time.time(),
                         "last_updated": int(time.time())
                     }
@@ -265,22 +394,28 @@ class LanguageAgent:
                 "timestamp": int(time.time()),
                 "memory": self.memory,
                 "session_id": self.session_id,
-                "user_id": self.user_id
+                "user_id": self.user_id,
+                "preferred_language": self.preferred_language,
+                "awaiting_user_response": self.awaiting_user_response,
             })
         except Exception as e:
             logger.warning(f"⚠️ Failed to save to JSONL: {e}")
         
         self._save_conversation()
 
-    def parse_response(self, response: str) -> tuple:
-        """Parse LLM response to extract is_complete status - FIX: Handle backslashes"""
+    def parse_response(self, response: str) -> Tuple[str, bool, Optional[str]]:
+        """Parse LLM response to extract is_complete status and personal_info"""
         try:
             # FIX: Replace backslashes with forward slashes before parsing
             cleaned_response = response.replace("\\\\", "/").replace("\\", "/")
             parsed = json.loads(cleaned_response)
             is_complete = parsed.get("is_complete", False)
             response_text = parsed.get("response_text", "")
-            return response_text, is_complete
+            personal_info = parsed.get("personal_info", None)
+            # Normalize "null" string to None
+            if personal_info and str(personal_info).lower() == "null":
+                personal_info = None
+            return response_text, is_complete, personal_info
         except json.JSONDecodeError as e:
             logger.error(f"⚠️ JSON parse error: {e}")
             logger.error(f"⚠️ Raw response: {response}")
@@ -289,17 +424,20 @@ class LanguageAgent:
                 import re
                 match = re.search(r'"response_text":\s*"([^"]+)"', response)
                 if match:
-                    return match.group(1), False
+                    return match.group(1), False, None
             except:
                 pass
-            return "I'm sorry, I didn't quite understand. Could you clarify?", False
+            fallback_text = "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟" if self.preferred_language == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+            return fallback_text, False, None
         except Exception as e:
             logger.warning(f"⚠️ Failed to parse response: {e}")
-            return "I'm sorry, I didn't quite understand. Could you clarify?", False
+            fallback_text = "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟" if self.preferred_language == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+            return fallback_text, False, None
 
     def user_turn(self, user_text: str) -> tuple:
         """Process user input and return response"""
         user_text = sanitize_text(user_text)
+        current_lang = self.preferred_language or "en"
         self.memory.append({"role": "user", "content": user_text})
         
         # if len(self.memory) > 21:
@@ -316,19 +454,23 @@ class LanguageAgent:
                     self.memory = preserved
         
         print("   🤔 Thinking...", end=" ", flush=True)
-        response = call_groq_api(self.memory, max_tokens=200)
+        response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=200)
         print("✓")
         
         if not response:
-            response_text = "I'm having trouble connecting right now. Please try again."
-            return response_text, False
+            response_text = "أواجه مشكلة في الاتصال الآن. حاول مرة أخرى." if current_lang == "ar" else "I'm having trouble connecting right now. Please try again."
+            return response_text, False, None
         
-        response_text, is_complete = self.parse_response(response)
+        response_text, is_complete, personal_info = self.parse_response(response)
 
         self.memory.append({"role": "assistant", "content": response})
+        self.awaiting_user_response = {
+            "question": response_text,
+            "source": "language_agent"
+        } if not is_complete else None
         self.save_memory()
         
-        return response_text, is_complete
+        return response_text, is_complete, personal_info
     
     def clear_conversation(self):
         """Clear conversation history (for new chat)"""
@@ -338,6 +480,12 @@ class LanguageAgent:
 
 # Store active agents by session_id
 active_agents: Dict[str, LanguageAgent] = {}
+
+def get_agent_for_session(session_id: str) -> Optional[LanguageAgent]:
+    for key, agent in active_agents.items():
+        if key.endswith(f"_{session_id}"):
+            return agent
+    return None
 
 async def start_language_agent(broker):
     print("="*70)
@@ -378,6 +526,22 @@ async def start_language_agent(broker):
 
         # Get or create agent for this session
         agent = get_or_create_agent(session_id, user_id)
+        agent.set_preferred_language(payload_data.get("user_language"))
+
+        contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
+        if contextual_follow_up:
+            agent.awaiting_user_response = None
+            agent.save_memory()
+            reply_msg = AgentMessage(
+                message_type=MessageType.TASK_RESPONSE,
+                sender=AgentType.LANGUAGE,
+                receiver=AgentType.LANGUAGE,
+                session_id=session_id,
+                response_to=http_request_id,
+                payload=contextual_follow_up,
+            )
+            await broker.publish(Channels.LANGUAGE_OUTPUT, reply_msg)
+            return
 
         # Fetch Mem0 preferences
         try:
@@ -460,44 +624,25 @@ async def start_language_agent(broker):
         # NEW: Send thinking update before calling agent
         await ThinkingStepManager.update_step(session_id, "Processing your request...", http_request_id)
 
-        response, is_complete = agent.user_turn(input_text)
+        response, is_complete, personal_info = agent.user_turn(input_text)
         print(f"🤖 Agent: {response}\n")
-        try:
-            _extraction_prompt = (
-                'You are a personal-info extractor. Read the user message below.\n'
-                'If it contains personal information (name, age, location, job, hobby,\n'
-                'preference, or any fact about the user), extract it.\n'
-                'If it does NOT contain personal info, return exactly: {"personal_info": null}\n\n'
-                f'USER MESSAGE: "{input_text}"\n\n'
-                'Return ONLY valid JSON, no markdown, no explanation:\n'
-                '{"personal_info": "one-sentence summary of what the user revealed, or null"}'
-            )
-            _ext_response = call_groq_api(
-                [{"role": "system", "content": _extraction_prompt}],
-                max_tokens=100
-            )
-            if _ext_response:
-                _clean = _ext_response.strip()
-                if _clean.startswith("```"):
-                    _clean = _clean.split("```")[1]
-                    if _clean.startswith("json"):
-                        _clean = _clean[4:]
-                _extracted = json.loads(_clean.strip())
-                _pi = _extracted.get("personal_info")
-                if _pi and str(_pi).lower() != "null":
-                    from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                    _pmgr = get_preference_manager(user_id)
-                    _pmgr.add_preference(
-                        str(_pi),
-                        metadata={
-                            "category": "personal_info",
-                            "source": "language_agent",
-                            "session_id": session_id
-                        }
-                    )
-                    print(f"💾 Stored personal info: {_pi}")
-        except Exception as _ext_err:
-            logger.warning(f"⚠️ Personal info extraction (non-fatal): {_ext_err}")
+
+        # Store personal info if extracted (no separate LLM call needed)
+        if personal_info:
+            try:
+                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                _pmgr = get_preference_manager(user_id)
+                _pmgr.add_preference(
+                    str(personal_info),
+                    metadata={
+                        "category": "personal_info",
+                        "source": "language_agent",
+                        "session_id": session_id
+                    }
+                )
+                print(f"💾 Stored personal info: {personal_info}")
+            except Exception as _ext_err:
+                logger.warning(f"⚠️ Personal info storage (non-fatal): {_ext_err}")
         
         if is_complete:
             # NEW: Send thinking update
@@ -514,6 +659,8 @@ async def start_language_agent(broker):
                 response_to=http_request_id,
                 payload={
                     "confirmation": response, 
+                    "original_input": input_text,
+                    "user_language": agent.preferred_language,
                     "device_type": device_type,
                     "user_id": user_id,
                     "chat_title": chat_title,

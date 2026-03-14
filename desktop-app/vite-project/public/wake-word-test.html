@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AURA — Speech Recognition Debugger</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0d0d1a;
+      color: #e0e0ff;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; color: #a78bfa; }
+    .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 20px; }
+
+    .controls {
+      display: flex; gap: 12px; align-items: center;
+      margin-bottom: 20px; flex-wrap: wrap;
+    }
+    button {
+      padding: 10px 20px; border: none; border-radius: 8px;
+      cursor: pointer; font-size: 0.9rem; font-weight: 600;
+      transition: all 0.2s;
+    }
+    #startBtn { background: #7c3aed; color: white; }
+    #startBtn:hover { background: #6d28d9; }
+    #startBtn.active { background: #22c55e; }
+    #stopBtn { background: #ef4444; color: white; }
+    #stopBtn:hover { background: #dc2626; }
+    #clearBtn { background: #374151; color: #d1d5db; }
+    #clearBtn:hover { background: #4b5563; }
+
+    select {
+      padding: 10px; border-radius: 8px; background: #1e1e2e;
+      color: #e0e0ff; border: 1px solid #444; font-size: 0.9rem;
+    }
+
+    .status-bar {
+      display: flex; gap: 16px; align-items: center;
+      padding: 10px 16px; background: #1a1a2e; border-radius: 8px;
+      margin-bottom: 16px; font-size: 0.85rem;
+    }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      display: inline-block;
+    }
+    .status-dot.listening { background: #22c55e; animation: pulse 1s infinite; }
+    .status-dot.stopped { background: #ef4444; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .wake-word-indicator {
+      padding: 6px 14px; border-radius: 20px;
+      font-weight: 600; font-size: 0.85rem;
+      transition: all 0.3s;
+    }
+    .wake-word-indicator.detected {
+      background: #22c55e33; color: #22c55e;
+      border: 1px solid #22c55e;
+      animation: flash 0.5s;
+    }
+    .wake-word-indicator.idle {
+      background: #37415133; color: #9ca3af;
+      border: 1px solid #374151;
+    }
+    @keyframes flash { 0% { transform: scale(1.2); } 100% { transform: scale(1); } }
+
+    .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 800px) { .panels { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: #1a1a2e; border-radius: 12px;
+      padding: 16px; max-height: 60vh; overflow-y: auto;
+    }
+    .panel h2 {
+      font-size: 1rem; margin-bottom: 12px;
+      padding-bottom: 8px; border-bottom: 1px solid #333;
+    }
+    .panel h2.interim { color: #facc15; }
+    .panel h2.final { color: #22c55e; }
+
+    .entry {
+      padding: 8px 12px; margin-bottom: 6px;
+      background: #0d0d1a; border-radius: 8px;
+      font-size: 0.85rem; line-height: 1.5;
+      border-left: 3px solid #444;
+    }
+    .entry.wake { border-left-color: #7c3aed; background: #7c3aed15; }
+    .entry .timestamp { color: #666; font-size: 0.75rem; }
+    .entry .text { margin-top: 2px; }
+    .entry .confidence {
+      font-size: 0.75rem; color: #888;
+      margin-top: 2px;
+    }
+    .entry .lang-tag {
+      display: inline-block; padding: 1px 6px; border-radius: 4px;
+      font-size: 0.7rem; font-weight: 600; margin-left: 6px;
+    }
+    .lang-tag.ar { background: #22c55e33; color: #22c55e; }
+    .lang-tag.en { background: #3b82f633; color: #60a5fa; }
+
+    .stats {
+      display: flex; gap: 20px; margin-top: 16px;
+      padding: 12px 16px; background: #1a1a2e; border-radius: 8px;
+      font-size: 0.85rem;
+    }
+    .stat-value { font-weight: 700; color: #a78bfa; }
+  </style>
+</head>
+<body>
+
+  <h1>🎤 AURA — Speech Recognition Debugger</h1>
+  <p class="subtitle">Test what words the browser actually hears. Detects English "aura" and Arabic "أورا" wake words.</p>
+
+  <div class="controls">
+    <button id="startBtn" onclick="toggleListening()">▶ Start Listening</button>
+    <button id="stopBtn" onclick="stopListening()">⏹ Stop</button>
+    <button id="clearBtn" onclick="clearLog()">🗑 Clear</button>
+    <select id="langSelect" onchange="restartWithLang()">
+      <option value="en-US">English (en-US)</option>
+      <option value="ar-SA">Arabic (ar-SA)</option>
+      <option value="ar-EG">Arabic Egypt (ar-EG)</option>
+      <option value="">Auto-detect (empty)</option>
+    </select>
+  </div>
+
+  <div class="status-bar">
+    <span><span class="status-dot stopped" id="statusDot"></span> <span id="statusText">Stopped</span></span>
+    <span>Language: <strong id="currentLang">en-US</strong></span>
+    <div class="wake-word-indicator idle" id="wakeIndicator">Wake Word: waiting</div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2 class="interim">🔄 Interim Results (live)</h2>
+      <div id="interimLog"></div>
+    </div>
+    <div class="panel">
+      <h2 class="final">✅ Final Results (confirmed)</h2>
+      <div id="finalLog"></div>
+    </div>
+  </div>
+
+  <div class="stats">
+    <span>Total words: <span class="stat-value" id="wordCount">0</span></span>
+    <span>Final results: <span class="stat-value" id="finalCount">0</span></span>
+    <span>Wake detections: <span class="stat-value" id="wakeCount">0</span></span>
+  </div>
+
+<script>
+  // ---------- CONFIG ----------
+  const WAKE_PATTERNS = [
+    /\baura\b/i,                             // English "aura"
+    /أورا|اورا|أوره|اوره|اورة|أورة/,          // Arabic variants
+  ];
+
+  // ---------- STATE ----------
+  let recognition = null;
+  let isListening = false;
+  let wakeDetections = 0;
+  let finalResults = 0;
+  let totalWords = 0;
+
+  // ---------- INIT ----------
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    document.body.innerHTML = '<h1 style="color:red;padding:40px">❌ SpeechRecognition API not supported in this browser.<br>Use Chrome or Edge.</h1>';
+  }
+
+  function createRecognition(lang) {
+    const r = new SpeechRecognition();
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 3;
+    if (lang) r.lang = lang;
+
+    r.onstart = () => {
+      isListening = true;
+      document.getElementById('statusDot').className = 'status-dot listening';
+      document.getElementById('statusText').textContent = 'Listening...';
+      document.getElementById('startBtn').classList.add('active');
+      document.getElementById('startBtn').textContent = '● Listening...';
+      document.getElementById('currentLang').textContent = lang || '(auto)';
+      console.log('[SR] Started with lang:', lang || '(auto)');
+    };
+
+    r.onend = () => {
+      console.log('[SR] Ended');
+      if (isListening) {
+        // Auto-restart if we want continuous listening
+        console.log('[SR] Auto-restarting...');
+        try { r.start(); } catch(e) { console.warn('[SR] Restart failed:', e); }
+      } else {
+        document.getElementById('statusDot').className = 'status-dot stopped';
+        document.getElementById('statusText').textContent = 'Stopped';
+        document.getElementById('startBtn').classList.remove('active');
+        document.getElementById('startBtn').textContent = '▶ Start Listening';
+      }
+    };
+
+    r.onerror = (e) => {
+      console.error('[SR] Error:', e.error, e.message);
+      addEntry('finalLog', `⚠️ Error: ${e.error} — ${e.message || ''}`, 0, true);
+    };
+
+    r.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const text = result[0].transcript;
+        const confidence = result[0].confidence;
+        const isFinal = result.isFinal;
+
+        // Detect language of the text
+        const isArabic = /[\u0600-\u06FF]/.test(text);
+        const detectedLang = isArabic ? 'ar' : 'en';
+
+        // Check all alternatives
+        let allAlts = [];
+        for (let a = 0; a < result.length; a++) {
+          allAlts.push(`[${a}] "${result[a].transcript}" (${(result[a].confidence * 100).toFixed(1)}%)`);
+        }
+
+        // Check for wake word
+        const isWake = WAKE_PATTERNS.some(p => p.test(text.toLowerCase()));
+        if (isWake && isFinal) {
+          wakeDetections++;
+          document.getElementById('wakeCount').textContent = wakeDetections;
+          const ind = document.getElementById('wakeIndicator');
+          ind.className = 'wake-word-indicator detected';
+          ind.textContent = `Wake Word DETECTED! (${detectedLang === 'ar' ? 'Arabic' : 'English'})`;
+          setTimeout(() => { ind.className = 'wake-word-indicator idle'; ind.textContent = 'Wake Word: waiting'; }, 2000);
+        }
+
+        if (isFinal) {
+          finalResults++;
+          totalWords += text.trim().split(/\s+/).length;
+          document.getElementById('finalCount').textContent = finalResults;
+          document.getElementById('wordCount').textContent = totalWords;
+          addEntry('finalLog', text, confidence, isWake, detectedLang, allAlts);
+        } else {
+          // For interim: replace content instead of appending
+          updateInterim(text, confidence, isWake, detectedLang);
+        }
+      }
+    };
+
+    return r;
+  }
+
+  function toggleListening() {
+    if (isListening) {
+      stopListening();
+    } else {
+      startListening();
+    }
+  }
+
+  function startListening() {
+    const lang = document.getElementById('langSelect').value;
+    recognition = createRecognition(lang);
+    try {
+      recognition.start();
+    } catch (e) {
+      console.error('[SR] Failed to start:', e);
+    }
+  }
+
+  function stopListening() {
+    isListening = false;
+    if (recognition) {
+      try { recognition.stop(); } catch(e) {}
+    }
+  }
+
+  function restartWithLang() {
+    if (isListening) {
+      stopListening();
+      setTimeout(startListening, 300);
+    }
+  }
+
+  function clearLog() {
+    document.getElementById('interimLog').innerHTML = '';
+    document.getElementById('finalLog').innerHTML = '';
+    wakeDetections = 0; finalResults = 0; totalWords = 0;
+    document.getElementById('wakeCount').textContent = '0';
+    document.getElementById('finalCount').textContent = '0';
+    document.getElementById('wordCount').textContent = '0';
+  }
+
+  // ---------- UI HELPERS ----------
+  function timestamp() {
+    return new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+  }
+
+  function addEntry(containerId, text, confidence, isWake, lang, alternatives) {
+    const container = document.getElementById(containerId);
+    const div = document.createElement('div');
+    div.className = `entry${isWake ? ' wake' : ''}`;
+    div.innerHTML = `
+      <div class="timestamp">${timestamp()} ${lang ? `<span class="lang-tag ${lang}">${lang.toUpperCase()}</span>` : ''}</div>
+      <div class="text">${escapeHtml(text)}</div>
+      <div class="confidence">Confidence: ${(confidence * 100).toFixed(1)}%${isWake ? ' 🎯 WAKE WORD' : ''}</div>
+      ${alternatives ? `<div class="confidence" style="color:#666">Alternatives:<br>${alternatives.map(escapeHtml).join('<br>')}</div>` : ''}
+    `;
+    container.prepend(div);
+    // Keep max 200 entries
+    while (container.children.length > 200) container.removeChild(container.lastChild);
+  }
+
+  function updateInterim(text, confidence, isWake, lang) {
+    const container = document.getElementById('interimLog');
+    // Replace or update the top entry
+    let existing = container.firstChild;
+    if (!existing || existing.dataset.type !== 'interim') {
+      existing = document.createElement('div');
+      existing.className = `entry${isWake ? ' wake' : ''}`;
+      existing.dataset.type = 'interim';
+      container.prepend(existing);
+    }
+    existing.className = `entry${isWake ? ' wake' : ''}`;
+    existing.innerHTML = `
+      <div class="timestamp">${timestamp()} <span class="lang-tag ${lang}">${lang.toUpperCase()}</span> <em>(interim)</em></div>
+      <div class="text">${escapeHtml(text)}</div>
+      <div class="confidence">Confidence: ${confidence ? (confidence * 100).toFixed(1) + '%' : 'n/a'}${isWake ? ' 🎯 WAKE WORD' : ''}</div>
+    `;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // Pre-load voices
+  if (window.speechSynthesis) {
+    window.speechSynthesis.getVoices();
+  }
+</script>
+
+</body>
+</html>

@@ -42,6 +42,27 @@ def append_jsonl(path: str, obj: dict):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+def generate_chat_title(user_input: str, response_text: str, max_length: int = 50) -> str:
+    """
+    Generate a short chat title from user input and response
+    Similar to how ChatGPT generates titles
+    """
+    # Try to extract first few words from user input
+    title = user_input.strip()
+    
+    # Remove common filler words
+    filler = ["the", "a", "an", "what", "how", "why", "tell", "me", "show", "is", "are", "can", "will"]
+    words = [w for w in title.split()[:5] if w.lower() not in filler]
+    
+    if words:
+        title = " ".join(words)
+    
+    # Truncate to max length and add ellipsis if needed
+    if len(title) > max_length:
+        title = title[:max_length-3] + "..."
+    
+    return title if title else "Chat"
+
 # -----------------------
 # Groq API Call
 # -----------------------
@@ -482,6 +503,9 @@ async def start_language_agent(broker):
             # NEW: Send thinking update
             await ThinkingStepManager.update_step(session_id, "Preparing for coordinator...", http_request_id)
             
+            # Generate chat title from first user input
+            chat_title = generate_chat_title(input_text, response)
+            
             task_msg = AgentMessage(
                 message_type=MessageType.TASK_REQUEST,
                 sender=AgentType.LANGUAGE,
@@ -492,6 +516,8 @@ async def start_language_agent(broker):
                     "confirmation": response, 
                     "device_type": device_type,
                     "user_id": user_id,
+                    "chat_title": chat_title,
+                    "first_input": input_text,
                 }
             )
             await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, task_msg)

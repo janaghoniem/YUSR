@@ -24,7 +24,7 @@ const ThinkingIndicator = ({ steps = [] }) => {
               <span className="step-icon" aria-hidden="true">
                 {idx < steps.length - 1 ? "✓" : "●"}
               </span>
-              <span className="step-text">{step}</span>
+              <span className="step-text">{typeof step === 'string' ? step : JSON.stringify(step)}</span>
             </li>
           ))}
         </ul>

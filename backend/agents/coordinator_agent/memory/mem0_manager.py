@@ -30,6 +30,7 @@ class Mem0PreferenceManager:
                     "db_name": "yusr_db",
                     "collection_name": "mem0_preferences",
                     "embedding_model_dims": 384
+                    # ✅ index_name removed - not needed in latest Mem0
                 }
             },
             "llm": {
@@ -55,7 +56,7 @@ class Mem0PreferenceManager:
         except Exception as e:
             logger.error(f"❌ Mem0 initialization failed: {e}")
             raise
-    
+
     def add_preference(self, preference: str, metadata: Optional[Dict] = None) -> str:
         """Store a user preference"""
         try:
@@ -164,103 +165,69 @@ class Mem0PreferenceManager:
             logger.error(f"❌ Failed to find and update preference: {e}")
             return False
 
+
+
     def get_relevant_preferences(
-        self, 
-        query: str, 
-        limit: int = 10,  # ✅ INCREASED from 5 to 10
-        min_score: float = 0.25 # ✅ LOWERED from 0.65 to 0.3 (more permissive)
+        self,
+        query: str,
+        limit: int = 10,
+        min_score: float = 0.25
     ) -> List[Dict]:
         """
-        Get preferences relevant to query with FIXED scoring
-        
-        Args:
-            query: Search query
-            limit: Max results to retrieve
-            min_score: Minimum similarity (0.3 = loose match, 0.7 = strict match)
-        
-        Returns:
-            List of relevant memories
+        Get preferences relevant to query.
+        Single Atlas ANN search (was 3x with query expansion).
         """
         try:
-            # ✅ FIX 1: Expand query with common variations
-            expanded_queries = [
-                query,
-                f"user preference: {query}",
-                f"what does the user like for {query}"
-            ]
-            
-            all_memories = []
-            seen_ids = set()
-            
-            # Search with all query variations
-            for q in expanded_queries:
-                memories = self.memory.search(
-                    query=q,
-                    user_id=self.user_id,
-                    limit=limit * 2
-                )
-                
-                # Handle response format
-                if isinstance(memories, dict):
-                    if 'results' in memories:
-                        memories = memories['results']
-                    elif 'memories' in memories:
-                        memories = memories['memories']
-                    elif 'memory' in memories:
-                        memories = [memories]
-                    else:
-                        memories = []
-                
-                if not isinstance(memories, list):
+            # ONE search call — no expansion loop
+            memories = self.memory.search(
+                query=query,
+                user_id=self.user_id,
+                limit=limit * 2
+            )
+
+            # Normalise response format (Mem0 returns dict or list depending on version)
+            if isinstance(memories, dict):
+                if 'results' in memories:
+                    memories = memories['results']
+                elif 'memories' in memories:
+                    memories = memories['memories']
+                elif 'memory' in memories:
+                    memories = [memories]
+                else:
                     memories = []
-                
-                # Deduplicate by memory ID
-                for mem in memories:
-                    mem_id = mem.get('id') or mem.get('memory_id')
-                    if mem_id and mem_id not in seen_ids:
-                        all_memories.append(mem)
-                        seen_ids.add(mem_id)
-            
-            # ✅ FIX 2: Filter by score with looser threshold
+
+            if not isinstance(memories, list):
+                memories = []
+
+            # Filter by score threshold
             relevant_memories = []
-            for mem in all_memories:
+            for mem in memories:
+                if mem is None:
+                    continue
                 score = mem.get('score', 0.0)
                 memory_text = mem.get('memory', mem.get('text', 'Unknown'))
-                
+
                 if score >= min_score:
                     relevant_memories.append(mem)
                     logger.info(f"  ✅ [Score: {score:.2f}] {memory_text[:60]}")
                 else:
                     logger.debug(f"  ⤷ Filtered out (score {score:.2f} < {min_score})")
-            
-            # Sort by score descending
+
+            # Sort by score descending and cap at limit
             relevant_memories.sort(key=lambda x: x.get('score', 0), reverse=True)
-            
-            # Limit to requested number
             relevant_memories = relevant_memories[:limit]
-            
-            #here
+
             logger.info(
-                f"✅ Found {len(relevant_memories)}/{len(all_memories)} relevant preferences "
+                f"✅ Found {len(relevant_memories)} relevant preferences "
                 f"(threshold: {min_score}) for query: {query[:50]}..."
             )
-            # Fallback: if vector search returned nothing, use get_all()
 
-            # ✅ FIX: Ensure we always return a list, never None
-            if relevant_memories is None:
-                logger.warning("⚠️ relevant_memories is None, returning empty list")
-                return []
-            
-            # ✅ FIX: Filter out any None entries before returning
-            relevant_memories = [m for m in relevant_memories if m is not None]
-            
-            logger.info(f"✅ Returning {len(relevant_memories)} valid memories (all non-None)")
             return relevant_memories
-        
+
         except Exception as e:
             logger.error(f"❌ Failed to retrieve preferences: {e}", exc_info=True)
             return []
-
+    
     def get_conversation_history(self, limit: int = 5) -> List:
         """Get recent conversation history"""
         try:

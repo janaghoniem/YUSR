@@ -433,6 +433,7 @@ async def process_user_input(request: Request):
         is_clarification = data.get("is_clarification", False)
         device_type = data.get("device_type", "mobile")
         user_id = data.get("user_id", "test_user")  # ✅ ADD THIS LINE
+        user_language = data.get("user_language", "en")
         
         if not user_input:
             raise HTTPException(status_code=400, detail="Missing 'input' field")
@@ -447,7 +448,7 @@ async def process_user_input(request: Request):
                 sender=AgentType.LANGUAGE,
                 receiver=AgentType.LANGUAGE,
                 session_id=session_id,
-                payload={"answer": user_input, "input": user_input, "device_type": device_type, "user_id": user_id}
+                payload={"answer": user_input, "input": user_input, "device_type": device_type, "user_id": user_id, "user_language": user_language}
             )
         else:
             message = AgentMessage(
@@ -455,7 +456,7 @@ async def process_user_input(request: Request):
                 sender=AgentType.LANGUAGE,
                 receiver=AgentType.LANGUAGE,
                 session_id=session_id,
-                payload={"input": user_input, "device_type": device_type,"user_id": user_id}
+                payload={"input": user_input, "device_type": device_type,"user_id": user_id, "user_language": user_language}
             )
         
         logger.info(f"⏳ Creating pending response for message ID: {message.message_id}")
@@ -538,9 +539,12 @@ async def handle_language_output(message):
     
     elif message.message_type == MessageType.TASK_RESPONSE:
         response_content = {
-            "status": "completed",
+            "status": message.payload.get("status", "completed"),
             "text": message.payload.get("response", "Task completed"),
-            "task_id": message.task_id
+            "task_id": message.task_id,
+            "structured_response": message.payload.get("structured_response"),
+            "followup_action": message.payload.get("followup_action"),
+            "user_language": message.payload.get("user_language"),
         }
         
         logger.info(f"✅ Task response from Language Agent: {response_content}")
@@ -790,6 +794,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 user_text = data.get("text", "").strip()
                 device_type = data.get("device_type", "desktop")
                 user_id = data.get("user_id", "test_user")
+                user_language = data.get("user_language", "en")
                 
                 if not user_text:
                     continue
@@ -833,7 +838,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     payload={
                         "input": user_text,
                         "device_type": device_type,
-                        "user_id": user_id
+                        "user_id": user_id,
+                        "user_language": user_language,
                     }
                 )
                 
@@ -913,6 +919,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 answer = data.get("answer", "").strip()
                 user_id = data.get("user_id", "test_user")
                 device_type = data.get("device_type", "desktop")
+                user_language = data.get("user_language", "en")
                 
                 if not answer:
                     continue
@@ -945,7 +952,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "answer": answer,
                         "input": answer,
                         "device_type": device_type,
-                        "user_id": user_id
+                        "user_id": user_id,
+                        "user_language": user_language,
                     }
                 )
                 

@@ -86,11 +86,134 @@ function App() {
   const lastSpokenStepRef = useRef(-1);
   // Ref for vocalizeStep so WS/SSE closures always get the latest version
   const vocalizeStepRef = useRef(null);
+  const thinkingSpeechQueueRef = useRef([]);
+  const thinkingSpeechRunningRef = useRef(false);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const audioRef = useRef(new Audio());
   const audioContextRef = useRef(null);
+
+  const isArabicText = useCallback((text) => /[\u0600-\u06FF]/.test(text || ""), []);
+
+  const detectLanguageFromText = useCallback((text) => {
+    if (!text || typeof text !== "string") return userLanguage || "en";
+    return isArabicText(text) ? "ar" : "en";
+  }, [isArabicText, userLanguage]);
+
+  const t = useCallback((en, ar) => (userLanguage === "ar" ? ar : en), [userLanguage]);
+
+  const rememberUserLanguageFromText = useCallback((text) => {
+    const detected = detectLanguageFromText(text);
+    if (!userLanguage && detected) {
+      setUserLanguage(detected);
+      localStorage.setItem("userLanguage", detected);
+    }
+    return detected;
+  }, [detectLanguageFromText, userLanguage]);
+
+  const translateThinkingStep = useCallback((step) => {
+    if (!step || userLanguage !== "ar") return step;
+    const normalized = step.trim().toLowerCase();
+    const map = {
+      "processing input...": "جاري معالجة الإدخال...",
+      "analyzing your request...": "جاري تحليل طلبك...",
+      "checking your preferences...": "جاري التحقق من تفضيلاتك...",
+      "processing your request...": "جاري تنفيذ طلبك...",
+      "preparing for coordinator...": "جاري التحضير للتنفيذ...",
+      "searching...": "جاري البحث...",
+      "analyzing...": "جاري التحليل...",
+      "processing...": "جاري المعالجة...",
+      "responding...": "جاري تجهيز الرد...",
+      "thinking...": "جاري التفكير..."
+    };
+    return map[normalized] || step;
+  }, [userLanguage]);
+
+  const extractReadableText = useCallback((value) => {
+    if (value == null) return "";
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return "";
+      if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          return extractReadableText(parsed);
+        } catch {
+          return trimmed;
+        }
+      }
+      return trimmed;
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) => extractReadableText(item)).filter(Boolean).join("\n\n");
+    }
+    if (typeof value === "object") {
+      const preferredKeys = ["full_content", "content", "spoken_text", "text", "response", "message", "summary", "result"];
+      for (const key of preferredKeys) {
+        if (value[key]) {
+          const extracted = extractReadableText(value[key]);
+          if (extracted) return extracted;
+        }
+      }
+      if (Array.isArray(value.details)) {
+        const detailText = value.details
+          .map((d) => extractReadableText(d?.content || d?.text || d?.result || d))
+          .filter(Boolean)
+          .join("\n\n");
+        if (detailText) return detailText;
+      }
+      return "";
+    }
+    return String(value);
+  }, []);
+
+  const stopThinkingSpeech = useCallback(() => {
+    thinkingSpeechQueueRef.current = [];
+    thinkingSpeechRunningRef.current = false;
+    screenReader.stop();
+  }, []);
+
+  const speakAssistantResponse = useCallback(async (text, languageHint = null) => {
+    const normalizedText = extractReadableText(text);
+    if (!normalizedText) return;
+
+    const lang = languageHint || detectLanguageFromText(normalizedText) || "en";
+    rememberUserLanguageFromText(normalizedText);
+
+    stopThinkingSpeech();
+    setOrbState("speaking");
+
+    try {
+      const res = await fetch("http://localhost:8000/text-to-speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: normalizedText, lang }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data?.audio_data) {
+        throw new Error(data?.detail || "TTS generation failed");
+      }
+
+      const audioEl = audioRef.current;
+      audioEl.pause();
+      audioEl.src = `data:audio/mp3;base64,${data.audio_data}`;
+      audioEl.currentTime = 0;
+
+      await new Promise((resolve, reject) => {
+        audioEl.onended = () => resolve();
+        audioEl.onerror = () => reject(new Error("Audio playback failed"));
+        audioEl.play().catch(reject);
+      });
+    } catch (error) {
+      console.warn("[TTS] Google speech failed, using local fallback:", error);
+      await screenReader.speak(normalizedText);
+    } finally {
+      setOrbState("idle");
+      setExecutionMode((prev) => (prev === "transparent" ? "normal" : prev));
+    }
+  }, [detectLanguageFromText, extractReadableText, rememberUserLanguageFromText, stopThinkingSpeech]);
 
   // Speech recognition (wake-word)
   const { transcript, interimTranscript, finalTranscript, resetTranscript, listening, browserSupportsSpeechRecognition } = useSpeechRecognition();
@@ -218,56 +341,56 @@ function App() {
 
         switch (msg.type) {
           case 'thinking_step':
+          case 'thinking': // server alias
+          {
+            const localizedStep = translateThinkingStep(msg.step);
             setThinkingSteps(prev => {
-              if (prev.includes(msg.step)) return prev;
-              return [...prev, msg.step];
+              if (prev.includes(localizedStep)) return prev;
+              return [...prev, localizedStep];
             });
-            if (vocalizeStepRef.current) vocalizeStepRef.current(msg.step);
+            if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
             setIsThinking(true);
+            break;
+          }
+
+          case 'thinking_clear':
+            setThinkingSteps([]);
+            setIsThinking(false);
+            stopThinkingSpeech();
             break;
 
           case 'clarification':
+          case 'clarification_needed': // server alias
             setThinkingSteps([]);
             setIsThinking(false);
             setClarificationResponseToId(msg.response_id);
             setAssistantMessage(msg.question);
-            // Use client-side TTS
-            setOrbState("speaking");
-            screenReader.speak(msg.question, {
-              onComplete: () => setOrbState("idle")
-            });
+            rememberUserLanguageFromText(msg.question);
+            speakAssistantResponse(msg.question, userLanguage);
             break;
 
           case 'completion':
-          case 'structured_response': {
+          case 'structured_response':
+          case 'response_complete': // server alias
+          {
             setThinkingSteps([]);
             setIsThinking(false);
             setClarificationResponseToId(null);
             
-            const responseText = msg.spoken_text || msg.response || msg.text || "Task completed";
-            setAssistantMessage(responseText);
+            const responseText = msg.spoken_text || msg.response || msg.text || t("Task completed", "تم تنفيذ المهمة بنجاح");
+            const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
+            setAssistantMessage(cleanResponseText);
+            rememberUserLanguageFromText(cleanResponseText);
 
             // Handle structured response
             if (msg.structured_response || msg.type === 'structured_response') {
               const sr = msg.structured_response || msg;
-              setStructuredResponse(sr);
-              setOfferReadAloud(sr.offer_read_aloud === true);
-              
-              if (sr.full_content && sr.full_content !== responseText) {
-                // Store full content for read-aloud
-                setStructuredResponse(prev => ({ ...prev, full_content: sr.full_content }));
-              }
+              const cleanFullContent = extractReadableText(sr.full_content || sr.content || sr.result || "");
+              setStructuredResponse({ ...sr, full_content: cleanFullContent });
+              setOfferReadAloud(sr.offer_read_aloud === true && !!cleanFullContent);
             }
 
-            // Speak the response with client-side TTS
-            setOrbState("speaking");
-            screenReader.speak(responseText, {
-              onComplete: () => {
-                setOrbState("idle");
-                // Exit transparent mode when task completes
-                setExecutionMode(prev => prev === "transparent" ? "normal" : prev);
-              }
-            });
+            speakAssistantResponse(cleanResponseText, userLanguage);
             break;
           }
 
@@ -278,7 +401,7 @@ function App() {
               setOrbState("idle");
               setIsThinking(false);
               setThinkingSteps([]);
-              setAssistantMessage(`Stopped. ${msg.command === 'stop' ? 'Task cancelled.' : ''}`);
+              setAssistantMessage(t("Stopped. Task cancelled.", "تم الإيقاف. تم إلغاء المهمة."));
               // Exit widget if auto-triggered
               if (autoWidgetTriggeredRef.current) {
                 window.electronAPI?.exitWidgetMode?.();
@@ -286,9 +409,9 @@ function App() {
               }
               setExecutionMode("normal");
             } else if (msg.command === 'pause') {
-              setAssistantMessage("Paused. Say 'AURA resume' to continue.");
+              setAssistantMessage(t("Paused. Say 'AURA resume' to continue.", "تم الإيقاف المؤقت. قل 'أورا استمر' للمتابعة."));
             } else if (msg.command === 'resume') {
-              setAssistantMessage("Resuming...");
+              setAssistantMessage(t("Resuming...", "جاري المتابعة..."));
             }
             break;
 
@@ -300,17 +423,17 @@ function App() {
             break;
 
           case 'proactive_prompt':
-            setAssistantMessage(msg.spoken_text || msg.text);
-            setOrbState("speaking");
-            screenReader.speak(msg.spoken_text || msg.text, {
-              onComplete: () => setOrbState("idle")
-            });
+            setThinkingSteps([]);
+            setIsThinking(false);
+            setClarificationResponseToId(null);
+            setAssistantMessage(extractReadableText(msg.spoken_text || msg.text));
+            speakAssistantResponse(msg.spoken_text || msg.text, userLanguage);
             break;
 
           case 'error':
             setThinkingSteps([]);
             setIsThinking(false);
-            setAssistantMessage(msg.detail || "An error occurred");
+            setAssistantMessage(msg.detail || t("An error occurred", "حدث خطأ"));
             setOrbState("idle");
             break;
 
@@ -362,25 +485,29 @@ function App() {
         if (data.action === 'thinking_clear') {
           setThinkingSteps([]);
           setIsThinking(false);
+          stopThinkingSpeech();
           return;
         }
 
         if (data.step) {
-          setThinkingSteps(prev => [...prev, data.step]);
+          const localizedStep = translateThinkingStep(data.step);
+          setThinkingSteps(prev => [...prev, localizedStep]);
           setIsThinking(true);
-          if (vocalizeStepRef.current) vocalizeStepRef.current(data.step);
+          if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         } else if (Array.isArray(data.steps)) {
-          setThinkingSteps(data.steps);
-          setIsThinking(data.steps.length > 0);
+          const localizedSteps = data.steps.map(translateThinkingStep);
+          setThinkingSteps(localizedSteps);
+          setIsThinking(localizedSteps.length > 0);
           // Speak only the last step from batch
-          if (data.steps.length > 0 && vocalizeStepRef.current) vocalizeStepRef.current(data.steps[data.steps.length - 1]);
+          if (localizedSteps.length > 0 && vocalizeStepRef.current) vocalizeStepRef.current(localizedSteps[localizedSteps.length - 1]);
         }
       } catch (err) {
         console.warn("[UI] Non-JSON SSE payload:", event.data);
         if (event.data && typeof event.data === 'string' && event.data.trim().length > 0) {
-          setThinkingSteps(prev => [...prev, event.data]);
+          const localizedStep = translateThinkingStep(event.data);
+          setThinkingSteps(prev => [...prev, localizedStep]);
           setIsThinking(true);
-          if (vocalizeStepRef.current) vocalizeStepRef.current(event.data);
+          if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         }
       }
     };
@@ -400,24 +527,34 @@ function App() {
   /* ---------- VOCALIZE THINKING STEP (local TTS) ---------- */
   const vocalizeStep = useCallback((text) => {
     if (!vocalizeSteps || !text) return;
-    try {
-      // Cancel previous step utterance so they don't queue up
-      window.speechSynthesis.cancel();
-      const isArabic = /[\u0600-\u06FF]/.test(text);
-      const lang = isArabic ? 'ar' : (userLanguage || 'en');
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = lang === 'ar' ? 'ar-SA' : 'en-US';
-      utterance.rate = 1.2;
-      utterance.volume = 0.7;
-      const voices = window.speechSynthesis.getVoices();
-      const matchVoice = voices.find(v => v.lang.startsWith(lang)) || voices[0];
-      if (matchVoice) utterance.voice = matchVoice;
-      window.speechSynthesis.speak(utterance);
-      console.log(`[TTS-Step] Speaking: "${text}" (${lang})`);
-    } catch (e) {
-      console.warn('[TTS-Step] Failed:', e);
+    if (thinkingSpeechQueueRef.current[thinkingSpeechQueueRef.current.length - 1] !== text) {
+      thinkingSpeechQueueRef.current.push(text);
     }
-  }, [vocalizeSteps, userLanguage]);
+
+    if (thinkingSpeechRunningRef.current) return;
+
+    thinkingSpeechRunningRef.current = true;
+    (async () => {
+      try {
+        while (thinkingSpeechQueueRef.current.length > 0) {
+          const nextStep = thinkingSpeechQueueRef.current.shift();
+          const lang = isArabicText(nextStep) ? "ar" : (userLanguage || "en");
+          await screenReader.speak(nextStep, {
+            onStart: () => {
+              const voices = window.speechSynthesis.getVoices();
+              const matchVoice = voices.find(v => v.lang.startsWith(lang)) || voices[0];
+              if (matchVoice) screenReader.setVoice(matchVoice);
+            },
+          });
+          lastSpokenStepRef.current += 1;
+        }
+      } catch (e) {
+        console.warn("[TTS-Step] Failed:", e);
+      } finally {
+        thinkingSpeechRunningRef.current = false;
+      }
+    })();
+  }, [isArabicText, userLanguage, vocalizeSteps]);
 
   // Keep ref in sync so WS/SSE closures always use the latest
   useEffect(() => { vocalizeStepRef.current = vocalizeStep; }, [vocalizeStep]);
@@ -500,7 +637,12 @@ function App() {
 
     setThinkingSteps([]);
     setIsThinking(true);
-    const steps = ["Searching...", "Analyzing...", "Processing...", "Responding..."];
+    const steps = [
+      t("Searching...", "جاري البحث..."),
+      t("Analyzing...", "جاري التحليل..."),
+      t("Processing...", "جاري المعالجة..."),
+      t("Responding...", "جاري تجهيز الرد...")
+    ];
     
     for (let i = 0; i < steps.length; i++) {
       setThinkingSteps(prev => [...prev, steps[i]]);
@@ -552,7 +694,7 @@ function App() {
       recorder.start();
       setIsRecording(true);
       setOrbState("listening");
-      setUserMessage("Listening...");
+      setUserMessage(t("Listening...", "أستمع الآن..."));
 
       // Silence detection using Web Audio API
       try {
@@ -599,7 +741,7 @@ function App() {
       }
     } catch (error) {
       console.error("[Audio] Microphone access failed:", error);
-      setAssistantMessage("Microphone access denied");
+      setAssistantMessage(t("Microphone access denied", "تم رفض الوصول إلى الميكروفون"));
     }
   };
 
@@ -621,7 +763,7 @@ function App() {
   const processAudio = async (blob) => {
     try {
       setOrbState("processing");
-      setUserMessage("Processing...");
+      setUserMessage(t("Processing...", "جاري المعالجة..."));
       console.log("[STT] Transcribing audio...");
 
       const reader = new FileReader();
@@ -648,13 +790,14 @@ function App() {
         }
 
         console.log(`[STT] Transcript: "${data.transcript}"`);
+        rememberUserLanguageFromText(data.transcript);
         setUserMessage(data.transcript);
         await processText(data.transcript);
       };
     } catch (error) {
       console.error("[STT] Error:", error);
       setOrbState("idle");
-      setAssistantMessage("Transcription failed");
+      setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
     }
   };
 
@@ -674,7 +817,7 @@ function App() {
     } catch (error) {
       console.error("[UI] Text submit error:", error);
       setOrbState("idle");
-      setAssistantMessage("Failed to send message");
+      setAssistantMessage(t("Failed to send message", "فشل إرسال الرسالة"));
     }
   };
 
@@ -701,6 +844,11 @@ function App() {
     
     // Immediately stop local TTS if speaking
     if (command === 'stop') {
+      audioRef.current?.pause?.();
+      if (audioRef.current) {
+        audioRef.current.currentTime = 0;
+      }
+      stopThinkingSpeech();
       screenReader.stop();
     } else if (command === 'pause') {
       screenReader.pause();
@@ -728,20 +876,21 @@ function App() {
         }),
       }).catch(err => console.warn('[Interrupt] HTTP fallback failed:', err));
     }
-  }, [sessionId, userId, deviceType]);
+  }, [sessionId, userId, deviceType, stopThinkingSpeech]);
 
   /* ---------- READ ALOUD FULL CONTENT ---------- */
   const handleReadAloud = useCallback(() => {
-    if (structuredResponse?.full_content) {
+    const readableContent = extractReadableText(structuredResponse?.full_content);
+    if (readableContent) {
       setOrbState("speaking");
-      screenReader.speak(structuredResponse.full_content, {
+      screenReader.speak(readableContent, {
         onProgress: (current, total) => {
           console.log(`[TTS] Reading sentence ${current}/${total}`);
         },
         onComplete: () => setOrbState("idle")
       });
     }
-  }, [structuredResponse]);
+  }, [extractReadableText, structuredResponse]);
 
   /* ---------- TEXT → AGENT ---------- */
   const processText = async (text) => {
@@ -774,14 +923,16 @@ function App() {
       ) {
         console.log("[Agent] Settings request detected");
         setShowSettings(true);
-        setAssistantMessage("Opening settings for you");
+        setAssistantMessage(t("Opening settings for you", "جاري فتح الإعدادات لك"));
         return;
       }
 
+      rememberUserLanguageFromText(text);
+
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
 
-      // Enter transparent execution mode during processing
-      setExecutionMode("transparent");
+      // Enter transparent execution mode during processing — but keep widget mode if already in it
+      setExecutionMode(prev => prev === "widget" ? "widget" : "transparent");
 
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -828,27 +979,21 @@ function App() {
         if (data.status === "clarification_needed") {
           setClarificationResponseToId(data.response_id);
           setAssistantMessage(data.question);
-          setOrbState("speaking");
-          screenReader.speak(data.question, {
-            onComplete: () => setOrbState("idle")
-          });
+          rememberUserLanguageFromText(data.question);
+          speakAssistantResponse(data.question, userLanguage);
         } else {
-          const responseText = data.text || data.result?.response || data.result || "Task completed";
+          const responseText = data.text || data.result?.response || data.result || t("Task completed", "تم تنفيذ المهمة بنجاح");
+          const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
           setClarificationResponseToId(null);
-          setAssistantMessage(responseText);
-          setOrbState("speaking");
-          screenReader.speak(responseText, {
-            onComplete: () => {
-              setOrbState("idle");
-              setExecutionMode("normal");
-            }
-          });
+          setAssistantMessage(cleanResponseText);
+          rememberUserLanguageFromText(cleanResponseText);
+          speakAssistantResponse(cleanResponseText, userLanguage);
         }
       }
     } catch (error) {
       console.error("[Agent] Error:", error);
       setOrbState("idle");
-      setAssistantMessage("Backend error");
+      setAssistantMessage(t("Backend error", "خطأ في الخادم"));
       setThinkingSteps([]);
       setIsThinking(false);
       setExecutionMode("normal");
@@ -858,11 +1003,16 @@ function App() {
   /* ---------- STOP SEQUENCE ---------- */
   const handleStopSequence = () => {
     console.log("[System] Executing stop sequence");
+    audioRef.current?.pause?.();
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+    }
+    stopThinkingSpeech();
     screenReader.stop(); // Stop client-side TTS
     stopRecording();
     setOrbState("idle");
     setUserMessage("");
-    setAssistantMessage("Stop sequence initiated");
+    setAssistantMessage(t("Stop sequence initiated", "تم بدء إيقاف التنفيذ"));
     setIsRecording(false);
     setChatMode(false);
     setShowSettings(false);
@@ -999,10 +1149,10 @@ function App() {
             <div className="widget-status-text">
               {isExecuting
                 ? (isThinking
-                    ? (thinkingSteps.length > 0 ? thinkingSteps[thinkingSteps.length - 1] : "Thinking...")
+                    ? (thinkingSteps.length > 0 ? thinkingSteps[thinkingSteps.length - 1] : t("Thinking...", "جاري التفكير..."))
                     : assistantMessage
                       ? (assistantMessage.length > 40 ? assistantMessage.slice(0, 40) + "…" : assistantMessage)
-                      : "Processing...")
+                      : t("Processing...", "جاري المعالجة..."))
                 : "AURA"}
             </div>
           </div>
@@ -1014,7 +1164,7 @@ function App() {
                 <input
                   className="widget-text-input"
                   type="text"
-                  placeholder="Ask AURA..."
+                  placeholder={t("Ask AURA...", "اسأل أورا...")}
                   value={widgetText}
                   onChange={(e) => setWidgetText(e.target.value)}
                   onKeyDown={(e) => {
@@ -1096,9 +1246,9 @@ function App() {
                 <button 
                   className="read-aloud-btn"
                   onClick={handleReadAloud}
-                  title="Read full content aloud"
+                  title={t("Read full content aloud", "قراءة المحتوى كاملًا بصوت عالٍ")}
                 >
-                  🔊 Read Aloud
+                  {t("🔊 Read Aloud", "🔊 قراءة بصوت عالٍ")}
                 </button>
               )}
             </div>

@@ -252,6 +252,7 @@ class TaskQueue:
 
 # Global task queue
 task_queue = TaskQueue()
+coordinator_processing_lock = asyncio.Lock()
 
 # Track pending results
 pending_results: Dict[str, asyncio.Future] = {}
@@ -848,6 +849,36 @@ def create_coordinator_graph():
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
         user_id = state.get("user_id", "default_user")
+
+        def _extract_readable_text(raw):
+            if raw is None:
+                return ""
+            if isinstance(raw, str):
+                cleaned = raw.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
+                if not cleaned:
+                    return ""
+                if (cleaned.startswith("{") and cleaned.endswith("}")) or (cleaned.startswith("[") and cleaned.endswith("]")):
+                    try:
+                        parsed = json.loads(cleaned)
+                        return _extract_readable_text(parsed)
+                    except Exception:
+                        return cleaned
+                return cleaned
+            if isinstance(raw, list):
+                return "\n\n".join([_extract_readable_text(item) for item in raw if _extract_readable_text(item)])
+            if isinstance(raw, dict):
+                for key in ["content", "text", "response", "message", "summary", "full_content", "result"]:
+                    if raw.get(key):
+                        extracted = _extract_readable_text(raw.get(key))
+                        if extracted:
+                            return extracted
+                details = raw.get("details")
+                if isinstance(details, list):
+                    joined = "\n\n".join([_extract_readable_text(d) for d in details if _extract_readable_text(d)])
+                    if joined:
+                        return joined
+                return ""
+            return str(raw)
         
         success_count = sum(1 for r in results.values() if r.status == "success")
         total_count = len(results)
@@ -869,12 +900,27 @@ def create_coordinator_graph():
             if len(state["conversation_history"]) > 10:
                 state["conversation_history"] = state["conversation_history"][-10:]
         
+        original_request = state["input"].get("confirmation", state["input"].get("action", ""))
+        is_arabic = bool(re.search(r"[\u0600-\u06FF]", original_request or ""))
+
         if success_count == total_count and total_count > 0:
-            response_text = f"Task completed successfully! Executed {success_count} steps."
+            response_text = (
+                f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
+                if is_arabic else
+                f"Task completed successfully! Executed {success_count} steps."
+            )
         elif success_count > 0:
-            response_text = f"Partially completed: {success_count}/{total_count} steps succeeded."
+            response_text = (
+                f"تم تنفيذ المهمة جزئيًا: نجحت {success_count} من {total_count} خطوة."
+                if is_arabic else
+                f"Partially completed: {success_count}/{total_count} steps succeeded."
+            )
         else:
-            response_text = "Task could not be completed. Please try again."
+            response_text = (
+                "تعذر إكمال المهمة. حاول مرة أخرى."
+                if is_arabic else
+                "Task could not be completed. Please try again."
+            )
         
         # Build detailed content from task results
         detail_lines = []
@@ -883,7 +929,9 @@ def create_coordinator_graph():
             tid = task_obj.task_id if hasattr(task_obj, 'task_id') else task_obj.get('task_id', '')
             r = results.get(tid)
             if r and r.content:
-                detail_lines.append(r.content)
+                extracted_content = _extract_readable_text(r.content)
+                if extracted_content:
+                    detail_lines.append(extracted_content)
                 if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
                     has_reasoning_content = True
         
@@ -898,9 +946,19 @@ def create_coordinator_graph():
             resp_type = ResponseType.RESULT_WITH_CONTENT
         else:
             resp_type = ResponseType.SIMPLE_ACK
+
+        if is_arabic:
+            if has_reasoning_content and len(full_content) > 200:
+                response_text = f"{response_text} هل تريدني أن أقرأ النتائج بصوت عالٍ أم أشرحها باختصار؟"
+            else:
+                response_text = f"{response_text} هل تحتاج أي شيء آخر؟"
+        else:
+            if has_reasoning_content and len(full_content) > 200:
+                response_text = f"{response_text} Would you like me to read the results out loud or explain them briefly?"
+            else:
+                response_text = f"{response_text} Do you need anything else?"
         
         # Build StructuredResponse
-        original_request = state["input"].get("confirmation", state["input"].get("action", ""))
         structured = StructuredResponse(
             type=resp_type,
             spoken_text=response_text,
@@ -1166,11 +1224,14 @@ async def start_coordinator_agent(broker_instance):
         except Exception:
             payload_json = str(message.payload)
         logger.info(f"📨 Coordinator received confirmation: {payload_summary} | full_payload: {payload_json}")
-
-        if task_queue.has_tasks() and not task_queue.is_stopped:
-            logger.info("📥 Adding task to global queue (currently executing)")
-            task_queue.add_to_global(message.payload)
-            return
+        was_queued = coordinator_processing_lock.locked()
+        if was_queued:
+            logger.info("📥 Another request is executing — waiting for coordinator lock")
+            await ThinkingStepManager.update_step(
+                session_id,
+                "⏳ Queued behind an ongoing task...",
+                http_request_id
+            )
         
         state_input = {
             "input": message.payload,
@@ -1186,22 +1247,23 @@ async def start_coordinator_agent(broker_instance):
             }
         }
 
-        # ✅ FIX 5: STEP 2 (before decomposition)
-        await ThinkingStepManager.update_step(
-            session_id, 
-            "🧠 Analyzing your request...", 
-            http_request_id
-        )
+        async with coordinator_processing_lock:
+            # ✅ FIX 5: STEP 2 (before decomposition)
+            await ThinkingStepManager.update_step(
+                session_id, 
+                "🧠 Analyzing your request...", 
+                http_request_id
+            )
 
-        result = await coordinator_graph.ainvoke(state_input, config)
-        logger.info(f"✅ Task processing complete: {result.get('status')}")
-        
-        # ✅ FIX 5: STEP 3
-        await ThinkingStepManager.update_step(
-            session_id, 
-            "📋 Creating execution plan...", 
-            http_request_id
-        )
+            result = await coordinator_graph.ainvoke(state_input, config)
+            logger.info(f"✅ Task processing complete: {result.get('status')}")
+            
+            # ✅ FIX 5: STEP 3
+            await ThinkingStepManager.update_step(
+                session_id, 
+                "📋 Creating execution plan...", 
+                http_request_id
+            )
     
     async def handle_action_result(message: AgentMessage):
         """

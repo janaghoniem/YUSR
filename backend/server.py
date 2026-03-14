@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 import base64
 import tempfile
 import time
@@ -561,17 +562,22 @@ async def handle_coordinator_output(message):
     if message.message_type == MessageType.TASK_RESPONSE:
         result = message.payload
         
-        # CHANGE 10A: Extract response text safely
-        response_text = result.get("response")
-        if not response_text:
-            # Fallback to result details
-            response_text = result.get("result", {}).get("details", "Task completed")
+        # Extract spoken text safely (never fall back to raw details JSON)
+        response_text = result.get("response") or "Task completed"
+        
+        # Extract structured response if present
+        structured_response = result.get("structured_response")
+        
+        # Prefer spoken_text from structured response over raw text
+        if structured_response and structured_response.get("spoken_text"):
+            response_text = structured_response["spoken_text"]
         
         response = {
             "status": result.get("status", "completed"),
             "task_id": message.task_id,
             "text": response_text,  # This goes to TTS
-            "result": result
+            "result": result,
+            "structured_response": structured_response,  # Forward for WS structured delivery
         }
         
         logger.info(f"✅ Task completed, sending to TTS: '{response_text}'")
@@ -667,7 +673,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # Route thinking updates
             if payload.get("action") == "thinking_update":
                 await ws_manager.send_to_session(session_id, {
-                    "type": "thinking",
+                    "type": "thinking_step",
                     "step": payload.get("step", "")
                 })
             elif payload.get("action") == "thinking_clear":
@@ -806,11 +812,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         await ThinkingStepManager.clear_steps(session_id)
                         
                         # Detect structured response
-                        ws_response = {"type": "response_complete"}
+                        ws_response = {"type": "completion"}
                         if isinstance(response, dict):
                             if response.get("status") == "clarification_needed":
                                 ws_response = {
-                                    "type": "clarification_needed",
+                                    "type": "clarification",
                                     "question": response.get("question", ""),
                                     "response_id": response.get("response_id", "")
                                 }
@@ -818,19 +824,24 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 # Check for structured response with proactive prompts
                                 structured = response.get("structured_response")
                                 if structured:
+                                    spoken = structured.get("spoken_text", response.get("text", "Task completed"))
                                     ws_response = {
-                                        "type": "proactive_prompt" if structured.get("offer_read_aloud") else "response_complete",
-                                        "text": structured.get("spoken_text", response.get("text", "Task completed")),
+                                        "type": "completion",
+                                        "spoken_text": spoken,
+                                        "text": spoken,
                                         "full_content": structured.get("full_content", ""),
                                         "offer_read_aloud": structured.get("offer_read_aloud", False),
                                         "offer_actions": structured.get("offer_actions", []),
+                                        "structured_response": structured,
                                         "status": response.get("status", "completed"),
                                         "task_id": response.get("task_id"),
                                     }
                                 else:
+                                    spoken = response.get("text", "Task completed")
                                     ws_response = {
-                                        "type": "response_complete",
-                                        "text": response.get("text", "Task completed"),
+                                        "type": "completion",
+                                        "spoken_text": spoken,
+                                        "text": spoken,
                                         "status": response.get("status", "completed"),
                                         "task_id": response.get("task_id"),
                                     }

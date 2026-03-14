@@ -78,26 +78,37 @@ Your goal is correctness, clarity, and usefulness to the system."""
         
         # ✅ FIX 3: Validate content exists
         if not content or content == "":
-            logger.error("❌ No content to process!")
-            logger.error(f"   ai_prompt: {ai_prompt}")
-            logger.error(f"   extra_params: {json.dumps(extra_params, indent=2)}")
-            return {
-                "task_id": task_payload.get("task_id"),
-                "status": "failed",
-                "error": "No input content provided for reasoning task",
-                "content": ""
-            }
+            # Check if this looks like a data-processing task that truly needs input
+            data_keywords = ["summarize", "analyze", "analyse", "review", "translate",
+                             "extract", "check", "fix", "debug", "explain this", "describe this"]
+            needs_data = any(kw in ai_prompt.lower() for kw in data_keywords)
+            if needs_data:
+                logger.warning(f"⚠️ Data-processing task with no content — attempting with prompt only")
+            else:
+                logger.info(f"📝 Standalone generation task — no input data required")
+            # Either way, proceed — DATA TO PROCESS section will be omitted from the prompt
         
         try:
             logger.info(f"🧠 Reasoning Agent processing task: {ai_prompt[:50]}...")
-            logger.info(f"📊 Content preview: {content[:200]}...")
+            if content:
+                logger.info(f"📊 Content preview: {content[:200]}...")
             
-            full_prompt = f"""{self.system_prompt}
+            # Build prompt: include DATA section only when content is available
+            if content:
+                full_prompt = f"""{self.system_prompt}
 
     TASK: {ai_prompt}
 
     DATA TO PROCESS:
     {content}
+
+    EXTRA PARAMETERS: {json.dumps(extra_params)}
+
+    Please respond with valid JSON only."""
+            else:
+                full_prompt = f"""{self.system_prompt}
+
+    TASK: {ai_prompt}
 
     EXTRA PARAMETERS: {json.dumps(extra_params)}
 

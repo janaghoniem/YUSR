@@ -52,19 +52,17 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Store pending responses (for HTTP API)
 pending_responses = {}
 
-# Store chat metadata (minimal tracking for sidebar)
-# Format: {user_id: {session_id: {"title": str, "timestamp": int}}}
-chat_metadata = {}
+# Initialize Google Gemini API client using new SDK
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_KEY:
+    logger.warning("❌ GEMINI_API_KEY not set - Gemini services may not work")
 
-# Initialize Groq Client for TTS and STT
-# PUT YOUR GROQ API KEY IN YOUR .env FILE AS: GROQ_API_KEY=your_key_here
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    logger.warning("⚠️ GROQ_API_KEY not set - speech services will not work")
-    groq_client = None
-else:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-    logger.info("✅ Groq client initialized for TTS and STT")
+try:
+    genai_client = genai.Client(api_key=GEMINI_KEY)
+    logger.info("✅ Google Gemini client initialized")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize Gemini client: {e}")
+    genai_client = None
 
 
 @asynccontextmanager
@@ -344,15 +342,6 @@ async def create_new_session(request: Request):
         else:
             logger.info(f"ℹ️ No active agent found for {agent_key}")
         
-        # Initialize metadata for new session
-        if user_id not in chat_metadata:
-            chat_metadata[user_id] = {}
-        
-        chat_metadata[user_id][new_session_id] = {
-            "title": "New Chat",
-            "timestamp": int(time.time())
-        }
-        
         # ✅ FIX: Send session control message to Coordinator to clear LangGraph checkpoint
         try:
             session_control_msg = AgentMessage(
@@ -542,25 +531,11 @@ async def handle_coordinator_output(message):
             # Fallback to result details
             response_text = result.get("result", {}).get("details", "Task completed")
         
-        # Extract chat title if present (from first message)
-        chat_title = result.get("chat_title")
-        
-        # Update chat metadata if title is provided
-        if chat_title:
-            user_id = result.get("user_id", "test_user")
-            session_id = message.session_id
-            if user_id not in chat_metadata:
-                chat_metadata[user_id] = {}
-            if session_id in chat_metadata[user_id]:
-                chat_metadata[user_id][session_id]["title"] = chat_title
-                logger.info(f"✅ Updated chat title for {session_id}: '{chat_title}'")
-        
         response = {
             "status": result.get("status", "completed"),
             "task_id": message.task_id,
             "text": response_text,  # This goes to TTS
-            "result": result,
-            "chat_title": chat_title  # Include title in response
+            "result": result
         }
         
         logger.info(f"✅ Task completed, sending to TTS: '{response_text}'")
@@ -642,16 +617,13 @@ async def thinking_stream(session_id: str):
         thinking_queue = asyncio.Queue()
         
         async def handle_thinking_update(message):
-            # Ensure we only process messages for THIS session
-            msg_session = getattr(message, 'session_id', None)
-            if msg_session == session_id:
-                payload = getattr(message, 'payload', {})
-                if isinstance(payload, dict):
-                    await thinking_queue.put(payload)
+            if hasattr(message, 'session_id') and message.session_id == session_id:
+                if hasattr(message, 'payload'):
+                    # Forward the entire payload so clients can react to different actions
+                    await thinking_queue.put(message.payload)
         
         # Subscribe to broadcast channel
         broker.subscribe(Channels.BROADCAST, handle_thinking_update)
-        logger.info(f"🔌 Client connected to thinking stream: {session_id}")
         
         try:
             while True:
@@ -666,24 +638,16 @@ async def thinking_stream(session_id: str):
         except GeneratorExit:
             logger.info(f"🔌 Client disconnected from thinking stream: {session_id}")
         except Exception as e:
-            logger.error(f"❌ Thinking stream error for {session_id}: {e}")
-        finally:
-            # Ensure we properly unsubscribe
-            try:
-                broker.unsubscribe(Channels.BROADCAST, handle_thinking_update)
-                logger.info(f"🔌 Unsubscribed handler for session: {session_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Error during unsubscribe: {e}")
+            logger.error(f"❌ Thinking stream error: {e}")
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/new-chat")
-async def new_chat_endpoint(request: Request):
-    """Handle new chat creation - clear session state and track new chat"""
+async def new_chat_endpoint(request: dict):
+    """Handle new chat creation - clear session state"""
     try:
-        data = await request.json()
-        session_id = data.get("session_id")
-        user_id = data.get("user_id", "test_user")
+        session_id = request.get("session_id")
+        user_id = request.get("user_id", "test_user")
         
         logger.info(f"🔄 New chat requested - clearing session: {session_id}")
         
@@ -697,74 +661,11 @@ async def new_chat_endpoint(request: Request):
         else:
             logger.info(f"ℹ️ No active agent found for {agent_key}")
         
-        # Initialize new chat metadata (will be updated when first message completes)
-        if user_id not in chat_metadata:
-            chat_metadata[user_id] = {}
-        
-        chat_metadata[user_id][session_id] = {
-            "title": "New Chat",
-            "timestamp": int(time.time())
-        }
-        
-        logger.info(f"📝 Initialized chat metadata for {session_id}")
-        
-        return {
-            "status": "success", 
-            "message": "New chat started",
-            "session_id": session_id,
-            "title": "New Chat"
-        }
+        return {"status": "success", "message": "New chat started", "session_id": session_id}
         
     except Exception as e:
         logger.error(f"❌ New chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/chats/{user_id}")
-async def get_chats(user_id: str):
-    """Get list of all chats for a user"""
-    try:
-        user_chats = chat_metadata.get(user_id, {})
-        chats_list = [
-            {
-                "session_id": sid,
-                "title": data.get("title", "Chat"),
-                "timestamp": data.get("timestamp", 0)
-            }
-            for sid, data in user_chats.items()
-        ]
-        # Sort by timestamp descending (newest first)
-        chats_list.sort(key=lambda x: x["timestamp"], reverse=True)
-        
-        logger.info(f"📋 Retrieved {len(chats_list)} chats for user {user_id}")
-        return {"chats": chats_list}
-        
-    except Exception as e:
-        logger.error(f"❌ Error getting chats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/update-chat-title")
-async def update_chat_title(request: Request):
-    """Update chat title (called when first message generates title)"""
-    try:
-        data = await request.json()
-        session_id = data.get("session_id")
-        user_id = data.get("user_id", "test_user")
-        title = data.get("title", "Chat")
-        
-        if user_id not in chat_metadata:
-            chat_metadata[user_id] = {}
-        
-        if session_id in chat_metadata[user_id]:
-            chat_metadata[user_id][session_id]["title"] = title
-            logger.info(f"✅ Updated chat title: {session_id} → '{title}'")
-        
-        return {"status": "success", "title": title}
-        
-    except Exception as e:
-        logger.error(f"❌ Error updating chat title: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "message": str(e)}, 500
 
 if __name__ == "__main__":
     import uvicorn

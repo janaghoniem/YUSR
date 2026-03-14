@@ -218,10 +218,19 @@ async def text_to_speech(request: Request):
                 logger.info("🌐 Detected language: English")
         else:
             logger.info(f"🌐 Using specified language: {lang}")
+
+        normalized_lang = (lang or "").lower().strip()
+        tld = "com"
+        if normalized_lang.startswith("ar"):
+            lang = "ar"
+            tld = "com.eg"
+        elif normalized_lang.startswith("en"):
+            lang = "en"
+            tld = "com"
         
         # Generate TTS with gTTS
         # slow=False for natural speed
-        tts = gTTS(text=text, lang=lang, slow=False)
+        tts = gTTS(text=text, lang=lang, tld=tld, slow=False)
         
         # Save to temporary file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_audio:
@@ -571,13 +580,43 @@ async def handle_coordinator_output(message):
         # Prefer spoken_text from structured response over raw text
         if structured_response and structured_response.get("spoken_text"):
             response_text = structured_response["spoken_text"]
+        follow_up_question = result.get("follow_up_question")
+        has_follow_up_question = bool(follow_up_question and str(follow_up_question).strip())
+
+        user_language = result.get("user_language") or (structured_response or {}).get("user_language")
+
+        try:
+            from agents.language_agent import get_agent_for_session
+            agent = get_agent_for_session(message.session_id)
+            if agent:
+                expects_reply = bool(
+                    result.get("status") == "clarification_needed"
+                    or has_follow_up_question
+                    or (structured_response and structured_response.get("offer_read_aloud"))
+                    or response_text.strip().endswith("?")
+                )
+                agent.remember_assistant_output(
+                    follow_up_question if has_follow_up_question else response_text,
+                    expects_reply=expects_reply,
+                    metadata={
+                        "structured_response": structured_response,
+                        "status": result.get("status"),
+                    }
+                )
+                if user_language:
+                    agent.preferred_language = user_language
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to sync coordinator response into language session memory: {e}")
         
         response = {
-            "status": result.get("status", "completed"),
+            "status": "clarification_needed" if has_follow_up_question else result.get("status", "completed"),
             "task_id": message.task_id,
             "text": response_text,  # This goes to TTS
+            "question": follow_up_question if has_follow_up_question else (response_text if result.get("status") == "clarification_needed" else None),
+            "response_id": message.message_id if has_follow_up_question else None,
             "result": result,
             "structured_response": structured_response,  # Forward for WS structured delivery
+            "user_language": user_language,
         }
         
         logger.info(f"✅ Task completed, sending to TTS: '{response_text}'")
@@ -815,10 +854,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         ws_response = {"type": "completion"}
                         if isinstance(response, dict):
                             if response.get("status") == "clarification_needed":
+                                structured = response.get("structured_response") or {}
                                 ws_response = {
                                     "type": "clarification",
                                     "question": response.get("question", ""),
-                                    "response_id": response.get("response_id", "")
+                                    "response_id": response.get("response_id", ""),
+                                    "user_language": response.get("user_language"),
+                                    "text": response.get("text", ""),
+                                    "spoken_text": response.get("text", ""),
+                                    "structured_response": structured,
+                                    "full_content": structured.get("full_content", ""),
+                                    "offer_read_aloud": structured.get("offer_read_aloud", False),
+                                    "offer_actions": structured.get("offer_actions", []),
                                 }
                             else:
                                 # Check for structured response with proactive prompts
@@ -835,6 +882,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                         "structured_response": structured,
                                         "status": response.get("status", "completed"),
                                         "task_id": response.get("task_id"),
+                                        "user_language": response.get("user_language") or structured.get("user_language"),
                                     }
                                 else:
                                     spoken = response.get("text", "Task completed")
@@ -844,6 +892,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                         "text": spoken,
                                         "status": response.get("status", "completed"),
                                         "task_id": response.get("task_id"),
+                                        "user_language": response.get("user_language"),
                                     }
                         
                         await ws_manager.send_to_session(session_id, ws_response)
@@ -910,10 +959,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         ws_resp = {"type": "response_complete"}
                         if isinstance(response, dict):
                             if response.get("status") == "clarification_needed":
+                                structured = response.get("structured_response") or {}
                                 ws_resp = {
                                     "type": "clarification_needed",
                                     "question": response.get("question", ""),
-                                    "response_id": response.get("response_id", "")
+                                    "response_id": response.get("response_id", ""),
+                                    "user_language": response.get("user_language"),
+                                    "text": response.get("text", ""),
+                                    "spoken_text": response.get("text", ""),
+                                    "structured_response": structured,
+                                    "full_content": structured.get("full_content", ""),
+                                    "offer_read_aloud": structured.get("offer_read_aloud", False),
+                                    "offer_actions": structured.get("offer_actions", []),
                                 }
                             else:
                                 structured = response.get("structured_response")

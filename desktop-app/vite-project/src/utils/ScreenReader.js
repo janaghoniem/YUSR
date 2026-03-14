@@ -94,9 +94,25 @@ class ScreenReader {
    * @returns {'ar'|'en'}
    */
   _detectLanguage(text) {
-    const arabicPattern = /[\u0600-\u06FF\u0750-\u077F]/;
+    const arabicPattern = /[\u0600-\u06FF\u0750-\u077F]/g;
     const arabicChars = (text.match(arabicPattern) || []).length;
     return arabicChars > text.length * 0.3 ? 'ar' : 'en';
+  }
+
+  _selectBestVoice(lang) {
+    const voices = this.getVoices(lang);
+    if (!voices || voices.length === 0) return null;
+
+    const preferredNames = lang === 'ar'
+    ? ['Google Arabic', 'Microsoft Hoda', 'Egypt', 'Arabic']
+    : ['Google US English', 'Microsoft Aria', 'Microsoft Jenny', 'Microsoft Zira', 'Samantha', 'Daniel'];
+
+    for (const nameHint of preferredNames) {
+      const found = voices.find(v => (v.name || '').toLowerCase().includes(nameHint.toLowerCase()));
+      if (found) return found;
+    }
+
+    return voices.find(v => v.default) || voices[0] || null;
   }
 
   /**
@@ -129,8 +145,7 @@ class ScreenReader {
       const lang = this._detectLanguage(text);
       let voice = this._voice;
       if (!voice) {
-        const voices = this.getVoices(lang);
-        voice = voices.find(v => v.default) || voices[0] || null;
+        voice = this._selectBestVoice(lang);
       }
 
       // Create utterances for each sentence
@@ -140,7 +155,7 @@ class ScreenReader {
         utterance.pitch = this._pitch;
         utterance.volume = this._volume;
         if (voice) utterance.voice = voice;
-        utterance.lang = lang === 'ar' ? 'ar-SA' : 'en-US';
+        utterance.lang = lang === 'ar' ? 'ar-EG' : 'en-US';
 
         utterance.onstart = () => {
           if (index === 0 && this.onStart) this.onStart();

@@ -47,6 +47,56 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize MongoDB checkpointer: {e}")
     checkpointer = None
 
+def detect_language_code(text: str, fallback: str = "en") -> str:
+    if not text:
+        return fallback
+    return "ar" if re.search(r"[\u0600-\u06FF]", text) else "en"
+
+def extract_json_payload(text: str, default):
+    if text is None:
+        return default
+    candidate = str(text).strip()
+    if candidate.startswith("```"):
+        parts = candidate.split("```")
+        candidate = parts[1] if len(parts) > 1 else candidate
+        candidate = candidate.strip()
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
+
+    try:
+        return json.loads(candidate)
+    except Exception:
+        pass
+
+    patterns = [r"\[.*\]", r"\{.*\}"]
+    for pattern in patterns:
+        match = re.search(pattern, candidate, re.DOTALL)
+        if not match:
+            continue
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            continue
+    return default
+
+async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    if not checkpointer or not session_id:
+        return False
+    kwargs = {
+        "config": {"configurable": {"thread_id": session_id, "checkpoint_ns": ""}},
+        "checkpoint": checkpoint_value,
+        "metadata": metadata or {}
+    }
+    try:
+        await checkpointer.aput(**kwargs)
+        return True
+    except TypeError as e:
+        if "new_versions" not in str(e):
+            raise
+        kwargs["new_versions"] = {}
+        await checkpointer.aput(**kwargs)
+        return True
+
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -177,9 +227,104 @@ class ActionTask(BaseModel):
 class TaskResult(BaseModel):
     """Result from action/reasoning layer"""
     task_id: str
-    status: Literal["success", "failed", "pending"]
+    status: Literal["success", "failed", "pending", "awaiting_confirmation"]
     content: Optional[str] = None
     error: Optional[str] = None
+    details: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    needs_clarification: bool = False
+    clarification_question: Optional[str] = None
+    clarification_type: Optional[str] = None
+    recoverable: bool = False
+
+
+def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Optional[Dict[str, Any]]:
+    """Build a normalized clarification event from execution result if needed."""
+    if result.needs_clarification:
+        return {
+            "task_id": task.task_id,
+            "task_prompt": task.ai_prompt,
+            "clarification_type": result.clarification_type or "unknown",
+            "question": result.clarification_question or "I need clarification to continue.",
+            "recoverable": bool(result.recoverable),
+            "metadata": result.metadata or {},
+            "error": result.error,
+        }
+
+    combined = " ".join(filter(None, [result.error, result.details, result.content])).lower()
+    if not combined:
+        return None
+
+    if any(k in combined for k in ["account picker", "choose account", "select account"]):
+        return {
+            "task_id": task.task_id,
+            "task_prompt": task.ai_prompt,
+            "clarification_type": "account_selection",
+            "question": "I found an account selection screen. Which account should I choose?",
+            "recoverable": True,
+            "metadata": result.metadata or {},
+            "error": result.error,
+        }
+
+    if any(k in combined for k in ["captcha", "verification code", "2fa", "otp"]):
+        return {
+            "task_id": task.task_id,
+            "task_prompt": task.ai_prompt,
+            "clarification_type": "security_verification",
+            "question": "I need your help to complete a verification step on screen. Please complete it, then tell me to continue.",
+            "recoverable": False,
+            "metadata": result.metadata or {},
+            "error": result.error,
+        }
+
+    if any(k in combined for k in ["permission", "allow", "deny access", "popup", "dialog", "modal"]):
+        return {
+            "task_id": task.task_id,
+            "task_prompt": task.ai_prompt,
+            "clarification_type": "permission_or_popup",
+            "question": "An unexpected popup appeared. Should I allow it, close it, or stop?",
+            "recoverable": True,
+            "metadata": result.metadata or {},
+            "error": result.error,
+        }
+
+    return None
+
+
+def _decide_execution_clarification_action(task: ActionTask, event: Dict[str, Any]) -> Dict[str, Any]:
+    """Decide whether to self-resolve, ask user, or fail safely."""
+    clarification_type = event.get("clarification_type")
+    recoverable = bool(event.get("recoverable"))
+
+    if clarification_type == "account_selection":
+        explicit_email = (task.extra_params or {}).get("email")
+        if explicit_email:
+            return {
+                "decision": "self_resolve",
+                "action_prompt": f"Select account {explicit_email} and continue",
+                "reason": "Account selection has explicit user email",
+            }
+        return {
+            "decision": "ask_user",
+            "reason": "Account choice not explicit",
+        }
+
+    if clarification_type == "security_verification":
+        return {
+            "decision": "ask_user",
+            "reason": "Security verification must be completed by user",
+        }
+
+    if recoverable:
+        return {
+            "decision": "ask_user",
+            "reason": "Recoverable ambiguity requires user intent",
+        }
+
+    return {
+        "decision": "fail_safely",
+        "reason": "Unrecoverable execution state",
+    }
 
 # --- Queue Management (unchanged) ---
 class TaskQueue:
@@ -679,7 +824,7 @@ def create_coordinator_graph():
             if checkpointer and session_id:
                 try:
                     checkpoint_data = await checkpointer.aget(
-                        config={"configurable": {"thread_id": session_id}}
+                        config={"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}
                     )
                     if checkpoint_data and "execution_state" in checkpoint_data:
                         previous_execution_state = checkpoint_data["execution_state"]
@@ -688,7 +833,7 @@ def create_coordinator_graph():
                     logger.debug(f"No previous execution state: {e}")
             
             preferences_context = pref_mgr.get_relevant_preferences(
-                str(raw_task.get("confirmation", "")), limit=5
+                str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
             )
         except Exception as e:
             logger.warning(f"⚠️ Could not retrieve preferences: {e}")
@@ -750,6 +895,7 @@ def create_coordinator_graph():
         
         results = {}
         task_outputs = {}
+        clarification_event = None
 
         if checkpointer and session_id:
             try:
@@ -759,10 +905,10 @@ def create_coordinator_graph():
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
-                await checkpointer.aput(
-                    config={"configurable": {"thread_id": session_id}},
-                    checkpoint={"execution_state": execution_state},
-                    metadata = {"type": "task_progress"}
+                await save_checkpoint_compat(
+                    session_id,
+                    {"execution_state": execution_state},
+                    {"type": "task_progress"}
                 )
                 logger.info(f"💾 Saved task progress")
             except Exception as e:
@@ -830,6 +976,43 @@ def create_coordinator_graph():
                 else:
                     logger.warning(f"⚠️ Task {current_task.task_id} produced empty output after cleaning")
 
+            event = _extract_execution_clarification(current_task, result)
+            if event:
+                decision = _decide_execution_clarification_action(current_task, event)
+                event["decision"] = decision.get("decision")
+                event["decision_reason"] = decision.get("reason")
+                logger.warning(
+                    f"⚠️ Clarification event on {current_task.task_id}: {event['clarification_type']} -> {event['decision']}"
+                )
+
+                if decision.get("decision") == "self_resolve":
+                    action_prompt = decision.get("action_prompt")
+                    if action_prompt:
+                        resolve_task = ActionTask(
+                            task_id=f"{current_task.task_id}_resolve",
+                            ai_prompt=action_prompt,
+                            device=current_task.device,
+                            context=current_task.context,
+                            extra_params=current_task.extra_params or {},
+                            web_params=current_task.web_params or {},
+                            target_agent="action",
+                            depends_on=current_task.task_id,
+                        )
+                        logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
+                        resolve_result = await execute_single_task(resolve_task, session_id, original_message_id)
+                        results[resolve_task.task_id] = resolve_result
+                        task_queue.log_execution(resolve_task, resolve_result)
+
+                        if resolve_result.status == "success":
+                            logger.info("✅ Self-resolution succeeded, continuing workflow")
+                            continue
+                        event["decision"] = "ask_user"
+                        event["decision_reason"] = "Self-resolution failed"
+
+                if event.get("decision") in {"ask_user", "fail_safely"}:
+                    clarification_event = event
+                    break
+
                 
             if result.status == "failed":
                 logger.error(f"❌ Task {current_task.task_id} failed: {result.error}")
@@ -838,6 +1021,7 @@ def create_coordinator_graph():
         return {
             **state,
             "results": results,
+            "execution_clarification": clarification_event,
             "status": "completed",
             "session_id": session_id,
             "original_message_id": original_message_id
@@ -846,6 +1030,7 @@ def create_coordinator_graph():
     async def send_feedback(state: Dict) -> Dict:
         """STEP 3: Send results to Language Agent"""
         results = state.get("results", {})
+        execution_clarification = state.get("execution_clarification")
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
         user_id = state.get("user_id", "default_user")
@@ -889,8 +1074,7 @@ def create_coordinator_graph():
                 state["conversation_history"] = []
             
             state["conversation_history"].append({
-                # Prefer the 'confirmation' payload from the Language Agent; fall back to 'action' for compatibility
-                "user_message": state['input'].get('confirmation', state['input'].get('action', '')),
+                "user_message": state['input'].get('original_input', state['input'].get('confirmation', state['input'].get('action', ''))),
                 "action_taken": f"Executed {success_count} tasks",
                 "result": "success" if success_count == total_count else "partial",
                 "timestamp": datetime.now().isoformat()
@@ -900,8 +1084,69 @@ def create_coordinator_graph():
             if len(state["conversation_history"]) > 10:
                 state["conversation_history"] = state["conversation_history"][-10:]
         
-        original_request = state["input"].get("confirmation", state["input"].get("action", ""))
-        is_arabic = bool(re.search(r"[\u0600-\u06FF]", original_request or ""))
+        original_request = state["input"].get("original_input", state["input"].get("confirmation", state["input"].get("action", "")))
+        user_language = state["input"].get("user_language") or detect_language_code(original_request)
+        is_arabic = user_language == "ar"
+
+        if execution_clarification:
+            decision = execution_clarification.get("decision")
+            if decision == "ask_user":
+                question = execution_clarification.get("question") or (
+                    "I need clarification to continue." if not is_arabic else "أحتاج توضيحًا للمتابعة."
+                )
+                response_payload = {
+                    "status": "clarification_needed",
+                    "response": question,
+                    "user_language": user_language,
+                    "clarification": execution_clarification,
+                }
+                response_msg = AgentMessage(
+                    message_type=MessageType.TASK_RESPONSE,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload=response_payload,
+                )
+                await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
+                await broker.publish(
+                    Channels.WEBSOCKET_OUTPUT,
+                    AgentMessage(
+                        message_type=MessageType.CLARIFICATION_REQUEST,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=original_message_id,
+                        payload={
+                            "ws_type": "clarification_needed",
+                            "question": question,
+                            "user_language": user_language,
+                            "clarification": execution_clarification,
+                        },
+                    ),
+                )
+                return {"status": "clarification_needed"}
+
+            fail_text = (
+                "تعذّر إكمال المهمة بأمان بسبب حالة غير متوقعة."
+                if is_arabic else
+                "I couldn't complete the task safely due to an unexpected state."
+            )
+            response_msg = AgentMessage(
+                message_type=MessageType.TASK_RESPONSE,
+                sender=AgentType.COORDINATOR,
+                receiver=AgentType.LANGUAGE,
+                session_id=session_id,
+                response_to=original_message_id,
+                payload={
+                    "status": "failed",
+                    "response": fail_text,
+                    "user_language": user_language,
+                    "clarification": execution_clarification,
+                },
+            )
+            await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
+            return {"status": "failed"}
 
         if success_count == total_count and total_count > 0:
             response_text = (
@@ -947,16 +1192,28 @@ def create_coordinator_graph():
         else:
             resp_type = ResponseType.SIMPLE_ACK
 
-        if is_arabic:
-            if has_reasoning_content and len(full_content) > 200:
-                response_text = f"{response_text} هل تريدني أن أقرأ النتائج بصوت عالٍ أم أشرحها باختصار؟"
-            else:
-                response_text = f"{response_text} هل تحتاج أي شيء آخر؟"
-        else:
-            if has_reasoning_content and len(full_content) > 200:
-                response_text = f"{response_text} Would you like me to read the results out loud or explain them briefly?"
-            else:
-                response_text = f"{response_text} Do you need anything else?"
+        follow_up_question = None
+        if success_count == 0:
+            follow_up_question = (
+                "المهمة ما كملتش. تحب أحاول تاني؟"
+                if is_arabic else
+                "The task didn't complete. Would you like me to try again?"
+            )
+        elif success_count < total_count:
+            follow_up_question = (
+                "تم التنفيذ جزئيًا. تحب أحاول أكمل الخطوات اللي فشلت؟"
+                if is_arabic else
+                "It was only partially completed. Would you like me to retry the failed steps?"
+            )
+        elif has_reasoning_content and len(full_content) > 200:
+            follow_up_question = (
+                "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
+                if is_arabic else
+                "Would you like me to read the results out loud or explain them briefly?"
+            )
+
+        if follow_up_question:
+            response_text = f"{response_text} {follow_up_question}"
         
         # Build StructuredResponse
         structured = StructuredResponse(
@@ -977,6 +1234,8 @@ def create_coordinator_graph():
             payload={
                 "status": "success" if success_count > 0 else "failed",
                 "response": response_text,
+                "user_language": user_language,
+                "follow_up_question": follow_up_question,
                 "structured_response": structured.model_dump(),
                 "result": {
                     "completed_tasks": {k: v.status for k, v in results.items()},
@@ -995,7 +1254,10 @@ def create_coordinator_graph():
             receiver=AgentType.LANGUAGE,
             session_id=session_id,
             response_to=original_message_id,
-            payload=structured.model_dump()
+            payload={
+                **structured.model_dump(),
+                "user_language": user_language,
+            }
         )
         await broker.publish(Channels.WEBSOCKET_OUTPUT, ws_msg)
         
@@ -1006,7 +1268,7 @@ def create_coordinator_graph():
                 
                 task_summary = {
                     # Prefer confirmation from Language Agent for a faithful representation of the user's intent
-                    "original_request": state['input'].get('confirmation', state['input'].get('action', '')),
+                    "original_request": state['input'].get('original_input', state['input'].get('confirmation', state['input'].get('action', ''))),
                     "completed_steps": [t.ai_prompt for t in state['tasks']],
                     "total_steps": total_count
                 }
@@ -1036,14 +1298,7 @@ Extract now:"""
                 
                 extraction_response = await llm.ainvoke(extraction_prompt)
                 extraction_text = extraction_response.content if hasattr(extraction_response, 'content') else str(extraction_response)
-
-                extraction_text = extraction_text.strip()
-                if extraction_text.startswith("```"):
-                    extraction_text = extraction_text.split("```")[1]
-                    if extraction_text.startswith("json"):
-                        extraction_text = extraction_text[4:]
-
-                preferences_to_store = json.loads(extraction_text.strip())
+                preferences_to_store = extract_json_payload(extraction_text, [])
                 
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
@@ -1185,7 +1440,26 @@ async def execute_single_task(
     # Wait for result
     try:
         result_payload = await asyncio.wait_for(future, timeout=60)
-        return TaskResult(**result_payload)
+        payload_status = result_payload.get("status", "failed")
+        if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
+            payload_status = "failed"
+
+        content = result_payload.get("content")
+        if not content:
+            content = result_payload.get("details")
+
+        return TaskResult(
+            task_id=task.task_id,
+            status=payload_status,
+            content=content,
+            error=result_payload.get("error"),
+            details=result_payload.get("details"),
+            metadata=result_payload.get("metadata") or {},
+            needs_clarification=bool(result_payload.get("needs_clarification", False)),
+            clarification_question=result_payload.get("clarification_question"),
+            clarification_type=result_payload.get("clarification_type"),
+            recoverable=bool(result_payload.get("recoverable", False)),
+        )
     except asyncio.TimeoutError:
         logger.error(f"⏰ Task {task.task_id} timeout after 60 seconds")
         return TaskResult(
@@ -1386,11 +1660,7 @@ async def start_coordinator_agent(broker_instance):
         
         if command == "start_new_chat":
             try:
-                await checkpointer.aput(
-                    config={"configurable": {"thread_id": session_id}},
-                    checkpoint=None,
-                    metadata={"cleared": True}
-                )
+                await save_checkpoint_compat(session_id, None, {"cleared": True})
                 logger.info(f"🗑️ Cleared session history for {session_id}")
             except Exception as e:
                 logger.error(f"❌ Failed to clear session: {e}")

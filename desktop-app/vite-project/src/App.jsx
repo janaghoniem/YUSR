@@ -80,6 +80,7 @@ function App() {
 
   // Detected user language — set on first voice interaction, persists for session
   const [userLanguage, setUserLanguage] = useState(() => localStorage.getItem("userLanguage") || null);
+  const userLanguageRef = useRef(localStorage.getItem("userLanguage") || null);
   // Whether to vocalize thinking steps
   const [vocalizeSteps, setVocalizeSteps] = useState(true);
   // Ref to track the last spoken step index (avoid re-speaking)
@@ -88,6 +89,10 @@ function App() {
   const vocalizeStepRef = useRef(null);
   const thinkingSpeechQueueRef = useRef([]);
   const thinkingSpeechRunningRef = useRef(false);
+  const wakeWatchdogRef = useRef(null);
+  const silenceFrameRef = useRef(null);
+  const noSpeechTimeoutRef = useRef(null);
+  const userSpokeRef = useRef(false);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -105,30 +110,48 @@ function App() {
 
   const rememberUserLanguageFromText = useCallback((text) => {
     const detected = detectLanguageFromText(text);
-    if (!userLanguage && detected) {
+    if (detected && (detected === "ar" || !userLanguage)) {
+      userLanguageRef.current = detected;
       setUserLanguage(detected);
       localStorage.setItem("userLanguage", detected);
     }
     return detected;
   }, [detectLanguageFromText, userLanguage]);
 
+  useEffect(() => {
+    userLanguageRef.current = userLanguage;
+  }, [userLanguage]);
+
+  const normalizeThinkingStep = useCallback((step) => {
+    return (step || "")
+      .toLowerCase()
+      .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")
+      .replace(/[.]{3,}/g, "")
+      .replace(/[!؟?]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }, []);
+
   const translateThinkingStep = useCallback((step) => {
-    if (!step || userLanguage !== "ar") return step;
-    const normalized = step.trim().toLowerCase();
+    if (!step || userLanguageRef.current !== "ar") return step;
+    const normalized = normalizeThinkingStep(step);
     const map = {
-      "processing input...": "جاري معالجة الإدخال...",
-      "analyzing your request...": "جاري تحليل طلبك...",
-      "checking your preferences...": "جاري التحقق من تفضيلاتك...",
-      "processing your request...": "جاري تنفيذ طلبك...",
-      "preparing for coordinator...": "جاري التحضير للتنفيذ...",
-      "searching...": "جاري البحث...",
-      "analyzing...": "جاري التحليل...",
-      "processing...": "جاري المعالجة...",
-      "responding...": "جاري تجهيز الرد...",
-      "thinking...": "جاري التفكير..."
+      "processing input": "جاري معالجة الإدخال...",
+      "analyzing your request": "جاري تحليل طلبك...",
+      "checking your preferences": "جاري التحقق من تفضيلاتك...",
+      "processing your request": "جاري تنفيذ طلبك...",
+      "preparing for coordinator": "جاري التحضير للمنسق...",
+      "received your request": "استلمت طلبك...",
+      "preparing tasks": "جاري تجهيز الخطوات...",
+      "creating execution plan": "جاري إنشاء خطة التنفيذ...",
+      "searching": "جاري البحث...",
+      "analyzing": "جاري التحليل...",
+      "processing": "جاري المعالجة...",
+      "responding": "جاري تجهيز الرد...",
+      "thinking": "جاري التفكير..."
     };
     return map[normalized] || step;
-  }, [userLanguage]);
+  }, [normalizeThinkingStep]);
 
   const extractReadableText = useCallback((value) => {
     if (value == null) return "";
@@ -178,7 +201,8 @@ function App() {
     const normalizedText = extractReadableText(text);
     if (!normalizedText) return;
 
-    const lang = languageHint || detectLanguageFromText(normalizedText) || "en";
+    const logicalLang = detectLanguageFromText(normalizedText) || languageHint || userLanguageRef.current || "en";
+    const lang = logicalLang.startsWith("ar") ? "ar-EG" : "en-US";
     rememberUserLanguageFromText(normalizedText);
 
     stopThinkingSpeech();
@@ -221,16 +245,16 @@ function App() {
   // Start wake-word listening — use a language that can hear both EN and AR
   const startWakeWordListening = useCallback(() => {
     if (!browserSupportsSpeechRecognition) return;
+    if (isRecording) return;
     try {
-      // Use empty string or a broad locale; Chrome will do best-effort multilingual detection.
-      // We cycle between en-US and ar-SA every 30s to catch both, OR use the user's detected lang.
-      const lang = userLanguage === 'ar' ? 'ar-SA' : 'en-US';
+      const lang = userLanguage === 'ar' ? 'ar-EG' : 'en-US';
+      try { SpeechRecognition.stopListening(); } catch (e) {}
       SpeechRecognition.startListening({ continuous: true, language: lang, interimResults: true });
       console.log(`[Wake] Listening started (lang=${lang})`);
     } catch (e) {
       console.warn('[Wake] Failed to start listening:', e);
     }
-  }, [browserSupportsSpeechRecognition, userLanguage]);
+  }, [browserSupportsSpeechRecognition, userLanguage, isRecording]);
 
   // Ensure continuous listening starts on mount (if supported)
   useEffect(() => {
@@ -252,6 +276,28 @@ function App() {
       try { SpeechRecognition.stopListening(); } catch (e) {}
     };
   }, [browserSupportsSpeechRecognition, startWakeWordListening]);
+
+  useEffect(() => {
+    if (!browserSupportsSpeechRecognition) return;
+    if (wakeWatchdogRef.current) {
+      clearInterval(wakeWatchdogRef.current);
+      wakeWatchdogRef.current = null;
+    }
+
+    wakeWatchdogRef.current = setInterval(() => {
+      if (!isRecording && !listening) {
+        console.log("[Wake] Watchdog restarting speech recognition");
+        startWakeWordListening();
+      }
+    }, 2500);
+
+    return () => {
+      if (wakeWatchdogRef.current) {
+        clearInterval(wakeWatchdogRef.current);
+        wakeWatchdogRef.current = null;
+      }
+    };
+  }, [browserSupportsSpeechRecognition, isRecording, listening, startWakeWordListening]);
 
   // Detect wake word AND interrupt commands in speech (always active, even during processing)
   useEffect(() => {
@@ -291,7 +337,7 @@ function App() {
         startRecording();
       }
     }
-  }, [interimTranscript, finalTranscript, transcript]);
+  }, [interimTranscript, finalTranscript, transcript, isRecording, orbState, resetTranscript, userLanguage]);
 
   /* ---------- DEVICE DETECTION & RESPONSIVE LAYOUT ---------- */
   useEffect(() => {
@@ -365,8 +411,12 @@ function App() {
             setIsThinking(false);
             setClarificationResponseToId(msg.response_id);
             setAssistantMessage(msg.question);
+            if (msg.user_language) {
+              setUserLanguage(msg.user_language);
+              localStorage.setItem("userLanguage", msg.user_language);
+            }
             rememberUserLanguageFromText(msg.question);
-            speakAssistantResponse(msg.question, userLanguage);
+            speakAssistantResponse(msg.question, msg.user_language || userLanguage);
             break;
 
           case 'completion':
@@ -380,6 +430,10 @@ function App() {
             const responseText = msg.spoken_text || msg.response || msg.text || t("Task completed", "تم تنفيذ المهمة بنجاح");
             const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
             setAssistantMessage(cleanResponseText);
+            if (msg.user_language) {
+              setUserLanguage(msg.user_language);
+              localStorage.setItem("userLanguage", msg.user_language);
+            }
             rememberUserLanguageFromText(cleanResponseText);
 
             // Handle structured response
@@ -390,7 +444,7 @@ function App() {
               setOfferReadAloud(sr.offer_read_aloud === true && !!cleanFullContent);
             }
 
-            speakAssistantResponse(cleanResponseText, userLanguage);
+            speakAssistantResponse(cleanResponseText, msg.user_language || userLanguage);
             break;
           }
 
@@ -674,6 +728,15 @@ function App() {
         console.log(`[Audio] Recording stopped. Size: ${blob.size} bytes`);
         stream.getTracks().forEach((t) => t.stop());
 
+        if (silenceFrameRef.current) {
+          cancelAnimationFrame(silenceFrameRef.current);
+          silenceFrameRef.current = null;
+        }
+        if (noSpeechTimeoutRef.current) {
+          clearTimeout(noSpeechTimeoutRef.current);
+          noSpeechTimeoutRef.current = null;
+        }
+
         // Stop and clear audio context if used
         if (audioContextRef.current) {
           try { audioContextRef.current.close(); } catch (e) {}
@@ -695,6 +758,17 @@ function App() {
       setIsRecording(true);
       setOrbState("listening");
       setUserMessage(t("Listening...", "أستمع الآن..."));
+      userSpokeRef.current = false;
+
+      if (noSpeechTimeoutRef.current) {
+        clearTimeout(noSpeechTimeoutRef.current);
+      }
+      noSpeechTimeoutRef.current = setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording' && !userSpokeRef.current) {
+          console.log('[Audio] No speech detected in first 5s, finalizing input');
+          mediaRecorderRef.current.stop();
+        }
+      }, 5000);
 
       // Silence detection using Web Audio API
       try {
@@ -717,6 +791,9 @@ function App() {
             sum += v * v;
           }
           const rms = Math.sqrt(sum / bufferLength);
+          if (rms >= 0.02) {
+            userSpokeRef.current = true;
+          }
           if (rms < 0.01) {
             if (silentStart === null) silentStart = Date.now();
             else if (Date.now() - silentStart > 5000) {
@@ -729,13 +806,13 @@ function App() {
             silentStart = null;
           }
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            requestAnimationFrame(checkSilence);
+            silenceFrameRef.current = requestAnimationFrame(checkSilence);
           } else {
             try { audioCtx.close(); } catch (e) {}
           }
         };
 
-        requestAnimationFrame(checkSilence);
+        silenceFrameRef.current = requestAnimationFrame(checkSilence);
       } catch (e) {
         console.warn('[Audio] Silence detection not available:', e);
       }
@@ -750,6 +827,14 @@ function App() {
       console.log("[Audio] Stopping recording...");
       mediaRecorderRef.current.stop();
       setIsRecording(false);
+    }
+    if (silenceFrameRef.current) {
+      cancelAnimationFrame(silenceFrameRef.current);
+      silenceFrameRef.current = null;
+    }
+    if (noSpeechTimeoutRef.current) {
+      clearTimeout(noSpeechTimeoutRef.current);
+      noSpeechTimeoutRef.current = null;
     }
   };
 
@@ -896,9 +981,96 @@ function App() {
   const processText = async (text) => {
     try {
       console.log("[Agent] Processing input:", text);
+      const rawText = text || "";
+      const normalized = rawText.trim();
+
+      rememberUserLanguageFromText(normalized);
+
+      const isAffirmative = (value) => {
+        const v = (value || "").trim().toLowerCase();
+        return ["yes", "yeah", "yep", "sure", "ok", "okay", "نعم", "ايوه", "أيوا", "تمام", "موافق"].includes(v);
+      };
+
+      const isReadAloudIntent = (value) => {
+        const v = (value || "").trim().toLowerCase();
+        const normalizedArabic = v
+          .replace(/أ|إ|آ/g, "ا")
+          .replace(/ى/g, "ي")
+          .replace(/ة/g, "ه")
+          .replace(/\s+/g, " ")
+          .trim();
+        return [
+          "read them out loud",
+          "read it out loud",
+          "read them aloud",
+          "read it aloud",
+          "read aloud",
+          "read the results",
+          "say it out loud",
+          "read results out loud",
+          "read the response out loud",
+          "read this out loud",
+          "read that out loud",
+          "explain it",
+          "explain the results",
+          "اقرأها بصوت عالي",
+          "اقراها بصوت عالي",
+          "اقرأهم بصوت عالي",
+          "اقراهم بصوت عالي",
+          "اقرا النتائج بصوت عالي",
+          "اقرأ النتائج بصوت عالي",
+          "اقرا النتايج بصوت عالي",
+          "اقرأ النتايج بصوت عالي",
+          "اقرأها بصوت عال",
+          "اقراها بصوت عال",
+          "اقرأهم بصوت عال",
+          "اقراهم بصوت عال",
+          "اقرأها لي",
+          "اقراها لي",
+          "اقرأهم لي",
+          "اقراهم لي",
+          "اقراها",
+          "اقراهم",
+          "اقرا النتائج",
+          "اشرحها",
+          "اشرح النتائج"
+        ].some((phrase) => {
+          const p = phrase
+            .toLowerCase()
+            .replace(/أ|إ|آ/g, "ا")
+            .replace(/ى/g, "ي")
+            .replace(/ة/g, "ه")
+            .replace(/\s+/g, " ")
+            .trim();
+          return normalizedArabic === p || normalizedArabic.includes(p);
+        });
+      };
+
+      if (offerReadAloud && structuredResponse?.full_content && isReadAloudIntent(normalized)) {
+        setClarificationResponseToId(null);
+        handleReadAloud();
+        setAssistantMessage(t("Reading the results now.", "حسنًا، سأقرأ النتائج الآن."));
+        return;
+      }
+
+      if (isAffirmative(normalized)) {
+        if (offerReadAloud && structuredResponse?.full_content) {
+          setClarificationResponseToId(null);
+          handleReadAloud();
+          setAssistantMessage(t("Reading the results now.", "حسنًا، سأقرأ النتائج الآن."));
+          return;
+        }
+
+        const followUpPrompt = userLanguage === "ar"
+          ? "تمام، ماذا تريد أن أفعل بعد ذلك؟"
+          : "Sure — what would you like me to do next?";
+        setAssistantMessage(followUpPrompt);
+        await speakAssistantResponse(followUpPrompt, userLanguage || detectLanguageFromText(followUpPrompt));
+        return;
+      }
 
       // Check for interrupt commands in text input too
-      const lowerText = text.toLowerCase().trim();
+      const lowerText = normalized.toLowerCase();
       for (const [phrase, command] of Object.entries(INTERRUPT_COMMANDS)) {
         if (lowerText.includes(phrase) || lowerText === command) {
           console.log(`[Agent] Interrupt command in text: "${phrase}" → ${command}`);
@@ -926,9 +1098,6 @@ function App() {
         setAssistantMessage(t("Opening settings for you", "جاري فتح الإعدادات لك"));
         return;
       }
-
-      rememberUserLanguageFromText(text);
-
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
 
       // Enter transparent execution mode during processing — but keep widget mode if already in it
@@ -977,17 +1146,28 @@ function App() {
         setIsThinking(false);
 
         if (data.status === "clarification_needed") {
+          const sr = data.structured_response || null;
+          if (sr) {
+            const cleanFullContent = extractReadableText(sr.full_content || sr.content || sr.result || "");
+            setStructuredResponse({ ...sr, full_content: cleanFullContent });
+            setOfferReadAloud(sr.offer_read_aloud === true && !!cleanFullContent);
+          }
+          if (data.user_language) {
+            userLanguageRef.current = data.user_language;
+            setUserLanguage(data.user_language);
+            localStorage.setItem("userLanguage", data.user_language);
+          }
           setClarificationResponseToId(data.response_id);
           setAssistantMessage(data.question);
           rememberUserLanguageFromText(data.question);
-          speakAssistantResponse(data.question, userLanguage);
+          speakAssistantResponse(data.question, data.user_language || userLanguageRef.current || detectLanguageFromText(data.question));
         } else {
           const responseText = data.text || data.result?.response || data.result || t("Task completed", "تم تنفيذ المهمة بنجاح");
           const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
           setClarificationResponseToId(null);
           setAssistantMessage(cleanResponseText);
           rememberUserLanguageFromText(cleanResponseText);
-          speakAssistantResponse(cleanResponseText, userLanguage);
+          speakAssistantResponse(cleanResponseText, userLanguage || detectLanguageFromText(cleanResponseText));
         }
       }
     } catch (error) {

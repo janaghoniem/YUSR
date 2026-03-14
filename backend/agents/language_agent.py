@@ -4,11 +4,10 @@ language_agent.py - GROQ API VERSION - FIXED JSON PARSING
 """
 
 import os, re, json, uuid, time, sys
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
 import asyncio
 import logging
 from groq import Groq
-from typing import List, Dict
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from agents.utils.protocol import AgentMessage, MessageType, AgentType, ClarificationMessage
@@ -42,6 +41,18 @@ def append_jsonl(path: str, obj: dict):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+def detect_language_code(text: str, fallback: str = "en") -> str:
+    if not text:
+        return fallback
+    return "ar" if re.search(r"[\u0600-\u06FF]", text) else "en"
+
+def contains_target_language(text: str, lang: str) -> bool:
+    if not text:
+        return False
+    if lang == "ar":
+        return bool(re.search(r"[\u0600-\u06FF]", text))
+    return bool(re.search(r"[A-Za-z]", text))
+
 # -----------------------
 # Groq API Call
 # -----------------------
@@ -69,6 +80,12 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
 # SYSTEM PROMPT
 # -----------------------
 SYSTEM_PROMPT = """You are a Conversational Clarity Agent. Your role is to determine if a user's request is a "Question" (to be answered) or a "Task" (to be executed).
+
+### LANGUAGE CONSISTENCY (MANDATORY)
+- Detect the language of the user's latest message (Arabic or English).
+- Always write `response_text` in that same language.
+- If the user starts in Arabic, do NOT switch to English unless the user explicitly switches.
+- Keep mixed-language app names/commands exactly as spoken (e.g., "افتح calculator").
 
 ### CORE PRINCIPLE
 Ask clarification questions ONLY when missing information makes task execution impossible. If reasonable defaults exist or the task can proceed without the information, mark it complete immediately.
@@ -163,6 +180,8 @@ class LanguageAgent:
         self.save_path = CONV_SAVE_PATH
         self.tasks_path = TASKS_SAVE_PATH
         self.system_prompt = {"role": "system", "content": SYSTEM_PROMPT}
+        self.preferred_language = "en"
+        self.awaiting_user_response = None
         
         # Initialize MongoDB client for persistent storage
         try:
@@ -205,6 +224,8 @@ class LanguageAgent:
             
             if doc and "messages" in doc:
                 messages = doc["messages"]
+                self.preferred_language = doc.get("preferred_language") or self._infer_language_from_messages(messages)
+                self.awaiting_user_response = doc.get("awaiting_user_response")
                 logger.info(f"✅ Loaded {len(messages)} messages from session {self.session_id}")
                 
                 if not messages or messages[0].get("role") != "system":
@@ -217,6 +238,78 @@ class LanguageAgent:
         except Exception as e:
             logger.error(f"❌ Failed to load conversation: {e}")
             return [self.system_prompt]
+
+    def _infer_language_from_messages(self, messages: List[Dict[str, str]]) -> str:
+        for msg in reversed(messages or []):
+            content = msg.get("content", "")
+            if not content or msg.get("role") == "system":
+                continue
+            if re.search(r"[\u0600-\u06FF]", content):
+                return "ar"
+        return "en"
+
+    def _remember_language(self, text: str) -> str:
+        detected = detect_language_code(text, self.preferred_language or "en")
+        if detected == "ar" or not self.preferred_language:
+            self.preferred_language = detected
+        elif self.preferred_language != "ar":
+            self.preferred_language = detected
+        return self.preferred_language or detected
+
+    def _build_turn_messages(self, current_lang: str) -> List[Dict[str, str]]:
+        messages = list(self.memory)
+        turn_instruction = {
+            "role": "system",
+            "content": (
+                f"For this turn, respond strictly in {'Arabic' if current_lang == 'ar' else 'English'}. "
+                "Keep app names, brand names, and commands exactly as the user said them. "
+                "Return strict JSON only."
+            )
+        }
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        messages.insert(insert_at, turn_instruction)
+        return messages
+
+    def _repair_response_language(self, response: str, user_text: str, target_lang: str) -> str:
+        repair_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You repair JSON responses. Return strict JSON only with the same schema. "
+                    "Rewrite only response_text into the requested language. Preserve original_task and personal_info."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Target language: {'Arabic' if target_lang == 'ar' else 'English'}\n"
+                    f"Original user input: {user_text}\n"
+                    f"Current JSON: {response}"
+                )
+            }
+        ]
+        repaired = call_groq_api(repair_messages, max_tokens=220)
+        return repaired or response
+
+    def remember_assistant_output(self, text: str, expects_reply: bool = False, metadata: Optional[Dict] = None):
+        clean_text = sanitize_text(text)
+        if not clean_text:
+            return
+        self._remember_language(clean_text)
+        self.memory.append({"role": "assistant", "content": clean_text})
+        if len(self.memory) > 21:
+            preserved = [self.memory[0]]
+            for msg in self.memory[1:]:
+                if msg.get("role") == "system" and "Previous Context" in msg.get("content", ""):
+                    preserved.append(msg)
+                    break
+            preserved.extend(self.memory[-20:])
+            self.memory = preserved
+        self.awaiting_user_response = {
+            "question": clean_text,
+            "metadata": metadata or {}
+        } if expects_reply else None
+        self.save_memory()
     
     def _save_conversation(self):
         """Save conversation to MongoDB"""
@@ -231,6 +324,8 @@ class LanguageAgent:
                 {
                     "$set": {
                         "messages": self.memory,
+                        "preferred_language": self.preferred_language,
+                        "awaiting_user_response": self.awaiting_user_response,
                         "timestamp": time.time(),
                         "last_updated": int(time.time())
                     }
@@ -249,14 +344,16 @@ class LanguageAgent:
                 "timestamp": int(time.time()),
                 "memory": self.memory,
                 "session_id": self.session_id,
-                "user_id": self.user_id
+                "user_id": self.user_id,
+                "preferred_language": self.preferred_language,
+                "awaiting_user_response": self.awaiting_user_response,
             })
         except Exception as e:
             logger.warning(f"⚠️ Failed to save to JSONL: {e}")
         
         self._save_conversation()
 
-    def parse_response(self, response: str) -> tuple:
+    def parse_response(self, response: str) -> Tuple[str, bool, Optional[str]]:
         """Parse LLM response to extract is_complete status and personal_info"""
         try:
             # FIX: Replace backslashes with forward slashes before parsing
@@ -280,14 +377,17 @@ class LanguageAgent:
                     return match.group(1), False, None
             except:
                 pass
-            return "I'm sorry, I didn't quite understand. Could you clarify?", False, None
+            fallback_text = "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟" if self.preferred_language == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+            return fallback_text, False, None
         except Exception as e:
             logger.warning(f"⚠️ Failed to parse response: {e}")
-            return "I'm sorry, I didn't quite understand. Could you clarify?", False, None
+            fallback_text = "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟" if self.preferred_language == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+            return fallback_text, False, None
 
     def user_turn(self, user_text: str) -> tuple:
         """Process user input and return response"""
         user_text = sanitize_text(user_text)
+        current_lang = self._remember_language(user_text)
         self.memory.append({"role": "user", "content": user_text})
         
         # if len(self.memory) > 21:
@@ -304,16 +404,26 @@ class LanguageAgent:
                     self.memory = preserved
         
         print("   🤔 Thinking...", end=" ", flush=True)
-        response = call_groq_api(self.memory, max_tokens=200)
+        response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=200)
         print("✓")
         
         if not response:
-            response_text = "I'm having trouble connecting right now. Please try again."
+            response_text = "أواجه مشكلة في الاتصال الآن. حاول مرة أخرى." if current_lang == "ar" else "I'm having trouble connecting right now. Please try again."
             return response_text, False, None
         
         response_text, is_complete, personal_info = self.parse_response(response)
 
+        if response_text and not contains_target_language(response_text, current_lang):
+            repaired_response = self._repair_response_language(response, user_text, current_lang)
+            if repaired_response != response:
+                response = repaired_response
+                response_text, is_complete, personal_info = self.parse_response(response)
+
         self.memory.append({"role": "assistant", "content": response})
+        self.awaiting_user_response = {
+            "question": response_text,
+            "source": "language_agent"
+        } if not is_complete else None
         self.save_memory()
         
         return response_text, is_complete, personal_info
@@ -326,6 +436,12 @@ class LanguageAgent:
 
 # Store active agents by session_id
 active_agents: Dict[str, LanguageAgent] = {}
+
+def get_agent_for_session(session_id: str) -> Optional[LanguageAgent]:
+    for key, agent in active_agents.items():
+        if key.endswith(f"_{session_id}"):
+            return agent
+    return None
 
 async def start_language_agent(broker):
     print("="*70)
@@ -366,6 +482,8 @@ async def start_language_agent(broker):
 
         # Get or create agent for this session
         agent = get_or_create_agent(session_id, user_id)
+        if hasattr(message, 'message_type') and message.message_type == MessageType.CLARIFICATION_RESPONSE:
+            agent.awaiting_user_response = None
 
         # Fetch Mem0 preferences
         try:
@@ -480,6 +598,8 @@ async def start_language_agent(broker):
                 response_to=http_request_id,
                 payload={
                     "confirmation": response, 
+                    "original_input": input_text,
+                    "user_language": agent.preferred_language,
                     "device_type": device_type,
                     "user_id": user_id,
                 }

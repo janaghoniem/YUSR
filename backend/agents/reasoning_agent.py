@@ -65,6 +65,8 @@ Your goal is correctness, clarity, and usefulness to the system."""
         ai_prompt = task_payload.get("ai_prompt", "Process the following content.")
         content = task_payload.get("content", "")
         extra_params = task_payload.get("extra_params", {})
+        explicit_lang = str(task_payload.get("user_language") or extra_params.get("language") or "en").lower().strip()
+        target_lang = "ar" if explicit_lang.startswith("ar") else "en"
         
         # ✅ FIX 1: Extract input_content from multiple sources
         if "input_content" in extra_params:
@@ -97,6 +99,8 @@ Your goal is correctness, clarity, and usefulness to the system."""
             if content:
                 full_prompt = f"""{self.system_prompt}
 
+    OUTPUT LANGUAGE REQUIREMENT: Return the `result` field strictly in {'Arabic' if target_lang == 'ar' else 'English'}.
+
     TASK: {ai_prompt}
 
     DATA TO PROCESS:
@@ -107,6 +111,8 @@ Your goal is correctness, clarity, and usefulness to the system."""
     Please respond with valid JSON only."""
             else:
                 full_prompt = f"""{self.system_prompt}
+
+    OUTPUT LANGUAGE REQUIREMENT: Return the `result` field strictly in {'Arabic' if target_lang == 'ar' else 'English'}.
 
     TASK: {ai_prompt}
 

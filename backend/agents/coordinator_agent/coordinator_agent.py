@@ -47,11 +47,6 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize MongoDB checkpointer: {e}")
     checkpointer = None
 
-def detect_language_code(text: str, fallback: str = "en") -> str:
-    if not text:
-        return fallback
-    return "ar" if re.search(r"[\u0600-\u06FF]", text) else "en"
-
 def extract_json_payload(text: str, default):
     if text is None:
         return default
@@ -889,6 +884,7 @@ def create_coordinator_graph():
         tasks = state["tasks"]
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
+        user_language = state.get("input", {}).get("user_language", "en")
         
         task_queue.reset()
         task_queue.add_to_current(tasks)
@@ -959,7 +955,7 @@ def create_coordinator_graph():
             
             # Execute task
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
-            result = await execute_single_task(current_task, session_id, original_message_id)
+            result = await execute_single_task(current_task, session_id, original_message_id, user_language)
             
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
@@ -999,7 +995,7 @@ def create_coordinator_graph():
                             depends_on=current_task.task_id,
                         )
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
-                        resolve_result = await execute_single_task(resolve_task, session_id, original_message_id)
+                        resolve_result = await execute_single_task(resolve_task, session_id, original_message_id, user_language)
                         results[resolve_task.task_id] = resolve_result
                         task_queue.log_execution(resolve_task, resolve_result)
 
@@ -1085,7 +1081,7 @@ def create_coordinator_graph():
                 state["conversation_history"] = state["conversation_history"][-10:]
         
         original_request = state["input"].get("original_input", state["input"].get("confirmation", state["input"].get("action", "")))
-        user_language = state["input"].get("user_language") or detect_language_code(original_request)
+        user_language = state["input"].get("user_language") or "en"
         is_arabic = user_language == "ar"
 
         if execution_clarification:
@@ -1352,7 +1348,8 @@ Extract now:"""
 async def execute_single_task(
     task: ActionTask,
     session_id: str,
-    original_message_id: str
+    original_message_id: str,
+    user_language: str = "en",
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
     
@@ -1418,6 +1415,15 @@ async def execute_single_task(
         channel = Channels.COORDINATOR_TO_REASONING
         receiver = AgentType.REASONING
     
+    task_payload = task.model_dump()
+    if task.target_agent == "reasoning":
+        task_payload["user_language"] = user_language
+        extra_params = task_payload.get("extra_params") or {}
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+        extra_params["language"] = user_language
+        task_payload["extra_params"] = extra_params
+
     # Create message
     task_msg = AgentMessage(
         message_type=MessageType.EXECUTION_REQUEST,
@@ -1426,7 +1432,7 @@ async def execute_single_task(
         session_id=session_id,
         task_id=task.task_id,
         response_to=original_message_id,
-        payload=task.model_dump()  # ← Also fix deprecated .dict() to .model_dump()
+        payload=task_payload
     )
     
     # Create future for response
@@ -1593,10 +1599,22 @@ async def start_coordinator_agent(broker_instance):
             # Save context snapshot before stopping for potential undo/resume
             try:
                 completed = [
-                    e["task"]["ai_prompt"] for e in task_queue.execution_history
+                    {
+                        "task_id": e["task"].get("task_id"),
+                        "ai_prompt": e["task"].get("ai_prompt"),
+                        "status": e["result"].get("status"),
+                    }
+                    for e in task_queue.execution_history
                     if e["result"]["status"] == "success"
                 ]
-                pending = [t.ai_prompt for t in list(task_queue.current_queue)]
+                pending = [
+                    {
+                        "task_id": t.task_id,
+                        "ai_prompt": t.ai_prompt,
+                        "target_agent": t.target_agent,
+                    }
+                    for t in list(task_queue.current_queue)
+                ]
                 
                 snapshot = ContextSnapshot(
                     session_id=message.session_id,
@@ -1604,7 +1622,7 @@ async def start_coordinator_agent(broker_instance):
                     original_request=message.payload.get("original_request", ""),
                     completed_tasks=completed,
                     pending_tasks=pending,
-                    current_task_state=task_queue.current_task_id,
+                    current_task_state={"task_id": task_queue.current_task_id} if task_queue.current_task_id else None,
                     execution_outputs={
                         e["task"]["task_id"]: e["result"].get("content", "")
                         for e in task_queue.execution_history

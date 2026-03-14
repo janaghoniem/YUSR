@@ -4,7 +4,7 @@ language_agent.py - GROQ API VERSION - FIXED JSON PARSING
 """
 
 import os, re, json, uuid, time, sys
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import asyncio
 import logging
 from groq import Groq
@@ -41,17 +41,12 @@ def append_jsonl(path: str, obj: dict):
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-def detect_language_code(text: str, fallback: str = "en") -> str:
-    if not text:
-        return fallback
-    return "ar" if re.search(r"[\u0600-\u06FF]", text) else "en"
-
-def contains_target_language(text: str, lang: str) -> bool:
-    if not text:
-        return False
-    if lang == "ar":
-        return bool(re.search(r"[\u0600-\u06FF]", text))
-    return bool(re.search(r"[A-Za-z]", text))
+def normalize_arabic(text: str) -> str:
+    t = (text or "").strip().lower()
+    t = t.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    t = re.sub(r"\s+", " ", t)
+    return t
 
 # -----------------------
 # Groq API Call
@@ -224,7 +219,7 @@ class LanguageAgent:
             
             if doc and "messages" in doc:
                 messages = doc["messages"]
-                self.preferred_language = doc.get("preferred_language") or self._infer_language_from_messages(messages)
+                self.preferred_language = doc.get("preferred_language") or "en"
                 self.awaiting_user_response = doc.get("awaiting_user_response")
                 logger.info(f"✅ Loaded {len(messages)} messages from session {self.session_id}")
                 
@@ -239,22 +234,12 @@ class LanguageAgent:
             logger.error(f"❌ Failed to load conversation: {e}")
             return [self.system_prompt]
 
-    def _infer_language_from_messages(self, messages: List[Dict[str, str]]) -> str:
-        for msg in reversed(messages or []):
-            content = msg.get("content", "")
-            if not content or msg.get("role") == "system":
-                continue
-            if re.search(r"[\u0600-\u06FF]", content):
-                return "ar"
-        return "en"
-
-    def _remember_language(self, text: str) -> str:
-        detected = detect_language_code(text, self.preferred_language or "en")
-        if detected == "ar" or not self.preferred_language:
-            self.preferred_language = detected
-        elif self.preferred_language != "ar":
-            self.preferred_language = detected
-        return self.preferred_language or detected
+    def set_preferred_language(self, lang: Optional[str]):
+        normalized = (lang or "").strip().lower()
+        if normalized.startswith("ar"):
+            self.preferred_language = "ar"
+        elif normalized.startswith("en"):
+            self.preferred_language = "en"
 
     def _build_turn_messages(self, current_lang: str) -> List[Dict[str, str]]:
         messages = list(self.memory)
@@ -290,6 +275,51 @@ class LanguageAgent:
         ]
         repaired = call_groq_api(repair_messages, max_tokens=220)
         return repaired or response
+
+    def resolve_contextual_follow_up(self, user_text: str) -> Optional[Dict[str, Any]]:
+        context = self.awaiting_user_response or {}
+        metadata = context.get("metadata") if isinstance(context, dict) else {}
+        if not isinstance(metadata, dict):
+            return None
+
+        structured = metadata.get("structured_response")
+        if not isinstance(structured, dict):
+            return None
+
+        text = normalize_arabic(user_text)
+        read_intents = [
+            "اقراها", "اقريها", "اقراهم", "اقريهم", "اقرا النتائج", "اقرا النتايج",
+            "اقراها بصوت عالي", "اقريها بصوت عالي", "اقراهم بصوت عالي", "اقريهم بصوت عالي",
+            "read it", "read them", "read it out loud", "read them out loud", "read aloud",
+            "read the results", "read results",
+        ]
+        explain_intents = ["اشرحها", "اشرح النتائج", "اشرح النتايج", "explain it", "explain the results"]
+
+        is_read = any(k in text for k in read_intents)
+        is_explain = any(k in text for k in explain_intents)
+
+        if not is_read and not is_explain:
+            return None
+
+        lang = self.preferred_language or "en"
+        if is_read:
+            response = "تمام، هاقرا النتائج حالًا." if lang == "ar" else "Sure, I'll read the results now."
+            return {
+                "status": "completed",
+                "response": response,
+                "structured_response": structured,
+                "followup_action": "read_aloud",
+                "user_language": lang,
+            }
+
+        response = "تمام، هاشرح النتائج باختصار." if lang == "ar" else "Sure, I'll explain the results briefly."
+        return {
+            "status": "completed",
+            "response": response,
+            "structured_response": structured,
+            "followup_action": "explain",
+            "user_language": lang,
+        }
 
     def remember_assistant_output(self, text: str, expects_reply: bool = False, metadata: Optional[Dict] = None):
         clean_text = sanitize_text(text)
@@ -387,7 +417,7 @@ class LanguageAgent:
     def user_turn(self, user_text: str) -> tuple:
         """Process user input and return response"""
         user_text = sanitize_text(user_text)
-        current_lang = self._remember_language(user_text)
+        current_lang = self.preferred_language or "en"
         self.memory.append({"role": "user", "content": user_text})
         
         # if len(self.memory) > 21:
@@ -412,12 +442,6 @@ class LanguageAgent:
             return response_text, False, None
         
         response_text, is_complete, personal_info = self.parse_response(response)
-
-        if response_text and not contains_target_language(response_text, current_lang):
-            repaired_response = self._repair_response_language(response, user_text, current_lang)
-            if repaired_response != response:
-                response = repaired_response
-                response_text, is_complete, personal_info = self.parse_response(response)
 
         self.memory.append({"role": "assistant", "content": response})
         self.awaiting_user_response = {
@@ -482,8 +506,22 @@ async def start_language_agent(broker):
 
         # Get or create agent for this session
         agent = get_or_create_agent(session_id, user_id)
-        if hasattr(message, 'message_type') and message.message_type == MessageType.CLARIFICATION_RESPONSE:
+        agent.set_preferred_language(payload_data.get("user_language"))
+
+        contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
+        if contextual_follow_up:
             agent.awaiting_user_response = None
+            agent.save_memory()
+            reply_msg = AgentMessage(
+                message_type=MessageType.TASK_RESPONSE,
+                sender=AgentType.LANGUAGE,
+                receiver=AgentType.LANGUAGE,
+                session_id=session_id,
+                response_to=http_request_id,
+                payload=contextual_follow_up,
+            )
+            await broker.publish(Channels.LANGUAGE_OUTPUT, reply_msg)
+            return
 
         # Fetch Mem0 preferences
         try:

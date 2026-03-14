@@ -26,7 +26,7 @@ class Mem0PreferenceManager:
             "vector_store": {
                 "provider": "mongodb",
                 "config": {
-                    "mongo_uri": MONGODB_URI,
+                    "MONGODB_URI": MONGODB_URI,
                     "db_name": "yusr_db",
                     "collection_name": "mem0_preferences",
                     "embedding_model_dims": 384

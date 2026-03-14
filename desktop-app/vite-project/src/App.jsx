@@ -6,6 +6,7 @@ import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
+import OnboardingPage from "./components/onboarding/OnboardingPage"; 
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
@@ -14,23 +15,24 @@ function App() {
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
-  // const [sessionId] = useState("test-123");
-  // ✅ USER ID - Generated ONCE per browser, persists forever
   const [userId] = useState(() => {
       const stored = localStorage.getItem("userId");
       if (stored) {
           console.log("[Auth] Using existing user ID:", stored);
           return stored;
       }
-      
       const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       localStorage.setItem("userId", newUserId);
       console.log("[Auth] Created new user ID:", newUserId);
       return newUserId;
   });
 
-  // ✅ SESSION ID - Generated ONCE per chat, persists until "New Chat" clicked
-  const [sessionId] = useState(() => {
+  // ✅ ONBOARDING GATE — true = show onboarding, false = go straight to app
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+      return localStorage.getItem("onboardingComplete") !== "true";
+  });
+  // ✅ SESSION ID - Can be changed when switching chats or creating new chat
+  const [sessionId, setSessionId] = useState(() => {
       const stored = localStorage.getItem("currentSessionId");
       if (stored) {
           console.log("[Session] Using existing session:", stored);
@@ -55,6 +57,8 @@ function App() {
   const [isThinking, setIsThinking] = useState(false);
   // True when server-provided SSE thinking stream is connected
   const [sseConnected, setSseConnected] = useState(false);
+  const [chats, setChats] = useState([]);
+  const [chatTitle, setChatTitle] = useState("New Chat");
 
   // WebSocket state
   const wsRef = useRef(null);
@@ -363,6 +367,25 @@ function App() {
     }
   }, []);
 
+  /* ---------- LOAD CHAT LIST ---------- */
+  useEffect(() => {
+    const loadChats = async () => {
+      try {
+        const response = await fetch(`http://localhost:8000/chats/${userId}`);
+        if (response.ok) {
+          const data = await response.json();
+          setChats(data.chats || []);
+          console.log("[Chats] Loaded", data.chats?.length || 0, "chats");
+        }
+      } catch (error) {
+        console.warn("[Chats] Failed to load chats:", error);
+      }
+    };
+    
+    loadChats();
+  }, [userId]);
+
+    /* ---------- CONNECT TO THINKING STREAM ---------- */
     /* ---------- CONNECT TO WEBSOCKET (primary) + SSE FALLBACK ---------- */
   const connectWebSocket = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
@@ -525,12 +548,7 @@ function App() {
 
     const eventSource = new EventSource(`http://localhost:8000/thinking-stream/${sessionId}`);
 
-    eventSource.onopen = () => {
-      console.log('[SSE] Connected to thinking stream');
-      setSseConnected(true);
-    };
-
-    // Robust SSE handler allowing JSON or plain text steps
+    // Robust SSE handler: normalize payloads to plain strings
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -542,6 +560,7 @@ function App() {
           return;
         }
 
+        // Server sends { step: { action, step, session_id } }
         if (data.step) {
           const localizedStep = translateThinkingStep(data.step);
           setThinkingSteps(prev => [...prev, localizedStep]);
@@ -555,6 +574,7 @@ function App() {
           if (localizedSteps.length > 0 && vocalizeStepRef.current) vocalizeStepRef.current(localizedSteps[localizedSteps.length - 1]);
         }
       } catch (err) {
+        // Fallback: plain text from server
         console.warn("[UI] Non-JSON SSE payload:", event.data);
         if (event.data && typeof event.data === 'string' && event.data.trim().length > 0) {
           const localizedStep = translateThinkingStep(event.data);
@@ -633,6 +653,24 @@ function App() {
     setChatMode(true);
   };
 
+  const handleSwitchChat = async (chatSessionId, chatTitle) => {
+    console.log("[UI] Switching to chat:", chatSessionId);
+    
+    // Update session ID and title
+    setSessionId(chatSessionId);
+    setChatTitle(chatTitle);
+    localStorage.setItem("currentSessionId", chatSessionId);
+    
+    // Clear UI state
+    setUserMessage("");
+    setAssistantMessage("");
+    setThinkingSteps([]);
+    setIsThinking(false);
+    setChatMode(false);
+    
+    console.log("[Session] Switched to:", chatSessionId);
+  };
+
   // const handleNewChat = () => {
   //   console.log("[UI] New chat started");
   //   setUserMessage("");
@@ -657,27 +695,41 @@ function App() {
     setIsThinking(false);
     setChatMode(false);
     
-    // ✅ Notify backend to clear OLD session
+    // ✅ Notify backend to initialize new session
     try {
         const response = await fetch("http://localhost:8000/new-chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                session_id: sessionId,  // OLD session to clear
-                user_id: userId,        // SAME user
+                session_id: newSessionId,
+                user_id: userId,
             }),
         });
         
         if (response.ok) {
-            console.log("✅ Backend session cleared");
-            // ✅ RELOAD PAGE to use new session ID
-            window.location.reload();
+            console.log("✅ Backend session initialized");
+        } else {
+            console.error("⚠️ Backend response not OK");
         }
     } catch (error) {
         console.error("❌ Failed to notify backend:", error);
-        // Even if backend fails, still reload to use new session
-        window.location.reload();
     }
+    
+    // Reload chat list so the new chat appears in the sidebar
+    try {
+      const chatsResp = await fetch(`http://localhost:8000/chats/${userId}`);
+      if (chatsResp.ok) {
+        const chatsData = await chatsResp.json();
+        setChats(chatsData.chats || []);
+        console.log("[Chats] Reloaded chat list after creating new chat");
+      }
+    } catch (err) {
+      console.warn("[Chats] Failed to reload chats:", err);
+    }
+
+    // ✅ UPDATE SESSION ID STATE (no page reload!)
+    setSessionId(newSessionId);
+    console.log("[Session] Session state updated to:", newSessionId);
 };
 
   /* ---------- THINKING STEPS SIMULATION ---------- */
@@ -922,6 +974,13 @@ function App() {
     }
   };
 
+
+  /* ---------- ONBOARDING COMPLETE ---------- */
+  const handleOnboardingComplete = ({ username, preferences }) => {
+      setUserName(username);
+      if (preferences?.voice) setTtsVoice(preferences.voice);
+      setShowOnboarding(false);
+  };
   /* ---------- INTERRUPT COMMANDS ---------- */
   const sendInterrupt = useCallback((command) => {
     console.log(`[Interrupt] Sending: ${command}`);
@@ -1146,6 +1205,64 @@ function App() {
 
         if (!res.ok) throw new Error(data.detail || "Backend error");
 
+      // ✅ Update chat title if provided (first message generates title)
+      if (data.chat_title && data.chat_title !== "Chat") {
+        console.log("[Chat] Received chat title:", data.chat_title);
+        setChatTitle(data.chat_title);
+        
+        // Update backend chat metadata
+        try {
+          await fetch("http://localhost:8000/update-chat-title", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              user_id: userId,
+              title: data.chat_title,
+            }),
+          });
+          console.log("[Chat] Chat title updated on backend");
+          
+          // Reload chat list to show updated title
+          const chatsResponse = await fetch(`http://localhost:8000/chats/${userId}`);
+          if (chatsResponse.ok) {
+            const chatsData = await chatsResponse.json();
+            setChats(chatsData.chats || []);
+            console.log("[Chats] Reloaded chat list");
+          }
+        } catch (error) {
+          console.warn("[Chat] Failed to update chat title:", error);
+        }
+      }
+
+      if (data.status === "clarification_needed") {
+        console.log("[Agent] Clarification requested:", data.question);
+        setClarificationResponseToId(data.response_id);
+        setAssistantMessage(data.question);
+        await speakResponse(data.question);
+      } else {
+        // Normalize various possible response shapes into a safe string
+        let responseText = "Task completed";
+
+        if (data.text && typeof data.text === "string") {
+          responseText = data.text;
+        } else if (data.result) {
+          if (typeof data.result === "string") {
+            responseText = data.result;
+          } else if (data.result.response && typeof data.result.response === "string") {
+            responseText = data.result.response;
+          } else if (data.result.text && typeof data.result.text === "string") {
+            responseText = data.result.text;
+          } else if (data.result && typeof data.result === 'object') {
+            // Prefer brief 'details' or fallback to JSON summary
+            responseText = data.result.details || data.result.summary || JSON.stringify(data.result);
+          }
+        }
+
+        console.log("[Agent] Final response:", responseText);
+        setClarificationResponseToId(null);
+        setAssistantMessage(responseText);
+        if (responseText && typeof responseText === 'string') await speakResponse(responseText);
         setThinkingSteps([]);
         setIsThinking(false);
 
@@ -1286,6 +1403,22 @@ function App() {
   ].filter(Boolean).join(" ");
 
   return (
+    <>
+      {showOnboarding ? (
+        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+      ) : (
+        <div className="app-root">
+          <Sidebar
+            collapsed={isSidebarCollapsed}
+            onToggle={() => {
+              console.log("[UI] Sidebar toggled");
+              setIsSidebarCollapsed((p) => !p);
+            }}
+            onSettingsClick={handleSettingsClick}
+            onNewChat={handleNewChat}
+            chats={chats}
+            onSwitchChat={handleSwitchChat}
+            currentSessionId={sessionId}
     <div className={appClassName}>
       {/* ===== Title bar (custom — frameless window) ===== */}
       {executionMode !== "widget" && (
@@ -1451,19 +1584,49 @@ function App() {
             isExecuting={isExecuting}
             onInterrupt={sendInterrupt}
           />
-        </div>
-      </main>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <SettingsModal 
-          onClose={() => setShowSettings(false)} 
-          onSave={handleSettingsSave}
-          initialName={userName}
-          initialVoice={ttsVoice}
-        />
+          <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
+            <video autoPlay muted loop playsInline>
+              <source src="/Background3.mp4" type="video/mp4" />
+            </video>
+            
+            <div className="main-overlay">
+              <HeaderContent userName={userName} chatTitle={chatTitle} />
+
+              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
+
+              {assistantMessage && !isThinking && (
+                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
+                  <div className="response-message">
+                    {assistantMessage}
+                  </div>
+                </div>
+              )}
+
+              <VoiceControls
+                isRecording={isRecording}
+                orbState={orbState}
+                onMicClick={handleMicClick}
+                onCancel={handleCancel}
+                chatMode={chatMode}
+                setChatMode={setChatMode}
+                onSendText={handleTextSubmit}
+                onSettingsClick={handleSettingsClick}
+              />
+            </div>
+          </main>
+
+          {showSettings && (
+            <SettingsModal 
+              onClose={() => setShowSettings(false)} 
+              onSave={handleSettingsSave}
+              initialName={userName}
+              initialVoice={ttsVoice}
+            />
+          )}
+        </div>
       )}
-    </div>
+    </>
   );
 }
 

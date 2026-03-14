@@ -8,6 +8,7 @@ import time
 import io
 import wave
 from pathlib import Path
+from pydantic import BaseModel
 from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,6 +37,7 @@ from routes.device_routes import router as device_router
 from dotenv import load_dotenv
 import json
 from memory_api import router as memory_router
+from datetime import datetime, timezone
 
 # --- WebSocket connection manager ---
 class ConnectionManager:
@@ -84,6 +86,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ── Suppress noisy device-polling / HTTP-request logs ──
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Store pending responses (for HTTP API)
 pending_responses = {}
@@ -498,6 +504,79 @@ async def process_user_input(request: Request):
     except Exception as e:
         logger.error(f"❌ Error processing request: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ============================================================================
+# USER ONBOARDING & ACCOUNT MANAGEMENT
+# ============================================================================
+
+class OnboardingData(BaseModel):
+    user_id: str
+    username: str
+    password: str
+    introduction: str
+    preferences: dict
+
+@app.post("/onboarding/create-account")
+async def create_account(data: OnboardingData):
+    """
+    Creates a new user account after onboarding.
+    Stores username, hashed password, intro, and preferences in MongoDB.
+    """
+    try:
+        from pymongo import MongoClient
+        import hashlib, os
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        users_col = db["users"]
+
+        # Check for duplicate username
+        if users_col.find_one({"username": data.username}):
+            raise HTTPException(status_code=409, detail="Username already taken")
+
+        # Hash password
+        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest()
+
+        user_doc = {
+            "user_id": data.user_id,
+            "username": data.username,
+            "password_hash": hashed_pw,
+            "introduction": data.introduction,
+            "preferences": data.preferences,
+            "created_at": datetime.utcnow().isoformat(),
+            "onboarding_complete": True
+        }
+
+        users_col.insert_one(user_doc)
+        logger.info(f"✅ Account created for user_id: {data.user_id}, username: {data.username}")
+
+        return {"status": "ok", "message": "Account created successfully", "user_id": data.user_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Account creation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/onboarding/check-username")
+async def check_username(username: str):
+    """Check if a username is available."""
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        exists = db["users"].find_one({"username": username}) is not None
+        return {"available": not exists}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
 
 """
 Fixed message handlers for server.py
@@ -1144,5 +1223,6 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="info",
+        access_log=False  # ✅ Disable uvicorn's built-in HTTP access logging
     )

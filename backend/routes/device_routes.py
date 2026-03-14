@@ -33,7 +33,7 @@ ACTION_RESULTS: Dict[str, List[Dict[str, Any]]] = {}
 @router.get("/{device_id}/ui-tree")
 async def get_ui_tree(device_id: str = Path(...)):
     """Get current UI tree from device"""
-    logger.info(f"📱 Getting UI tree from device: {device_id}")
+    logger.debug(f"📱 Getting UI tree from device: {device_id}")
     
     if device_id not in DEVICE_REGISTRY:
         logger.error(f"❌ Device not found: {device_id}")
@@ -67,7 +67,7 @@ async def update_ui_tree(
     tree_data: Dict[str, Any] = None
 ):
     """Update UI tree from device"""
-    logger.info(f"📥 Received UI tree update from device: {device_id}")
+    logger.debug(f"📥 Received UI tree update from device: {device_id}")
     
     if device_id not in DEVICE_REGISTRY:
         DEVICE_REGISTRY[device_id] = {
@@ -97,7 +97,7 @@ async def update_device_status(
     status_data: Dict[str, Any] = None
 ):
     """Update device status"""
-    logger.info(f"📝 Updating status for device: {device_id}")
+    logger.debug(f"📝 Updating status for device: {device_id}")
     
     if device_id not in DEVICE_REGISTRY:
         DEVICE_REGISTRY[device_id] = {
@@ -132,7 +132,7 @@ async def get_pending_actions(device_id: str = Path(...)):
     actions = PENDING_ACTIONS[device_id]
     
     if actions:
-        logger.info(f"   📤 Returning {len(actions)} pending actions")
+        logger.debug(f"   📤 Returning {len(actions)} pending actions")
     
     response = {
         "actions": actions,
@@ -158,8 +158,8 @@ async def execute_action_on_device(
     - global_action: BACK → navigate_back
     """
     action_type = action_data.get("action_type")
-    logger.info(f"⚡ Queueing action for device: {device_id}")
-    logger.info(f"   Action: {action_type}")
+    logger.debug(f"⚡ Queueing action for device: {device_id}")
+    logger.debug(f"   Action: {action_type}")
     
     if device_id not in DEVICE_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
@@ -178,16 +178,16 @@ async def execute_action_on_device(
     # CRITICAL FIX: Convert global_action to proper action types
     if action_type == "global_action":
         global_action = action_data.get("global_action", "").upper()
-        logger.info(f"🔄 Converting global_action: {global_action}")
+        logger.debug(f"🔄 Converting global_action: {global_action}")
         
         if global_action == "HOME":
             # Convert to navigate_home
             action_data["action_type"] = "navigate_home"
-            logger.info(f"   ✅ Converted to navigate_home")
+            logger.debug(f"   ✅ Converted to navigate_home")
         elif global_action == "BACK":
             # Convert to navigate_back
             action_data["action_type"] = "navigate_back"
-            logger.info(f"   ✅ Converted to navigate_back")
+            logger.debug(f"   ✅ Converted to navigate_back")
         else:
             logger.warning(f"   ⚠️ Unknown global action: {global_action}")
             # Keep as global_action
@@ -197,7 +197,7 @@ async def execute_action_on_device(
         PENDING_ACTIONS[device_id] = []
     
     PENDING_ACTIONS[device_id].append(action_data)
-    logger.info(f"✅ Action queued for polling: {action_data.get('action_type')}")
+    logger.debug(f"✅ Action queued for polling: {action_data.get('action_type')}")
     
     # Return immediate success
     return {
@@ -381,7 +381,7 @@ async def get_pending_actions(device_id: str = Path(..., description="Device ID"
     actions = PENDING_ACTIONS[device_id]
     
     if actions:
-        logger.info(f"   📤 Returning {len(actions)} pending actions")
+        logger.debug(f"   📤 Returning {len(actions)} pending actions")
     
     # Return all pending actions
     response = {
@@ -415,11 +415,11 @@ async def receive_action_result(
         "error": null
     }
     """
-    logger.info(f"✅ Received action result from device: {device_id}")
+    logger.debug(f"✅ Received action result from device: {device_id}")
     
     if result_data:
-        logger.info(f"   Action ID: {result_data.get('action_id')}")
-        logger.info(f"   Success: {result_data.get('success')}")
+        logger.debug(f"   Action ID: {result_data.get('action_id')}")
+        logger.debug(f"   Success: {result_data.get('success')}")
         if not result_data.get('success'):
             logger.warning(f"   Error: {result_data.get('error')}")
     
@@ -454,8 +454,8 @@ async def execute_action_on_device(
         "element_id": 5
     }
     """
-    logger.info(f"⚡ Queueing action for device: {device_id}")
-    logger.info(f"   Action: {action_data.get('action_type')}")
+    logger.debug(f"⚡ Queueing action for device: {device_id}")
+    logger.debug(f"   Action: {action_data.get('action_type')}")
     
     if device_id not in DEVICE_REGISTRY:
         raise HTTPException(
@@ -476,7 +476,7 @@ async def execute_action_on_device(
     
     # Convert navigate_home to goToHome for the action server
     if action_data.get("action_type") == "navigate_home":
-        logger.info(f"🏠 navigate_home request - queueing as goToHome for device: {device_id}")
+        logger.debug(f"🏠 navigate_home request - queueing as goToHome for device: {device_id}")
         action_data["action_type"] = "goToHome"
     
     # Queue the action for polling
@@ -484,7 +484,7 @@ async def execute_action_on_device(
         PENDING_ACTIONS[device_id] = []
     
     PENDING_ACTIONS[device_id].append(action_data)
-    logger.info(f"✅ Action queued for polling: {action_data.get('action_type')}")
+    logger.debug(f"✅ Action queued for polling: {action_data.get('action_type')}")
     
     # Return immediate success - actual execution happens on Android
     return {

@@ -73,15 +73,15 @@ TASK TYPE — match ONE, execute ONLY that branch:
     save_path = os.path.join(folder, f'descriptive_name_{ts}.docx')
     doc = Document()
     doc.save(save_path)
-    os.startfile(save_path)  # Open in Word so user can see it
     print(f"[FILE]: {save_path}")
     print("EXECUTION_SUCCESS")
-    # Done. No further editing.
+    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
 [3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
     "confirm saving", "press enter to confirm":
     check_path = active_file
     if check_path and os.path.exists(check_path):
+        os.startfile(check_path)  # Open in Word now that all edits are done
         print(f"[FILE]: {check_path}")
     print("EXECUTION_SUCCESS")
     # Done. NO doc.save() call.
@@ -113,44 +113,66 @@ AVOID: subprocess, pyautogui, Word UI, mouse/keyboard events
         library_import="from openpyxl import Workbook",
         keywords=["excel", "spreadsheet", "xlsx", "sheet", "cell", "row", "column", "formula", "data table"],
         guidance="""
-CRITICAL: Do NOT open any application UI.
-Work directly with .xlsx files using openpyxl library.
+Work with .xlsx files using openpyxl. Identify TASK TYPE first, then follow ONLY that branch.
 
-FOLDER: D:\\OneDrive\\Desktop\\agent\\excel\\
+SETUP:
 import os, glob
+from openpyxl import Workbook, load_workbook
+from datetime import datetime
 folder = 'D:\\\\OneDrive\\\\Desktop\\\\agent\\\\excel\\\\'
 os.makedirs(folder, exist_ok=True)
 files = glob.glob(os.path.join(folder, '*.xlsx'))
 latest = max(files, key=os.path.getctime) if files else None
+ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+# Read [ACTIVE FILE] from prompt if present:
+active_file = '<path from [ACTIVE FILE: ...]>' if '[ACTIVE FILE:' in PROMPT else latest
 
-CHECK [ACTIVE FILE] IN PROMPT: If prompt contains [ACTIVE FILE: path], use that as save_path.
+TASK TYPE — match ONE, execute ONLY that branch:
 
-TASK TYPE:
-- "open/show/view/display" only: os.startfile(latest); print(f"[FILE]: {latest}"); print("EXECUTION_SUCCESS"); exit
-- "save" only: print(f"[FILE]: {latest}"); print("EXECUTION_SUCCESS"); exit
-- "create/new/make/generate": wb = Workbook(); save_path = os.path.join(folder, 'descriptive_name.xlsx')
-- Default (add/update/modify/edit/enter): load latest or create if none:
-    from openpyxl import load_workbook
-    wb = load_workbook(latest) if latest else Workbook()
+[1] LAUNCH APP — task says "open excel application", "open microsoft excel", "launch excel", "start excel"
+    AND does NOT mention a specific file to edit:
+    os.system('start excel')
+    print("EXECUTION_SUCCESS")
+    # Done. No file operations.
+
+[2] CREATE — task says "create/new/make/generate" + spreadsheet/file:
+    save_path = os.path.join(folder, f'descriptive_name_{ts}.xlsx')
+    wb = Workbook()
     ws = wb.active
-    save_path = latest if latest else os.path.join(folder, 'spreadsheet.xlsx')
-
-Key patterns:
-- Create: wb = Workbook(); ws = wb.active; ws['A1'] = value; wb.save(save_path)
-- Modify: wb = load_workbook(latest); ws = wb.active; ws['A1'] = value; wb.save(save_path)
-- Formulas: ws['C1'] = '=A1+B1'
-
-SAVE (with lock fallback):
-try:
     wb.save(save_path)
-except PermissionError:
-    save_path = os.path.join(folder, 'spreadsheet_v2.xlsx')
-    wb.save(save_path)
-print(f"[FILE]: {save_path}")
-print("EXECUTION_SUCCESS")
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
-DO NOT call os.startfile unless task says "open/show/view".
-AVOID: subprocess, pyautogui data entry, Excel UI, mouse/keyboard events
+[3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
+    "confirm saving", "press enter to confirm":
+    check_path = active_file
+    if check_path and os.path.exists(check_path):
+        os.startfile(check_path)  # Open in Excel now that all edits are done
+        print(f"[FILE]: {check_path}")
+    print("EXECUTION_SUCCESS")
+    # Done. NO wb.save() call.
+
+[4] DEFAULT — task says write/enter/add/modify/edit/set/insert/update/fill/format:
+    wb = load_workbook(active_file) if active_file and os.path.exists(active_file) else Workbook()
+    ws = wb.active
+    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'spreadsheet_{ts}.xlsx')
+    # ... apply changes using openpyxl ...
+    try:
+        wb.save(save_path)
+    except PermissionError:
+        save_path = os.path.splitext(save_path)[0] + '_v2.xlsx'
+        wb.save(save_path)
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+
+Key openpyxl patterns:
+- ws['A1'] = 'value'          # set cell
+- ws.cell(row=1, col=1).value = x  # set by row/col
+- ws['C1'] = '=A1+B1'         # formula
+- wb.save(save_path)
+
+AVOID: subprocess, pyautogui, Excel UI, mouse/keyboard events
 """
     ),
     "powerpoint": ModuleGuidance(
@@ -159,42 +181,65 @@ AVOID: subprocess, pyautogui data entry, Excel UI, mouse/keyboard events
         library_import="from pptx import Presentation",
         keywords=["powerpoint", "pptx", "slide", "presentation", "bullet point", "layout", "slide show"],
         guidance="""
-CRITICAL: Do NOT open any application UI.
-Work directly with .pptx files using python-pptx library.
+Work with .pptx files using python-pptx. Identify TASK TYPE first, then follow ONLY that branch.
 
-FOLDER: D:\\OneDrive\\Desktop\\agent\\ppts\\
+SETUP:
 import os, glob
+from pptx import Presentation
+from datetime import datetime
 folder = 'D:\\\\OneDrive\\\\Desktop\\\\agent\\\\ppts\\\\'
 os.makedirs(folder, exist_ok=True)
 files = glob.glob(os.path.join(folder, '*.pptx'))
 latest = max(files, key=os.path.getctime) if files else None
+ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+# Read [ACTIVE FILE] from prompt if present:
+active_file = '<path from [ACTIVE FILE: ...]>' if '[ACTIVE FILE:' in PROMPT else latest
 
-CHECK [ACTIVE FILE] IN PROMPT: If prompt contains [ACTIVE FILE: path], use that as save_path.
+TASK TYPE — match ONE, execute ONLY that branch:
 
-TASK TYPE:
-- "open/show/view/display" only: os.startfile(latest); print(f"[FILE]: {latest}"); print("EXECUTION_SUCCESS"); exit
-- "save" only: print(f"[FILE]: {latest}"); print("EXECUTION_SUCCESS"); exit
-- "create/new/make/generate": prs = Presentation(); save_path = os.path.join(folder, 'descriptive_name.pptx')
-- Default (add/modify/edit/insert/type): load latest or create if none:
-    prs = Presentation(latest) if latest else Presentation()
-    save_path = latest if latest else os.path.join(folder, 'presentation.pptx')
+[1] LAUNCH APP — task says "open powerpoint application", "open microsoft powerpoint", "launch powerpoint", "start powerpoint"
+    AND does NOT mention a specific file to edit:
+    os.system('start powerpnt')
+    print("EXECUTION_SUCCESS")
+    # Done. No file operations.
 
-Key patterns:
-- Create: prs = Presentation(); slide = prs.slides.add_slide(prs.slide_layouts[0]); prs.save(save_path)
-- Modify: prs = Presentation(latest); slide = prs.slides.add_slide(...); prs.save(save_path)
-- Add content: slide.shapes.title.text = 'Title'; tf = slide.placeholders[1]; tf.text = 'Content'
-
-SAVE (with lock fallback):
-try:
+[2] CREATE — task says "create/new/make/generate" + presentation/file:
+    save_path = os.path.join(folder, f'descriptive_name_{ts}.pptx')
+    prs = Presentation()
     prs.save(save_path)
-except PermissionError:
-    save_path = os.path.join(folder, 'presentation_v2.pptx')
-    prs.save(save_path)
-print(f"[FILE]: {save_path}")
-print("EXECUTION_SUCCESS")
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
-DO NOT call os.startfile unless task says "open/show/view".
-AVOID: subprocess, pyautogui slide editing, PowerPoint UI, mouse/keyboard events
+[3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
+    "confirm saving", "press enter to confirm":
+    check_path = active_file
+    if check_path and os.path.exists(check_path):
+        os.startfile(check_path)  # Open in PowerPoint now that all edits are done
+        print(f"[FILE]: {check_path}")
+    print("EXECUTION_SUCCESS")
+    # Done. NO prs.save() call.
+
+[4] DEFAULT — task says write/type/add/modify/edit/set/insert/format/slide/heading/bullet:
+    prs = Presentation(active_file) if active_file and os.path.exists(active_file) else Presentation()
+    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'presentation_{ts}.pptx')
+    # ... apply changes using python-pptx ...
+    try:
+        prs.save(save_path)
+    except PermissionError:
+        save_path = os.path.splitext(save_path)[0] + '_v2.pptx'
+        prs.save(save_path)
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+
+Key python-pptx patterns:
+- slide = prs.slides.add_slide(prs.slide_layouts[0])   # title slide
+- slide = prs.slides.add_slide(prs.slide_layouts[1])   # title + content
+- slide.shapes.title.text = 'Title'
+- slide.placeholders[1].text = 'Content'
+- tf = slide.placeholders[1].text_frame; tf.text = 'bullet'
+
+AVOID: subprocess, pyautogui, PowerPoint UI, mouse/keyboard events
 """
     ),
 }

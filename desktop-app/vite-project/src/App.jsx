@@ -231,8 +231,7 @@ function App() {
         audioEl.play().catch(reject);
       });
     } catch (error) {
-      console.warn("[TTS] Google speech failed, using local fallback:", error);
-      await screenReader.speak(normalizedText);
+      console.warn("[TTS] Google speech failed; local fallback is disabled for assistant prompts:", error);
     } finally {
       setOrbState("idle");
       setExecutionMode((prev) => (prev === "transparent" ? "normal" : prev));
@@ -985,6 +984,7 @@ function App() {
       const normalized = rawText.trim();
 
       rememberUserLanguageFromText(normalized);
+      const currentUserLanguage = userLanguageRef.current || detectLanguageFromText(normalized) || "en";
 
       const isAffirmative = (value) => {
         const v = (value || "").trim().toLowerCase();
@@ -1027,6 +1027,8 @@ function App() {
           "اقراهم بصوت عال",
           "اقرأها لي",
           "اقراها لي",
+          "اقريها",
+          "اقريهم",
           "اقرأهم لي",
           "اقراهم لي",
           "اقراها",
@@ -1110,6 +1112,7 @@ function App() {
           type: msgType,
           user_id: userId,
           device_type: deviceType,
+          user_language: currentUserLanguage,
         };
         if (clarificationResponseToId) {
           payload.answer = text;
@@ -1134,6 +1137,7 @@ function App() {
             is_clarification: !!clarificationResponseToId,
             clarification_id: clarificationResponseToId || null,
             device_type: deviceType,
+            user_language: currentUserLanguage,
           }),
         });
 

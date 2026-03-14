@@ -6,27 +6,29 @@ import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
+import OnboardingPage from "./components/onboarding/OnboardingPage"; 
 
 function App() {
   /* ---------- STATE ---------- */
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
-  // const [sessionId] = useState("test-123");
-  // ✅ USER ID - Generated ONCE per browser, persists forever
   const [userId] = useState(() => {
       const stored = localStorage.getItem("userId");
       if (stored) {
           console.log("[Auth] Using existing user ID:", stored);
           return stored;
       }
-      
       const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       localStorage.setItem("userId", newUserId);
       console.log("[Auth] Created new user ID:", newUserId);
       return newUserId;
   });
 
+  // ✅ ONBOARDING GATE — true = show onboarding, false = go straight to app
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+      return localStorage.getItem("onboardingComplete") !== "true";
+  });
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
   const [sessionId, setSessionId] = useState(() => {
       const stored = localStorage.getItem("currentSessionId");
@@ -504,6 +506,14 @@ function App() {
     }
   };
 
+
+  /* ---------- ONBOARDING COMPLETE ---------- */
+  const handleOnboardingComplete = ({ username, preferences }) => {
+      setUserName(username);
+      if (preferences?.voice) setTtsVoice(preferences.voice);
+      setShowOnboarding(false);
+  };
+
   /* ---------- TEXT → AGENT ---------- */
   const processText = async (text) => {
     try {
@@ -743,65 +753,66 @@ function App() {
 
   /* ---------- RENDER ---------- */
   return (
-    <div className="app-root">
-      <Sidebar
-        collapsed={isSidebarCollapsed}
-        onToggle={() => {
-          console.log("[UI] Sidebar toggled");
-          setIsSidebarCollapsed((p) => !p);
-        }}
-        onSettingsClick={handleSettingsClick}
-        onNewChat={handleNewChat}
-        chats={chats}
-        onSwitchChat={handleSwitchChat}
-        currentSessionId={sessionId}
-      />
-
-      <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-        <video autoPlay muted loop playsInline>
-          <source src="/Background3.mp4" type="video/mp4" />
-        </video>
-        
-        <div className="main-overlay">
-          {/* Header stays at the top */}
-          <HeaderContent userName={userName} chatTitle={chatTitle} />
-
-          {/* Thinking Indicator */}
-          {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-          {/* Response Display Area - Gemini Style */}
-          {assistantMessage && !isThinking && (
-            <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-              <div className="response-message">
-                {assistantMessage}
-              </div>
-            </div>
-          )}
-
-          {/* VoiceControls stay at the bottom */}
-          <VoiceControls
-            isRecording={isRecording}
-            orbState={orbState}
-            onMicClick={handleMicClick}
-            onCancel={handleCancel}
-            chatMode={chatMode}
-            setChatMode={setChatMode}
-            onSendText={handleTextSubmit}
+    <>
+      {showOnboarding ? (
+        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+      ) : (
+        <div className="app-root">
+          <Sidebar
+            collapsed={isSidebarCollapsed}
+            onToggle={() => {
+              console.log("[UI] Sidebar toggled");
+              setIsSidebarCollapsed((p) => !p);
+            }}
             onSettingsClick={handleSettingsClick}
+            onNewChat={handleNewChat}
+            chats={chats}
+            onSwitchChat={handleSwitchChat}
+            currentSessionId={sessionId}
           />
-        </div>
-      </main>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <SettingsModal 
-          onClose={() => setShowSettings(false)} 
-          onSave={handleSettingsSave}
-          initialName={userName}
-          initialVoice={ttsVoice}
-        />
+          <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
+            <video autoPlay muted loop playsInline>
+              <source src="/Background3.mp4" type="video/mp4" />
+            </video>
+            
+            <div className="main-overlay">
+              <HeaderContent userName={userName} chatTitle={chatTitle} />
+
+              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
+
+              {assistantMessage && !isThinking && (
+                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
+                  <div className="response-message">
+                    {assistantMessage}
+                  </div>
+                </div>
+              )}
+
+              <VoiceControls
+                isRecording={isRecording}
+                orbState={orbState}
+                onMicClick={handleMicClick}
+                onCancel={handleCancel}
+                chatMode={chatMode}
+                setChatMode={setChatMode}
+                onSendText={handleTextSubmit}
+                onSettingsClick={handleSettingsClick}
+              />
+            </div>
+          </main>
+
+          {showSettings && (
+            <SettingsModal 
+              onClose={() => setShowSettings(false)} 
+              onSave={handleSettingsSave}
+              initialName={userName}
+              initialVoice={ttsVoice}
+            />
+          )}
+        </div>
       )}
-    </div>
+    </>
   );
 }
 

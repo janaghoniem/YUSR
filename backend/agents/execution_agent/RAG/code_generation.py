@@ -65,7 +65,7 @@ class RAGConfig:
 
     similarity_threshold: float = 0.3  # Minimum similarity score
     similarity_threshold: float = 0.3  # Minimum similarity scor
-    retrieval_mode: str = "api"
+    retrieval_mode: str = "local"
     
     
     
@@ -99,10 +99,12 @@ print(f"Model: {config.llm_model}")
 # CELL 2: Vector Database Interface
 # ============================================================================
 
+from  agents.execution_agent.RAG.module_selector import ModuleSelector
+
 class VectorDBInterface:
     """Interface to interact with the vector database"""
     
-    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.API):
+    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.LOCAL):
         self.config = config
         self.mode = mode  # ← ADD THIS
         self.client = None
@@ -385,11 +387,12 @@ class LLMInterface:
 class RAGSystem:
     """Complete RAG system for code generation"""
     
-    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.API):
+    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.LOCAL):
         self.config = config
         self.vectordb = None
         self.mode = mode  # ← ADD THIS LINE
         self.llm = LLMInterface(config)
+        self.module_selector = ModuleSelector()  # ← ADD THIS LINE
         self.conversation_history = []
         
     def initialize(self):
@@ -407,7 +410,7 @@ class RAGSystem:
                     conversation_context: List[Dict] = None,
                     start_context_index: int = 0,
                     num_contexts: int = None,
-                    use_rag: bool = None) -> Dict:  # ← ADD use_rag parameter
+                    use_rag: bool = None, screen_state: Dict = None ) -> Dict:  # ← ADD use_rag parameter
         """
         Generate code based on user query using RAG
         
@@ -499,12 +502,26 @@ class RAGSystem:
             print(f"       Including {len(contexts)} RAG contexts in prompt")
         else:
             print(f"       Using zero-shot prompt (no RAG contexts)")
+            
+        print(f"screen_state: {screen_state}")
+
         
-        prompt = self._build_prompt(user_query, contexts, conversation_context)
-        
+        prompt = self._build_prompt(user_query, contexts, conversation_context, screen_state)
+
+        # ============================================================================
+        # STEP 2.5: ENRICH PROMPT WITH MODULE SELECTOR
+        # ============================================================================
+        print(f"\n[ENRICH] 🎯 Applying module selector guidance...")
+        enriched_prompt = self.module_selector.enrich_prompt(prompt)
+
+        if enriched_prompt != prompt:
+            print(f"       ✅ Module override injected")
+        else:
+            print(f"       ➡️  No module override needed")
+
         print("-" * 80)
         print("📝 PROMPT PREVIEW:")
-        print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
+        print(enriched_prompt[:500] + "..." if len(enriched_prompt) > 500 else enriched_prompt)
         print("-" * 80)
 
         # ============================================================================
@@ -512,7 +529,7 @@ class RAGSystem:
         # ============================================================================
         print(f"\n[{'4/3' if use_rag else '3/3'}] 🤖 Generating code with LLM...")
         response = self.llm.generate(
-            prompt=prompt,
+            prompt=enriched_prompt,  # ← USE enriched_prompt INSTEAD OF prompt
             system_prompt=self._get_system_prompt()
         )
         
@@ -540,14 +557,29 @@ class RAGSystem:
         
         return result   
     
-    def _build_prompt(self, query: str, contexts: List[Dict], 
+    def _build_prompt(self, query: str, contexts: List[Dict], screen_state: Dict = None,
                      conversation_context: List[Dict] = None) -> str:
         """Build the prompt for the LLM"""
         
         prompt_parts = []
         
+         # Add screen state if available
+        if screen_state:
+                    prompt_parts.append(f"""
+            CURRENT SCREEN STATE:
+            - Active Window: {screen_state['active_window']}
+            - Process: {screen_state['process']}
+            - Visible Controls: {', '.join(screen_state.get('controls', []))}
+
+            ADAPTIVE BEHAVIOR REQUIRED:
+            1. If unexpected popup detected: Close it first (Alt+F4 or Escape)
+            2. If target app not active: Activate it (Win key + search)
+            3. If controls not visible: Wait up to 5 seconds for them to appear
+            4. Try multiple approaches if primary fails
+            """)
+        
         # # Add conversation context if available
-        if conversation_context:
+        if conversation_context and isinstance(conversation_context, list):
             prompt_parts.append("## Previous Conversation:")
             for msg in conversation_context[-3:]:  # Last 3 messages
                 prompt_parts.append(f"User: {msg.get('query', '')}")
@@ -576,8 +608,8 @@ class RAGSystem:
                 
                 if total_length >= self.config.max_context_length:
                     break
-        else:
-            prompt_parts.append("## Note: No similar examples found, using general knowledge")
+        # else:
+        #     prompt_parts.append("## Note: No similar examples found, using general knowledge")
         
         # Add user query
         # prompt_parts.append("## User Request:")
@@ -858,6 +890,26 @@ If something must be opened or interacted with:
 Any violation will fail validation.
 
 ================================================================================
+AVAILABLE LIBRARIES (STRICT - DO NOT HALLUCINATE)
+================================================================================
+
+ALLOWED LIBRARIES ONLY:
+- pyautogui (mouse/keyboard automation)
+- pyperclip (clipboard operations)
+- time (delays)
+- os (file operations)
+- json, csv (data parsing)
+
+FORBIDDEN - DO NOT USE:
+uiautomation (does not exist)
+pywinauto (blocked for security)
+keyboard (not installed)
+subprocess (security violation)
+
+If you need UI automation: USE ONLY pyautogui
+If task requires unavailable library: print("FAILED: Library not available")
+
+================================================================================
 AUTOMATION INTERACTION GUIDANCE
 ================================================================================
 
@@ -980,6 +1032,7 @@ class CodeExecutor:
     
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
+        self.module_selector = ModuleSelector()
     
     def execute(self, code: str, test_mode: bool = True) -> Dict:
         """

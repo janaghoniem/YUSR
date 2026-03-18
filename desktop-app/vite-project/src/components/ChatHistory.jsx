@@ -61,7 +61,7 @@ const ChatHistory = ({ messages, onClose, chatTitle }) => {
                     <p className="bubble-text">{displayContent}</p>
                   </div>
                   {isUser && (
-                    <div className="bubble-avatar user-avatar">U</div>
+                    <div className="bubble-avatar user-avatar">Me</div>
                   )}
                 </div>
               );

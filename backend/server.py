@@ -742,6 +742,39 @@ async def new_chat_endpoint(request: dict):
         logger.error(f"❌ New chat error: {e}")
         return {"status": "error", "message": str(e)}, 500
 
+class LoginData(BaseModel):
+    username: str
+    password: str
+
+@app.post("/onboarding/login")
+async def login(data: LoginData):
+    try:
+        from pymongo import MongoClient
+        import hashlib, os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        
+        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest()
+        user = db["users"].find_one({
+            "username": data.username,
+            "password_hash": hashed_pw
+        })
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        return {
+            "status": "ok",
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "preferences": user.get("preferences", {})
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
 if __name__ == "__main__":
     import uvicorn
     

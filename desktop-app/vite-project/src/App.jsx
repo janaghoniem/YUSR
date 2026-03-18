@@ -6,14 +6,17 @@ import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
-import OnboardingPage from "./components/onboarding/OnboardingPage"; 
+import OnboardingPage from "./components/onboarding/OnboardingPage";
+import LoginPage from "./components/onboarding/LoginPage";
 
 function App() {
   /* ---------- STATE ---------- */
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
-  const [userId] = useState(() => {
+  // user ID
+
+  const [userId, setUserId] = useState(() => {
       const stored = localStorage.getItem("userId");
       if (stored) {
           console.log("[Auth] Using existing user ID:", stored);
@@ -25,9 +28,11 @@ function App() {
       return newUserId;
   });
 
-  // ✅ ONBOARDING GATE — true = show onboarding, false = go straight to app
-  const [showOnboarding, setShowOnboarding] = useState(() => {
-      return localStorage.getItem("onboardingComplete") !== "true";
+  
+  // ✅ AUTH STATE — "app" | "login" | "onboard"
+  const [authState, setAuthState] = useState(() => {
+      if (localStorage.getItem("onboardingComplete") === "true") return "app";
+      return "login";
   });
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
   const [sessionId, setSessionId] = useState(() => {
@@ -50,7 +55,9 @@ function App() {
   const [deviceType, setDeviceType] = useState("desktop");
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("ttsVoice") || "Gacrux");
   const [screenSize, setScreenSize] = useState("desktop");
-  const [userName, setUserName] = useState("Labubu");
+  const [userName, setUserName] = useState(() => {
+      return localStorage.getItem("userName") || "Labubu";
+  });
   const [thinkingSteps, setThinkingSteps] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
   // True when server-provided SSE thinking stream is connected
@@ -122,12 +129,12 @@ function App() {
   }, []);
 
   /* ---------- LOAD USERNAME FROM LOCALSTORAGE ---------- */
-  useEffect(() => {
-    const savedName = localStorage.getItem("userName");
-    if (savedName) {
-      setUserName(savedName);
-    }
-  }, []);
+  // useEffect(() => {
+  //   const savedName = localStorage.getItem("userName");
+  //   if (savedName) {
+  //     setUserName(savedName);
+  //   }
+  // }, []);
 
   /* ---------- LOAD CHAT LIST ---------- */
   useEffect(() => {
@@ -511,7 +518,19 @@ function App() {
   const handleOnboardingComplete = ({ username, preferences }) => {
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
-      setShowOnboarding(false);
+      setAuthState("app");
+  };
+
+  /* ---------- LOGOUT ---------- */
+  const handleLogout = () => {
+      // Clear auth state but preserve the remembered username hint
+      const rememberedUsername = localStorage.getItem("userName") || "";
+      localStorage.removeItem("onboardingComplete");
+      localStorage.removeItem("currentSessionId");
+      // Keep userId so data isn't orphaned, keep userName so login can prefill
+      setAuthState("login");
+      setUserName("Labubu");
+      console.log("[Auth] Logged out");
   };
 
   /* ---------- TEXT → AGENT ---------- */
@@ -752,68 +771,86 @@ function App() {
 
 
   /* ---------- RENDER ---------- */
+
   return (
-    <>
-      {showOnboarding ? (
-        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
-      ) : (
-        <div className="app-root">
-          <Sidebar
-            collapsed={isSidebarCollapsed}
-            onToggle={() => {
-              console.log("[UI] Sidebar toggled");
-              setIsSidebarCollapsed((p) => !p);
+      <>
+        {authState === "login" && (
+          <LoginPage
+            onLogin={({ userId: realId, username, preferences }) => {
+              localStorage.setItem("userId", realId);
+              localStorage.setItem("userName", username);
+              setUserId(realId);
+              setUserName(username);
+              if (preferences?.voice) setTtsVoice(preferences.voice);
+              setAuthState("app");
             }}
-            onSettingsClick={handleSettingsClick}
-            onNewChat={handleNewChat}
-            chats={chats}
-            onSwitchChat={handleSwitchChat}
-            currentSessionId={sessionId}
+            onSignUp={() => setAuthState("onboard")}
           />
+        )}
 
-          <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-            <video autoPlay muted loop playsInline>
-              <source src="/Background3.mp4" type="video/mp4" />
-            </video>
-            
-            <div className="main-overlay">
-              <HeaderContent userName={userName} chatTitle={chatTitle} />
+        {authState === "onboard" && (
+          <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+        )}
 
-              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-              {assistantMessage && !isThinking && (
-                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-                  <div className="response-message">
-                    {assistantMessage}
-                  </div>
-                </div>
-              )}
-
-              <VoiceControls
-                isRecording={isRecording}
-                orbState={orbState}
-                onMicClick={handleMicClick}
-                onCancel={handleCancel}
-                chatMode={chatMode}
-                setChatMode={setChatMode}
-                onSendText={handleTextSubmit}
-                onSettingsClick={handleSettingsClick}
-              />
-            </div>
-          </main>
-
-          {showSettings && (
-            <SettingsModal 
-              onClose={() => setShowSettings(false)} 
-              onSave={handleSettingsSave}
-              initialName={userName}
-              initialVoice={ttsVoice}
+        {authState === "app" && (
+          <div className="app-root">
+            <Sidebar
+              collapsed={isSidebarCollapsed}
+              onToggle={() => {
+                console.log("[UI] Sidebar toggled");
+                setIsSidebarCollapsed((p) => !p);
+              }}
+              onSettingsClick={handleSettingsClick}
+              onNewChat={handleNewChat}
+              chats={chats}
+              onSwitchChat={handleSwitchChat}
+              currentSessionId={sessionId}
             />
-          )}
-        </div>
-      )}
-    </>
-  );
+
+            <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
+              <video autoPlay muted loop playsInline>
+                <source src="/Background3.mp4" type="video/mp4" />
+              </video>
+              
+              <div className="main-overlay">
+                <HeaderContent userName={userName} chatTitle={chatTitle} />
+
+                {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
+
+                {assistantMessage && !isThinking && (
+                  <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
+                    <div className="response-message">
+                      {assistantMessage}
+                    </div>
+                  </div>
+                )}
+
+                <VoiceControls
+                  isRecording={isRecording}
+                  orbState={orbState}
+                  onMicClick={handleMicClick}
+                  onCancel={handleCancel}
+                  chatMode={chatMode}
+                  setChatMode={setChatMode}
+                  onSendText={handleTextSubmit}
+                  onSettingsClick={handleSettingsClick}
+                />
+              </div>
+            </main>
+
+            {showSettings && (
+              <SettingsModal 
+                onClose={() => setShowSettings(false)} 
+                onSave={handleSettingsSave}
+                onLogout={handleLogout}
+                initialName={userName}
+                initialVoice={ttsVoice}
+              />
+            )}
+          </div>
+        )}
+      </>
+    );
 }
 
 export default App;

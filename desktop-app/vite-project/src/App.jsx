@@ -8,6 +8,7 @@ import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
 import LoginPage from "./components/onboarding/LoginPage";
+import ChatHistory from "./components/ChatHistory";
 
 function App() {
   /* ---------- STATE ---------- */
@@ -64,6 +65,8 @@ function App() {
   const [sseConnected, setSseConnected] = useState(false);
   const [chats, setChats] = useState([]);
   const [chatTitle, setChatTitle] = useState("New Chat");
+  const [viewingChat, setViewingChat] = useState(null); // { sessionId, title, messages }
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -138,6 +141,7 @@ function App() {
 
   /* ---------- LOAD CHAT LIST ---------- */
   useEffect(() => {
+    if (authState !== "app") return; // don't load before login
     const loadChats = async () => {
       try {
         const response = await fetch(`http://localhost:8000/chats/${userId}`);
@@ -152,7 +156,7 @@ function App() {
     };
     
     loadChats();
-  }, [userId]);
+  }, [userId, authState]);
 
     /* ---------- CONNECT TO THINKING STREAM ---------- */
   useEffect(() => {
@@ -246,6 +250,29 @@ function App() {
     console.log("[Session] Switched to:", chatSessionId);
   };
 
+  /* ---------- VIEW CHAT HISTORY ---------- */
+    const handleViewChat = async (chatSessionId, title) => {
+      setLoadingHistory(true);
+      try {
+        const res = await fetch(
+          `http://localhost:8000/chat-messages/${chatSessionId}?user_id=${userId}`
+        );
+        if (!res.ok) throw new Error("Failed to fetch messages");
+        const data = await res.json();
+        setViewingChat({
+          sessionId: chatSessionId,
+          title: title,
+          messages: data.messages || [],
+        });
+      } catch (err) {
+        console.error("[ChatHistory] Failed to load:", err);
+      } finally {
+        setLoadingHistory(false);
+      }
+    };
+
+    // const handleNewChat = async () => {
+
   // const handleNewChat = () => {
   //   console.log("[UI] New chat started");
   //   setUserMessage("");
@@ -269,6 +296,7 @@ function App() {
     setThinkingSteps([]);
     setIsThinking(false);
     setChatMode(false);
+    setChatTitle("New Chat");
     
     // ✅ Notify backend to initialize new session
     try {
@@ -586,34 +614,88 @@ function App() {
       setThinkingSteps([]);
       setIsThinking(false);
 
-      // ✅ Update chat title if provided (first message generates title)
-      if (data.chat_title && data.chat_title !== "Chat") {
-        console.log("[Chat] Received chat title:", data.chat_title);
-        setChatTitle(data.chat_title);
-        
-        // Update backend chat metadata
-        try {
+      
+      // ✅ Auto-generate title after first message if not yet titled
+      // ✅ Title strategy:
+      // - First message: instant truncated title so sidebar isn't empty
+      // - After 4th exchange: AI summarizes full conversation into a better title
+      try {
+        const isFirstMessage = chatTitle === "New Chat";
+        const isFourthMessage = !isFirstMessage && chats.find(
+          c => (c.session_id || c.sessionId) === sessionId
+        ) && (() => {
+          // Count exchanges in current session from chats metadata (approximate)
+          // We trigger summary on 4th user message
+          return false; // handled below via message count from backend
+        })();
+
+        let newTitle = null;
+
+        if (isFirstMessage) {
+          // Instant title from first user message — no API call needed
+          newTitle = text.length > 40 ? text.slice(0, 40) + "..." : text;
+        }
+
+        if (newTitle) {
+          setChatTitle(newTitle);
+
           await fetch("http://localhost:8000/update-chat-title", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               session_id: sessionId,
               user_id: userId,
-              title: data.chat_title,
+              title: newTitle,
             }),
           });
-          console.log("[Chat] Chat title updated on backend");
-          
-          // Reload chat list to show updated title
+
           const chatsResponse = await fetch(`http://localhost:8000/chats/${userId}`);
           if (chatsResponse.ok) {
             const chatsData = await chatsResponse.json();
             setChats(chatsData.chats || []);
-            console.log("[Chats] Reloaded chat list");
           }
-        } catch (error) {
-          console.warn("[Chat] Failed to update chat title:", error);
         }
+
+        // After 4 exchanges, ask Gemini to summarize into a better title
+        // We detect this by counting user messages stored in the session
+        const countRes = await fetch(
+          `http://localhost:8000/chat-messages/${sessionId}?user_id=${userId}`
+        );
+        if (countRes.ok) {
+          const countData = await countRes.json();
+          const userMsgCount = (countData.messages || []).filter(m => m.role === "user").length;
+
+          if (userMsgCount === 4) {
+            const summaryRes = await fetch("http://localhost:8000/generate-chat-title", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: text, summarize: true, session_id: sessionId, user_id: userId }),
+            });
+            if (summaryRes.ok) {
+              const summaryData = await summaryRes.json();
+              const summaryTitle = summaryData.title;
+              if (summaryTitle && summaryTitle !== "New Chat") {
+                setChatTitle(summaryTitle);
+                await fetch("http://localhost:8000/update-chat-title", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    session_id: sessionId,
+                    user_id: userId,
+                    title: summaryTitle,
+                  }),
+                });
+                const chatsResponse2 = await fetch(`http://localhost:8000/chats/${userId}`);
+                if (chatsResponse2.ok) {
+                  const chatsData2 = await chatsResponse2.json();
+                  setChats(chatsData2.chats || []);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[Chat] Title update failed (non-critical):", err);
       }
 
       if (data.status === "clarification_needed") {
@@ -624,21 +706,41 @@ function App() {
       } else {
         // Normalize various possible response shapes into a safe string
         let responseText = "Task completed";
+        
+        // Helper: strip JSON wrapper if language agent returned raw JSON string
+        const extractText = (raw) => {
+          if (!raw || typeof raw !== "string") return null;
+          try {
+            const parsed = JSON.parse(raw);
+            return parsed.response_text || parsed.text || parsed.response || null;
+          } catch {
+            return raw;
+          }
+        };
 
         if (data.text && typeof data.text === "string") {
-          responseText = data.text;
+          responseText = extractText(data.text) || data.text;
         } else if (data.result) {
           if (typeof data.result === "string") {
-            responseText = data.result;
-          } else if (data.result.response && typeof data.result.response === "string") {
-            responseText = data.result.response;
-          } else if (data.result.text && typeof data.result.text === "string") {
-            responseText = data.result.text;
-          } else if (data.result && typeof data.result === 'object') {
-            // Prefer brief 'details' or fallback to JSON summary
-            responseText = data.result.details || data.result.summary || JSON.stringify(data.result);
+            responseText = extractText(data.result) || data.result;
+          } else if (typeof data.result === "object") {
+            // Try response field first (coordinator path)
+            const fromResponse = extractText(data.result.response);
+            const fromText = extractText(data.result.text);
+            // Try details array — coordinator returns task details
+            let fromDetails = null;
+            if (Array.isArray(data.result.result?.details)) {
+              // Pull content from successful tasks, strip EXECUTION_SUCCESS noise
+              const contents = data.result.result.details
+                .filter(d => d.status === "success" && d.content)
+                .map(d => d.content.replace("EXECUTION_SUCCESS", "").trim())
+                .filter(Boolean);
+              if (contents.length > 0) fromDetails = contents.join("\n");
+            }
+            responseText = fromResponse || fromText || fromDetails || data.result.details || data.result.summary || "Task completed";
           }
         }
+
 
         console.log("[Agent] Final response:", responseText);
         setClarificationResponseToId(null);
@@ -804,6 +906,7 @@ function App() {
               onNewChat={handleNewChat}
               chats={chats}
               onSwitchChat={handleSwitchChat}
+              onViewChat={handleViewChat}
               currentSessionId={sessionId}
             />
 
@@ -811,7 +914,7 @@ function App() {
               <video autoPlay muted loop playsInline>
                 <source src="/Background3.mp4" type="video/mp4" />
               </video>
-              
+
               <div className="main-overlay">
                 <HeaderContent userName={userName} chatTitle={chatTitle} />
 
@@ -839,18 +942,37 @@ function App() {
             </main>
 
             {showSettings && (
-              <SettingsModal 
-                onClose={() => setShowSettings(false)} 
+              <SettingsModal
+                onClose={() => setShowSettings(false)}
                 onSave={handleSettingsSave}
                 onLogout={handleLogout}
                 initialName={userName}
                 initialVoice={ttsVoice}
               />
             )}
+
+            {viewingChat && (
+              <ChatHistory
+                messages={viewingChat.messages}
+                chatTitle={viewingChat.title}
+                onClose={() => setViewingChat(null)}
+              />
+            )}
+
+            {loadingHistory && (
+              <div style={{
+                position: "fixed", inset: 0, zIndex: 2999,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)"
+              }}>
+                <div style={{ color: "white", fontSize: "14px", opacity: 0.7 }}>
+                  Loading chat...
+                </div>
+              </div>
+            )}
           </div>
         )}
       </>
     );
-}
-
+  }
 export default App;

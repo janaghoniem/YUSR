@@ -775,6 +775,241 @@ async def login(data: LoginData):
         raise HTTPException(status_code=500, detail=str(e))
     
 
+
+@app.get("/chat-messages/{session_id}")
+async def get_chat_messages(session_id: str, user_id: str):
+    """
+    Fetch all messages for a specific session, filtered by user_id.
+    Returns only user and assistant messages (strips system prompt).
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        doc = db["language_agent_conversations"].find_one(
+            {"session_id": session_id, "user_id": user_id},
+            sort=[("timestamp", -1)]
+        )
+
+        if not doc or "messages" not in doc:
+            return {"messages": [], "session_id": session_id}
+
+        # Strip system messages, return only user/assistant
+        import json as json_lib
+
+        def clean_content(role, content):
+            """Strip JSON wrapper from assistant messages stored by language agent."""
+            if role != "assistant" or not isinstance(content, str):
+                return content
+            try:
+                parsed = json_lib.loads(content)
+                return (
+                    parsed.get("response_text") or
+                    parsed.get("text") or
+                    parsed.get("response") or
+                    content
+                )
+            except Exception:
+                return content
+
+        messages = [
+            {
+                "role": m["role"],
+                "content": clean_content(m["role"], m.get("content", ""))
+            }
+            for m in doc["messages"]
+            if m.get("role") in ("user", "assistant")
+        ]
+        return {"messages": messages, "session_id": session_id}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch chat messages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+# ============================================================================
+# CHAT LIST, TITLES, AND HISTORY
+# ============================================================================
+
+@app.get("/chats/{user_id}")
+async def get_user_chats(user_id: str):
+    """
+    Returns all chat sessions for a user, sorted by most recent.
+    Reads directly from yusr_db.language_agent_conversations.
+    Generates a title from the first user message if none is stored.
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        docs = list(
+            db["language_agent_conversations"].find(
+                {"user_id": user_id},
+                {"session_id": 1, "title": 1, "messages": 1, "timestamp": 1}
+            ).sort("timestamp", -1)
+        )
+
+        chats = []
+        for doc in docs:
+            sid = doc.get("session_id")
+            if not sid:
+                continue
+
+            # Use stored title or derive from first user message
+            title = doc.get("title")
+            if not title:
+                messages = doc.get("messages", [])
+                for m in messages:
+                    if m.get("role") == "user":
+                        content = m.get("content", "")
+                        # Truncate to 40 chars as working title
+                        title = content[:40] + ("..." if len(content) > 40 else "")
+                        break
+            if not title:
+                title = "New Chat"
+
+            chats.append({
+                "session_id": sid,
+                "title": title,
+                "timestamp": doc.get("timestamp", 0)
+            })
+
+        logger.info(f"✅ Returning {len(chats)} chats for user {user_id}")
+        return {"chats": chats}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get chats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/update-chat-title")
+async def update_chat_title(request: Request):
+    """
+    Saves a human-readable title for a session.
+    Called by frontend after first AI response generates a title.
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        data = await request.json()
+        session_id = data.get("session_id")
+        user_id = data.get("user_id")
+        title = data.get("title", "").strip()
+
+        if not session_id or not user_id or not title:
+            raise HTTPException(status_code=400, detail="Missing session_id, user_id, or title")
+
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        db["language_agent_conversations"].update_one(
+            {"session_id": session_id, "user_id": user_id},
+            {"$set": {"title": title}},
+            upsert=False
+        )
+
+        logger.info(f"✅ Title updated for session {session_id}: '{title}'")
+        return {"status": "ok", "title": title}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update title: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-chat-title")
+async def generate_chat_title(request: Request):
+    """
+    Generates a chat title.
+    - summarize=False (default): called on first message, just truncates text
+    - summarize=True: called after 4 exchanges, uses Gemini to summarize full conversation
+    """
+    try:
+        data = await request.json()
+        message = data.get("message", "").strip()
+        summarize = data.get("summarize", False)
+        session_id = data.get("session_id")
+        user_id = data.get("user_id")
+
+        if not summarize:
+            # Fast path — just truncate first message, no API call
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        # Summarize path — fetch full conversation and ask Gemini
+        if not genai_client:
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        # Get full conversation from MongoDB
+        conversation_text = ""
+        if session_id and user_id:
+            try:
+                from pymongo import MongoClient
+                import os
+                client = MongoClient(os.getenv("MONGODB_URI"))
+                db = client["yusr_db"]
+                doc = db["language_agent_conversations"].find_one(
+                    {"session_id": session_id, "user_id": user_id}
+                )
+                if doc and "messages" in doc:
+                    lines = []
+                    for m in doc["messages"]:
+                        if m.get("role") == "user":
+                            lines.append(f"User: {m['content'][:100]}")
+                        elif m.get("role") == "assistant":
+                            # Parse response_text out of JSON if needed
+                            content = m.get("content", "")
+                            try:
+                                parsed = json.loads(content)
+                                content = parsed.get("response_text", content)
+                            except Exception:
+                                pass
+                            lines.append(f"AURA: {content[:100]}")
+                    conversation_text = "\n".join(lines[:10])  # first 10 turns max
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch conversation for title: {e}")
+
+        if not conversation_text:
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        prompt = f"""Summarize this conversation into a very short title of maximum 5 words.
+
+{conversation_text}
+
+Rules:
+- Maximum 5 words
+- No punctuation at the end
+- No quotes
+- Be specific about what was done or discussed
+- Examples: "Open Notepad write preferences", "Search Amazon white socks", "Set 7am alarm"
+
+Return ONLY the title, nothing else."""
+
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        title = response.text.strip().strip('"').strip("'")
+        if len(title) > 50:
+            title = title[:50]
+
+        logger.info(f"✅ Summarized title: '{title}'")
+        return {"title": title}
+
+    except Exception as e:
+        logger.error(f"❌ Title generation failed: {e}")
+        return {"title": data.get("message", "New Chat")[:35] if 'data' in dir() else "New Chat"}
+
+
 if __name__ == "__main__":
     import uvicorn
     

@@ -3,7 +3,9 @@
 @import "@fontsource/inter";
 
 body {
-  @apply bg-black text-white overflow-hidden;
+  background-color: #000;
+  color: #fff;
+  overflow: hidden;
   font-family: "Poppins", sans-serif;
   background-color: #0b0014;
 }
@@ -1388,6 +1390,8 @@ body {
   .intro-line {
     font-size: 16px;
   }
+}
+
 /* ==================== TRANSPARENT EXECUTION MODE ==================== */
 /* Like Zoom screen share - app becomes semi-transparent so user 
    can see their desktop while AURA works */

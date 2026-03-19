@@ -466,13 +466,9 @@ async def decompose_task_to_actions(
         logger.info(f"📧 Extracted email: {credentials['email']}")
         logger.info(f"🔑 Password extracted (length: {len(credentials['password'])})")
     
-    # ✅ FIX 5: Update thinking step
-    if session_id and http_request_id:
-        await ThinkingStepManager.update_step(
-            session_id,
-            "⚙️ Preparing tasks...",
-            http_request_id
-        )
+    # Remove the decomposition-level thinking step entirely.
+    # The coordinator already shows "preparing_tasks" before calling ainvoke.
+    # Adding another one here just doubles the indicator on screen.
     
     device_hint = f"The user is on a {device_type} device. Tailor task recommendations accordingly.\n\n"
     
@@ -772,20 +768,91 @@ Generate the task decomposition now:"""
         response_text = response.content if hasattr(response, 'content') else str(response)
         response_text = response_text.strip()
 
-        if response_text.startswith("```"):
+        # ── ROBUST JSON EXTRACTION ─────────────────────────────────────────────
+        # The LLM sometimes produces:
+        #   1. A JSON array wrapped in ```json ... ``` fences
+        #   2. A JSON array preceded or followed by prose (e.g. a story continuation)
+        #   3. Two JSON objects on separate lines → "Extra data" JSONDecodeError
+        #   4. A plain dict {"tasks": [...]} instead of a bare array
+        # We handle all cases by extracting ONLY the first valid JSON array found.
+
+        # Step A: strip markdown fences
+        if "```" in response_text:
             parts = response_text.split("```")
-            response_text = parts[1] if len(parts) > 1 else response_text
-            if response_text.strip().startswith("json"):
-                response_text = response_text.strip()[4:]
+            # Take the content between the first pair of fences
+            if len(parts) > 1:
+                inner = parts[1].strip()
+                if inner.startswith("json"):
+                    inner = inner[4:].strip()
+                response_text = inner
 
-        parsed = json.loads(response_text.strip())
+        # Step B: find the first '[' ... ']' balanced JSON array in the text.
+        # This discards any leading/trailing prose or extra JSON objects.
+        def _extract_first_json_array(text: str) -> Optional[str]:
+            """Return the first balanced JSON array substring found in text."""
+            start = text.find("[")
+            if start == -1:
+                return None
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i, ch in enumerate(text[start:], start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\" and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                if in_string:
+                    continue
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+            return None
 
-        if isinstance(parsed, list):
-            action_tasks = [ActionTask(**task) for task in parsed]
-        elif isinstance(parsed, dict) and "tasks" in parsed:
-            action_tasks = [ActionTask(**task) for task in parsed["tasks"]]
-        else:
-            raise ValueError("Invalid task decomposition format")
+        json_array_str = _extract_first_json_array(response_text)
+
+        # Step C: also try top-level dict with "tasks" key as fallback
+        parsed = None
+        if json_array_str:
+            try:
+                parsed = json.loads(json_array_str)
+            except json.JSONDecodeError:
+                pass
+
+        if parsed is None:
+            # Try the whole (stripped) text as a dict
+            try:
+                candidate = json.loads(response_text.strip())
+                if isinstance(candidate, dict) and "tasks" in candidate:
+                    parsed = candidate["tasks"]
+                elif isinstance(candidate, list):
+                    parsed = candidate
+            except json.JSONDecodeError:
+                pass
+
+        if parsed is None:
+            raise ValueError(f"No valid JSON task array found in LLM response. "
+                             f"Response preview: {response_text[:200]}")
+
+        # Step D: normalise to a flat list
+        if isinstance(parsed, dict) and "tasks" in parsed:
+            parsed = parsed["tasks"]
+
+        if not isinstance(parsed, list):
+            raise ValueError(f"Expected a JSON array of tasks, got: {type(parsed)}")
+
+        # Step E: filter out non-dict entries (safety)
+        task_dicts = [t for t in parsed if isinstance(t, dict)]
+        if not task_dicts:
+            raise ValueError("JSON array contained no task objects")
+
+        action_tasks = [ActionTask(**task) for task in task_dicts]
 
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
         return {"tasks": action_tasks}
@@ -885,6 +952,10 @@ def create_coordinator_graph():
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
         user_language = state.get("input", {}).get("user_language", "en")
+        # output_language: language for task content (may differ from system language)
+        output_language = state.get("input", {}).get("output_language", user_language)
+        # user_profile: personalization data forwarded from Language Agent
+        user_profile = state.get("input", {}).get("user_profile") or {}
         
         task_queue.reset()
         task_queue.add_to_current(tasks)
@@ -946,16 +1017,43 @@ def create_coordinator_graph():
                 if input_task_id in task_outputs:
                     current_task.extra_params["input_content"] = task_outputs[input_task_id]
             
-            # Auto-inject reasoning output into dependent action tasks
+            # Auto-inject reasoning output into dependent action tasks.
+            # IMPORTANT: Only inject the clean text content — never raw fenced JSON blocks.
+            # Raw blocks injected as string literals into generated pyautogui code cause
+            # a "charmap codec can't encode" error on Windows when the subprocess writes
+            # the .py file, because the system codepage (cp1252) can't handle Arabic/Unicode.
             if current_task.depends_on:
                 dep_id = current_task.depends_on.strip().split(",")[0].strip()
                 if dep_id in task_outputs and "input_content" not in current_task.extra_params:
-                    current_task.extra_params["input_content"] = task_outputs[dep_id]
+                    raw_dep_output = task_outputs[dep_id]
+                    # Strip any remaining markdown fences (defensive — reasoning agent
+                    # should already return clean text, but guard here as well)
+                    if isinstance(raw_dep_output, str):
+                        stripped = raw_dep_output.strip()
+                        if stripped.startswith("```"):
+                            lines = stripped.split("\n")
+                            inner = lines[1:]
+                            if inner and inner[-1].strip() == "```":
+                                inner = inner[:-1]
+                            stripped = "\n".join(inner).strip()
+                        # If it looks like JSON with a "result" key, extract just the result
+                        if stripped.startswith("{") or stripped.startswith("["):
+                            try:
+                                parsed = json.loads(stripped)
+                                if isinstance(parsed, dict) and "result" in parsed:
+                                    stripped = str(parsed["result"])
+                            except Exception:
+                                pass
+                        raw_dep_output = stripped
+                    current_task.extra_params["input_content"] = raw_dep_output
                     logger.info(f"📎 Auto-injected output from {dep_id} into {current_task.task_id}")
             
             # Execute task
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
-            result = await execute_single_task(current_task, session_id, original_message_id, user_language)
+            result = await execute_single_task(
+                current_task, session_id, original_message_id,
+                user_language, output_language, user_profile
+            )
             
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
@@ -995,7 +1093,10 @@ def create_coordinator_graph():
                             depends_on=current_task.task_id,
                         )
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
-                        resolve_result = await execute_single_task(resolve_task, session_id, original_message_id, user_language)
+                        resolve_result = await execute_single_task(
+                            resolve_task, session_id, original_message_id,
+                            user_language, output_language, user_profile
+                        )
                         results[resolve_task.task_id] = resolve_result
                         task_queue.log_execution(resolve_task, resolve_result)
 
@@ -1082,6 +1183,8 @@ def create_coordinator_graph():
         
         original_request = state["input"].get("original_input", state["input"].get("confirmation", state["input"].get("action", "")))
         user_language = state["input"].get("user_language") or "en"
+        output_language = state["input"].get("output_language") or user_language
+        user_profile = state["input"].get("user_profile") or {}
         is_arabic = user_language == "ar"
 
         if execution_clarification:
@@ -1144,26 +1247,7 @@ def create_coordinator_graph():
             await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
             return {"status": "failed"}
 
-        if success_count == total_count and total_count > 0:
-            response_text = (
-                f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
-                if is_arabic else
-                f"Task completed successfully! Executed {success_count} steps."
-            )
-        elif success_count > 0:
-            response_text = (
-                f"تم تنفيذ المهمة جزئيًا: نجحت {success_count} من {total_count} خطوة."
-                if is_arabic else
-                f"Partially completed: {success_count}/{total_count} steps succeeded."
-            )
-        else:
-            response_text = (
-                "تعذر إكمال المهمة. حاول مرة أخرى."
-                if is_arabic else
-                "Task could not be completed. Please try again."
-            )
-        
-        # Build detailed content from task results
+        # ── Build readable content from task results ─────────────────────────
         detail_lines = []
         has_reasoning_content = False
         for task_obj in state.get("tasks", []):
@@ -1175,19 +1259,61 @@ def create_coordinator_graph():
                     detail_lines.append(extracted_content)
                 if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
                     has_reasoning_content = True
-        
-        full_content = "\n\n".join(detail_lines) if detail_lines else response_text
-        
-        # Determine response type
-        if success_count == 0:
-            resp_type = ResponseType.ERROR_RECOVERABLE
-        elif success_count < total_count:
-            resp_type = ResponseType.PARTIAL_RESULT
-        elif detail_lines:
-            resp_type = ResponseType.RESULT_WITH_CONTENT
-        else:
-            resp_type = ResponseType.SIMPLE_ACK
 
+        full_content = "\n\n".join(detail_lines) if detail_lines else ""
+
+        # ── Delegate user-facing message to Language Agent ────────────────────
+        # The Coordinator does NOT generate user communication directly.
+        # Instead it calls the Language Agent's Communication Mode which applies
+        # the correct language, tone, and personalization to the result.
+        response_text = ""
+        follow_ups = []
+        try:
+            from agents.language_agent import get_agent_for_session
+            lang_agent = get_agent_for_session(session_id)
+            if lang_agent:
+                completion_result = lang_agent.generate_completion_message(
+                    original_request=original_request,
+                    result_content=full_content or (
+                        f"Completed {success_count}/{total_count} steps."
+                        if not is_arabic
+                        else f"تم إكمال {success_count}/{total_count} خطوات."
+                    ),
+                    result_metadata={
+                        "success_count": success_count,
+                        "total_count": total_count,
+                        "has_reasoning_content": has_reasoning_content,
+                    },
+                    lang=user_language,
+                )
+                response_text = completion_result.get("message", "")
+                follow_ups = completion_result.get("follow_ups", [])
+                logger.info(f"✅ Language Agent generated completion message: {response_text[:100]}")
+        except Exception as e:
+            logger.warning(f"⚠️ Language Agent message generation failed, using fallback: {e}")
+
+        # ── Safe fallback if Language Agent unavailable ───────────────────────
+        if not response_text:
+            if success_count == total_count and total_count > 0:
+                response_text = (
+                    f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
+                    if is_arabic else
+                    f"Task completed successfully! Executed {success_count} steps."
+                )
+            elif success_count > 0:
+                response_text = (
+                    f"تم تنفيذ المهمة جزئيًا: نجحت {success_count} من {total_count} خطوة."
+                    if is_arabic else
+                    f"Partially completed: {success_count}/{total_count} steps succeeded."
+                )
+            else:
+                response_text = (
+                    "تعذر إكمال المهمة. حاول مرة أخرى."
+                    if is_arabic else
+                    "Task could not be completed. Please try again."
+                )
+
+        # Build follow-up question for read-aloud offer (appended to response)
         follow_up_question = None
         if success_count == 0:
             follow_up_question = (
@@ -1201,7 +1327,7 @@ def create_coordinator_graph():
                 if is_arabic else
                 "It was only partially completed. Would you like me to retry the failed steps?"
             )
-        elif has_reasoning_content and len(full_content) > 200:
+        elif has_reasoning_content and len(full_content) > 200 and not follow_ups:
             follow_up_question = (
                 "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
                 if is_arabic else
@@ -1210,6 +1336,16 @@ def create_coordinator_graph():
 
         if follow_up_question:
             response_text = f"{response_text} {follow_up_question}"
+
+        # Determine response type
+        if success_count == 0:
+            resp_type = ResponseType.ERROR_RECOVERABLE
+        elif success_count < total_count:
+            resp_type = ResponseType.PARTIAL_RESULT
+        elif detail_lines:
+            resp_type = ResponseType.RESULT_WITH_CONTENT
+        else:
+            resp_type = ResponseType.SIMPLE_ACK
         
         # Build StructuredResponse
         structured = StructuredResponse(
@@ -1217,7 +1353,7 @@ def create_coordinator_graph():
             spoken_text=response_text,
             full_content=full_content if full_content != response_text else None,
             offer_read_aloud=has_reasoning_content and len(full_content) > 200,
-            offer_actions=["undo", "retry"] if success_count > 0 else ["retry"],
+            offer_actions=(follow_ups if follow_ups else []) + (["undo", "retry"] if success_count > 0 else ["retry"]),
             context_for_undo={"original_request": original_request, "completed_tasks": [t.task_id for t in state.get("tasks", [])]}
         )
         
@@ -1231,7 +1367,9 @@ def create_coordinator_graph():
                 "status": "success" if success_count > 0 else "failed",
                 "response": response_text,
                 "user_language": user_language,
+                "output_language": output_language,
                 "follow_up_question": follow_up_question,
+                "follow_ups": follow_ups,
                 "structured_response": structured.model_dump(),
                 "result": {
                     "completed_tasks": {k: v.status for k, v in results.items()},
@@ -1350,6 +1488,8 @@ async def execute_single_task(
     session_id: str,
     original_message_id: str,
     user_language: str = "en",
+    output_language: str = "en",
+    user_profile: Optional[Dict[str, Any]] = None,
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
     
@@ -1418,11 +1558,19 @@ async def execute_single_task(
     task_payload = task.model_dump()
     if task.target_agent == "reasoning":
         task_payload["user_language"] = user_language
+        # Pass output_language (may differ from user_language when user requests a different
+        # language for the task output, e.g. Arabic user asking for an English summary)
+        task_payload["output_language"] = output_language or user_language
         extra_params = task_payload.get("extra_params") or {}
         if not isinstance(extra_params, dict):
             extra_params = {}
-        extra_params["language"] = user_language
+        extra_params["language"] = output_language or user_language
+        # Carry user_profile so Reasoning Agent can personalize its output style
+        if user_profile:
+            extra_params["user_profile"] = user_profile
         task_payload["extra_params"] = extra_params
+        # Also set at top level for direct access
+        task_payload["user_profile"] = user_profile or {}
 
     # Create message
     task_msg = AgentMessage(
@@ -1489,13 +1637,13 @@ async def start_coordinator_agent(broker_instance):
         http_request_id = message.response_to if message.response_to else message.message_id
         user_id = message.payload.get("user_id", "default_user")
         session_id = message.session_id
+        # Resolve the user's preferred language early so all thinking step updates
+        # are shown in the correct language from the very first step.
+        user_language = message.payload.get("user_language") or "en"
 
-        # ✅ FIX 5: STEP 1
-        await ThinkingStepManager.update_step(
-            session_id, 
-            "👀 Received your request...", 
-            http_request_id
-        )
+        # No "received" step — "preparing_for_coordinator" in the Language Agent
+        # already tells the user we've got it. Showing another step here just adds
+        # visual noise without conveying new information.
         
         # Log a helpful summary of the incoming payload: prefer the confirmation text if present
         payload_summary = message.payload.get('confirmation') or message.payload.get('action') or str(message.payload)
@@ -1509,16 +1657,17 @@ async def start_coordinator_agent(broker_instance):
             logger.info("📥 Another request is executing — waiting for coordinator lock")
             await ThinkingStepManager.update_step(
                 session_id,
-                "⏳ Queued behind an ongoing task...",
-                http_request_id
+                "queued_request",
+                http_request_id,
+                language=user_language
             )
-        
+
         state_input = {
             "input": message.payload,
             "session_id": session_id,
             "original_message_id": http_request_id,
             "user_id": user_id,
-            "conversation_history": []  # ✅ FIX 3: Initialize empty if not present
+            "conversation_history": []
         }
         config = {
             "configurable": {
@@ -1528,22 +1677,18 @@ async def start_coordinator_agent(broker_instance):
         }
 
         async with coordinator_processing_lock:
-            # ✅ FIX 5: STEP 2 (before decomposition)
+            # Only emit "figuring out how to do this" before the heavy LLM decomposition.
+            # We deliberately skip a post-completion step — ThinkingStepManager.clear_steps
+            # is called by the server after the response, which removes the indicator cleanly.
             await ThinkingStepManager.update_step(
-                session_id, 
-                "🧠 Analyzing your request...", 
-                http_request_id
+                session_id,
+                "preparing_tasks",
+                http_request_id,
+                language=user_language
             )
 
             result = await coordinator_graph.ainvoke(state_input, config)
             logger.info(f"✅ Task processing complete: {result.get('status')}")
-            
-            # ✅ FIX 5: STEP 3
-            await ThinkingStepManager.update_step(
-                session_id, 
-                "📋 Creating execution plan...", 
-                http_request_id
-            )
     
     async def handle_action_result(message: AgentMessage):
         """

@@ -19,6 +19,67 @@ logger = logging.getLogger(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 REASONING_MODEL = "llama-3.3-70b-versatile"
 
+
+def _build_personalization_instruction(user_profile: Dict[str, Any], target_lang: str) -> str:
+    """
+    Derive a personalization instruction from the user profile.
+    This is injected into every reasoning prompt so outputs adapt to
+    the user's background without hard-coded if-else logic.
+    """
+    if not user_profile:
+        return ""
+
+    profession = str(user_profile.get("profession", "")).lower()
+    education = str(user_profile.get("education", "")).lower()
+    tone_pref = str(user_profile.get("tone", "")).lower()
+
+    lines = []
+
+    # Profession / education driven tone
+    if "student" in profession or "student" in education:
+        lines.append(
+            "The user is a student. Use an academic, structured tone. "
+            "Explain concepts clearly with examples where helpful."
+        )
+    elif any(k in profession for k in ["engineer", "developer", "analyst"]):
+        lines.append(
+            "The user is a technical professional. Be concise and precise. "
+            "Use domain terminology freely. Omit basic explanations."
+        )
+    elif any(k in profession for k in ["doctor", "pharmacist", "nurse", "medical"]):
+        lines.append(
+            "The user works in healthcare. Use accurate clinical language "
+            "and be concise. Avoid oversimplification."
+        )
+    elif any(k in profession for k in ["manager", "executive", "director", "ceo"]):
+        lines.append(
+            "The user is a business professional. Provide actionable, "
+            "high-level summaries. Prioritize key decisions and outcomes."
+        )
+    elif any(k in profession for k in ["teacher", "professor", "educator"]):
+        lines.append(
+            "The user is an educator. Be structured and thorough. "
+            "Present information in a way that is easy to explain to others."
+        )
+    else:
+        lines.append(
+            "Use clear, simplified language. Avoid jargon. "
+            "Prioritize readability and accessibility."
+        )
+
+    # Explicit tone override from profile
+    if "formal" in tone_pref:
+        lines.append("Maintain a formal, professional tone throughout.")
+    elif "casual" in tone_pref or "friendly" in tone_pref:
+        lines.append("Keep the tone friendly and conversational.")
+
+    if not lines:
+        return ""
+
+    block = "\n".join(lines)
+    return f"\nPERSONALIZATION (adapt output accordingly):\n{block}\n"
+
+
 class ReasoningAgent:
     def __init__(self):
         self.llm = ChatGroq(
@@ -26,8 +87,8 @@ class ReasoningAgent:
             temperature=0.2,
             groq_api_key=GROQ_API_KEY
         )
-        
-        self.system_prompt = """You are the REASONING AGENT – the cognitive brain of the AURA multi-agent system.
+
+        self.base_system_prompt = """You are the REASONING AGENT – the cognitive brain of the AURA multi-agent system.
 
 PURPOSE:
 You are responsible for all high-level intellectual processing inside AURA.
@@ -58,29 +119,56 @@ STRICT OPERATIONAL RULES:
 You are an internal reasoning component, not a user-facing assistant.
 Your goal is correctness, clarity, and usefulness to the system."""
 
+    def _build_system_prompt(self, user_profile: Dict[str, Any], target_lang: str) -> str:
+        """Combine base system prompt with dynamic personalization instruction."""
+        personalization = _build_personalization_instruction(user_profile, target_lang)
+        return f"{self.base_system_prompt}{personalization}"
+
     async def process_reasoning_task(self, task_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes the logic requested by the Coordinator.
+        Personalization is derived from `user_profile` in the payload.
         """
         ai_prompt = task_payload.get("ai_prompt", "Process the following content.")
         content = task_payload.get("content", "")
         extra_params = task_payload.get("extra_params", {})
-        explicit_lang = str(task_payload.get("user_language") or extra_params.get("language") or "en").lower().strip()
+
+        # ── Language resolution ───────────────────────────────────────────────
+        # output_language is set by the Language Agent and reflects what the user
+        # actually spoke/typed — it is the authoritative source.
+        # extra_params.language is derived from user_language which can be stale
+        # from a prior session, so it has LOWER priority than output_language.
+        #
+        # Priority chain (high → low):
+        #   1. output_language  — set by Language Agent from live input detection
+        #   2. user_language    — set by server from live input detection  
+        #   3. extra_params.language — may be stale, used only as last resort
+        explicit_lang = str(
+            task_payload.get("output_language")
+            or task_payload.get("user_language")
+            or extra_params.get("language")
+            or "en"
+        ).lower().strip()
         target_lang = "ar" if explicit_lang.startswith("ar") else "en"
-        
-        # ✅ FIX 1: Extract input_content from multiple sources
+        logger.info(f"🌐 Reasoning Agent target language: {target_lang} "
+                    f"(from output_language={task_payload.get('output_language')}, "
+                    f"user_language={task_payload.get('user_language')})")
+
+        # ── User profile for personalization ─────────────────────────────────
+        user_profile: Dict[str, Any] = task_payload.get("user_profile") or extra_params.get("user_profile") or {}
+
+        # ── FIX 1: Extract input_content from multiple sources ────────────────
         if "input_content" in extra_params:
             content = extra_params["input_content"]
             logger.info(f"📥 Using input_content from extra_params ({len(content)} chars)")
-        
-        # ✅ FIX 2: Clean success/failure markers from content
+
+        # ── FIX 2: Clean success/failure markers from content ─────────────────
         if content:
             content = content.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
             logger.info(f"🧹 Cleaned content: {len(content)} chars")
-        
-        # ✅ FIX 3: Validate content exists
+
+        # ── FIX 3: Validate content exists ────────────────────────────────────
         if not content or content == "":
-            # Check if this looks like a data-processing task that truly needs input
             data_keywords = ["summarize", "analyze", "analyse", "review", "translate",
                              "extract", "check", "fix", "debug", "explain this", "describe this"]
             needs_data = any(kw in ai_prompt.lower() for kw in data_keywords)
@@ -88,49 +176,63 @@ Your goal is correctness, clarity, and usefulness to the system."""
                 logger.warning(f"⚠️ Data-processing task with no content — attempting with prompt only")
             else:
                 logger.info(f"📝 Standalone generation task — no input data required")
-            # Either way, proceed — DATA TO PROCESS section will be omitted from the prompt
-        
+
         try:
             logger.info(f"🧠 Reasoning Agent processing task: {ai_prompt[:50]}...")
             if content:
                 logger.info(f"📊 Content preview: {content[:200]}...")
-            
-            # Build prompt: include DATA section only when content is available
+
+            # Build dynamic system prompt with personalization
+            system_prompt = self._build_system_prompt(user_profile, target_lang)
+
+            lang_instruction = (
+                f"\nOUTPUT LANGUAGE REQUIREMENT: Return the `result` field strictly in "
+                f"{'Arabic' if target_lang == 'ar' else 'English'}.\n"
+            )
+
             if content:
-                full_prompt = f"""{self.system_prompt}
-
-    OUTPUT LANGUAGE REQUIREMENT: Return the `result` field strictly in {'Arabic' if target_lang == 'ar' else 'English'}.
-
-    TASK: {ai_prompt}
-
-    DATA TO PROCESS:
-    {content}
-
-    EXTRA PARAMETERS: {json.dumps(extra_params)}
-
-    Please respond with valid JSON only."""
+                full_prompt = (
+                    f"{system_prompt}"
+                    f"{lang_instruction}"
+                    f"\nTASK: {ai_prompt}"
+                    f"\n\nDATA TO PROCESS:\n{content}"
+                    f"\n\nEXTRA PARAMETERS: {json.dumps(extra_params)}"
+                    f"\n\nPlease respond with valid JSON only."
+                )
             else:
-                full_prompt = f"""{self.system_prompt}
-
-    OUTPUT LANGUAGE REQUIREMENT: Return the `result` field strictly in {'Arabic' if target_lang == 'ar' else 'English'}.
-
-    TASK: {ai_prompt}
-
-    EXTRA PARAMETERS: {json.dumps(extra_params)}
-
-    Please respond with valid JSON only."""
+                full_prompt = (
+                    f"{system_prompt}"
+                    f"{lang_instruction}"
+                    f"\nTASK: {ai_prompt}"
+                    f"\n\nEXTRA PARAMETERS: {json.dumps(extra_params)}"
+                    f"\n\nPlease respond with valid JSON only."
+                )
 
             response = await self.llm.ainvoke(full_prompt)
             response_text = response.content if hasattr(response, 'content') else str(response)
             logger.info(f"🤖 REASONING RESPONSE ({len(response_text)} chars): {response_text[:200]}...")
-            
+
+            # ── Strip markdown code fences before parsing ──────────────────────────
+            # The LLM sometimes wraps JSON in ```json ... ``` fences.
+            # If the raw fenced block is stored and later injected into an
+            # execution task's prompt as a string literal, the subprocess
+            # sandbox will fail to write the .py file on Windows (charmap
+            # codec can't encode Arabic characters embedded in the literal).
+            clean_response = response_text.strip()
+            if clean_response.startswith("```"):
+                # Strip leading fence line (e.g. ```json or just ```)
+                lines = clean_response.split("\n")
+                # Drop first line (the opening fence) and any trailing ``` line
+                inner_lines = lines[1:]
+                if inner_lines and inner_lines[-1].strip() == "```":
+                    inner_lines = inner_lines[:-1]
+                clean_response = "\n".join(inner_lines).strip()
+
             # Parse JSON response
             try:
-                parsed_response = json.loads(response_text)
+                parsed_response = json.loads(clean_response)
                 result_content = parsed_response.get("result", str(parsed_response))
-                
                 logger.info(f"✅ Reasoning complete: {result_content[:200]}...")
-                
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",
@@ -138,11 +240,13 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     "metadata": parsed_response.get("metadata", {})
                 }
             except json.JSONDecodeError:
-                logger.warning("⚠️ Response was not valid JSON, using raw text")
+                # Last resort: if still not parseable, return the cleaned text directly.
+                # This avoids injecting raw fenced JSON blocks into downstream tasks.
+                logger.warning("⚠️ Response was not valid JSON, using cleaned raw text")
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",
-                    "content": response_text,
+                    "content": clean_response,
                     "metadata": {"notes": "Response was not in JSON format"}
                 }
 
@@ -154,6 +258,7 @@ Your goal is correctness, clarity, and usefulness to the system."""
                 "error": str(e),
                 "content": ""
             }
+
 
 async def start_reasoning_agent():
     agent = ReasoningAgent()
@@ -168,8 +273,8 @@ async def start_reasoning_agent():
 
         # Process the logic
         result = await agent.process_reasoning_task(payload)
-        
-        # FIX: Add task_id to result payload
+
+        # Add task_id to result payload
         result["task_id"] = task_id
 
         # Send response back to Coordinator
@@ -180,7 +285,7 @@ async def start_reasoning_agent():
             session_id=message.session_id,
             task_id=task_id,
             response_to=message.message_id,
-            payload=result  # Now includes task_id
+            payload=result
         )
 
         await broker.publish(Channels.REASONING_TO_COORDINATOR, response_msg)
@@ -192,7 +297,3 @@ async def start_reasoning_agent():
 
     while True:
         await asyncio.sleep(1)
-
-# if __name__ == "__main__":
-#     logging.basicConfig(level=logging.INFO)
-#     asyncio.run(start_reasoning_agent())

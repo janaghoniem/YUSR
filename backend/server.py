@@ -213,26 +213,29 @@ async def text_to_speech(request: Request):
         
         logger.info(f"🗣️ Generating speech for: '{text[:50]}...'")
         
-        # Auto-detect language if not specified
-        if not lang:
-            # Simple heuristic: check if text contains Arabic characters
-            if any('\u0600' <= char <= '\u06FF' for char in text):
-                lang = 'ar'  # Arabic
-                logger.info("🌐 Detected language: Arabic")
-            else:
-                lang = 'en'  # English
-                logger.info("🌐 Detected language: English")
-        else:
-            logger.info(f"🌐 Using specified language: {lang}")
+        # ── Always detect language from the actual text content ────────────
+        # Bug: the frontend passes lang='ar-EG' from stale localStorage even
+        # when the text is English (thinking steps, completion messages).
+        # gTTS then reads English text with an Arabic voice → garbled audio.
+        # Fix: derive language from character ratio first; use the caller hint
+        # only when the text is too short/ambiguous to detect confidently.
+        arabic_chars = sum(1 for ch in text if '\u0600' <= ch <= '\u06FF')
+        total_chars = max(len(text.replace(' ', '')), 1)
+        arabic_ratio = arabic_chars / total_chars
 
-        normalized_lang = (lang or "").lower().strip()
-        tld = "com"
-        if normalized_lang.startswith("ar"):
-            lang = "ar"
-            tld = "com.eg"
-        elif normalized_lang.startswith("en"):
-            lang = "en"
-            tld = "com"
+        if arabic_ratio > 0.15:          # clear Arabic majority
+            lang = 'ar'
+        elif arabic_ratio == 0.0:         # zero Arabic characters → English
+            lang = 'en'
+        else:                             # ambiguous — trust the caller hint
+            hint = (lang or 'en').lower().strip()
+            lang = 'ar' if hint.startswith('ar') else 'en'
+
+        tld = 'com.eg' if lang == 'ar' else 'com'
+        logger.info(
+            f"🌐 TTS language: {lang} "
+            f"(arabic_ratio={arabic_ratio:.2f}, caller_hint={data.get('lang', 'none')})"
+        )
         
         # Generate TTS with gTTS
         # slow=False for natural speed
@@ -438,8 +441,16 @@ async def process_user_input(request: Request):
         user_input = data.get("input", "").strip()
         is_clarification = data.get("is_clarification", False)
         device_type = data.get("device_type", "mobile")
-        user_id = data.get("user_id", "test_user")  # ✅ ADD THIS LINE
-        user_language = data.get("user_language", "en")
+        user_id = data.get("user_id", "test_user")
+        # Detect language from the actual input text — more reliable than the
+        # frontend's stored value which may be stale from a prior session
+        def _detect_lang_http(text: str) -> str:
+            if not text:
+                return "en"
+            arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+            ratio = arabic_chars / max(len(text.replace(" ", "")), 1)
+            return "ar" if ratio > 0.15 else "en"
+        user_language = _detect_lang_http(user_input) or data.get("user_language", "en")
         
         if not user_input:
             raise HTTPException(status_code=400, detail="Missing 'input' field")
@@ -471,8 +482,10 @@ async def process_user_input(request: Request):
         logger.info(f"📝 Registered pending response. Total pending: {len(pending_responses)}")
         logger.info(f"📝 Pending IDs: {list(pending_responses.keys())}")
         
-        # NEW: Send initial thinking update
-        await ThinkingStepManager.update_step(session_id, "Processing input...", message.message_id)
+        # NEW: Send initial thinking update in the user's preferred language
+        await ThinkingStepManager.update_step(
+            session_id, "processing_input", message.message_id, language=user_language
+        )
         
         logger.info(f"📤 Publishing message to {Channels.LANGUAGE_INPUT}")
         await broker.publish(Channels.LANGUAGE_INPUT, message)
@@ -553,6 +566,40 @@ async def create_account(data: OnboardingData):
 
         users_col.insert_one(user_doc)
         logger.info(f"✅ Account created for user_id: {data.user_id}, username: {data.username}")
+
+        # ── Store user profile into Mem0 for agent personalization ──────────
+        # This makes the user's profession, language, and preferences available
+        # to the Language Agent and Reasoning Agent at runtime.
+        try:
+            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+            pref_mgr = get_preference_manager(data.user_id)
+
+            # Store preferred language as a preference
+            language_pref = data.preferences.get("language", "English")
+            lang_code = "ar" if "عرب" in language_pref or language_pref.lower() == "arabic" else "en"
+            pref_mgr.add_preference(
+                f"User's preferred language is {language_pref} ({lang_code})",
+                metadata={"category": "language_preference", "source": "onboarding", "lang_code": lang_code}
+            )
+
+            # Store user introduction (contains profession/interests)
+            if data.introduction:
+                pref_mgr.add_preference(
+                    data.introduction,
+                    metadata={"category": "personal_info", "source": "onboarding"}
+                )
+
+            # Store theme preference
+            theme = data.preferences.get("theme", "")
+            if theme:
+                pref_mgr.add_preference(
+                    f"User prefers the {theme} theme",
+                    metadata={"category": "ui_preference", "source": "onboarding"}
+                )
+
+            logger.info(f"✅ Stored onboarding profile into Mem0 for user_id: {data.user_id}")
+        except Exception as mem_err:
+            logger.warning(f"⚠️ Failed to store onboarding profile into Mem0 (non-fatal): {mem_err}")
 
         return {"status": "ok", "message": "Account created successfully", "user_id": data.user_id}
 
@@ -796,7 +843,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             if payload.get("action") == "thinking_update":
                 await ws_manager.send_to_session(session_id, {
                     "type": "thinking_step",
-                    "step": payload.get("step", "")
+                    "step": payload.get("step", ""),
+                    "language": payload.get("language", "en"),
                 })
             elif payload.get("action") == "thinking_clear":
                 await ws_manager.send_to_session(session_id, {
@@ -873,7 +921,22 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 user_text = data.get("text", "").strip()
                 device_type = data.get("device_type", "desktop")
                 user_id = data.get("user_id", "test_user")
-                user_language = data.get("user_language", "en")
+
+                # ── Detect language from the ACTUAL input text ────────────────
+                # The frontend sends user_language from localStorage, which can be
+                # stale from a previous session in a different language.
+                # Detecting from the input text itself is always more accurate.
+                def _detect_lang(text: str) -> str:
+                    if not text:
+                        return "en"
+                    arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+                    ratio = arabic_chars / max(len(text.replace(" ", "")), 1)
+                    return "ar" if ratio > 0.15 else "en"
+
+                detected_language = _detect_lang(user_text)
+                # Frontend hint is used only as tiebreaker when detection is ambiguous
+                frontend_hint = data.get("user_language", "en")
+                user_language = detected_language if detected_language in ("en", "ar") else frontend_hint
                 
                 if not user_text:
                     continue
@@ -926,7 +989,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 future = asyncio.Future()
                 pending_responses[message.message_id] = future
                 
-                await ThinkingStepManager.update_step(session_id, "Processing input...", message.message_id)
+                # First thinking step uses the language detected from actual input text,
+                # not from localStorage — this prevents the Arabic-session stale-language bug.
+                await ThinkingStepManager.update_step(
+                    session_id, "processing_input", message.message_id, language=user_language
+                )
                 await broker.publish(Channels.LANGUAGE_INPUT, message)
                 
                 # Wait for response asynchronously (don't block WebSocket read loop)

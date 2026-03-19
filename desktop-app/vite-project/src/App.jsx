@@ -1205,90 +1205,73 @@ function App() {
 
         if (!res.ok) throw new Error(data.detail || "Backend error");
 
-      // ✅ Update chat title if provided (first message generates title)
-      if (data.chat_title && data.chat_title !== "Chat") {
-        console.log("[Chat] Received chat title:", data.chat_title);
-        setChatTitle(data.chat_title);
-        
-        // Update backend chat metadata
-        try {
-          await fetch("http://localhost:8000/update-chat-title", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              session_id: sessionId,
-              user_id: userId,
-              title: data.chat_title,
-            }),
-          });
-          console.log("[Chat] Chat title updated on backend");
-          
-          // Reload chat list to show updated title
-          const chatsResponse = await fetch(`http://localhost:8000/chats/${userId}`);
-          if (chatsResponse.ok) {
-            const chatsData = await chatsResponse.json();
-            setChats(chatsData.chats || []);
-            console.log("[Chats] Reloaded chat list");
-          }
-        } catch (error) {
-          console.warn("[Chat] Failed to update chat title:", error);
-        }
-      }
+        // Update chat title if provided (first message generates title)
+        if (data.chat_title && data.chat_title !== "Chat") {
+          console.log("[Chat] Received chat title:", data.chat_title);
+          setChatTitle(data.chat_title);
 
-      if (data.status === "clarification_needed") {
-        console.log("[Agent] Clarification requested:", data.question);
-        setClarificationResponseToId(data.response_id);
-        setAssistantMessage(data.question);
-        await speakResponse(data.question);
-      } else {
-        // Normalize various possible response shapes into a safe string
-        let responseText = "Task completed";
+          try {
+            await fetch("http://localhost:8000/update-chat-title", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                session_id: sessionId,
+                user_id: userId,
+                title: data.chat_title,
+              }),
+            });
 
-        if (data.text && typeof data.text === "string") {
-          responseText = data.text;
-        } else if (data.result) {
-          if (typeof data.result === "string") {
-            responseText = data.result;
-          } else if (data.result.response && typeof data.result.response === "string") {
-            responseText = data.result.response;
-          } else if (data.result.text && typeof data.result.text === "string") {
-            responseText = data.result.text;
-          } else if (data.result && typeof data.result === 'object') {
-            // Prefer brief 'details' or fallback to JSON summary
-            responseText = data.result.details || data.result.summary || JSON.stringify(data.result);
+            const chatsResponse = await fetch(`http://localhost:8000/chats/${userId}`);
+            if (chatsResponse.ok) {
+              const chatsData = await chatsResponse.json();
+              setChats(chatsData.chats || []);
+              console.log("[Chats] Reloaded chat list");
+            }
+          } catch (error) {
+            console.warn("[Chat] Failed to update chat title:", error);
           }
         }
 
-        console.log("[Agent] Final response:", responseText);
-        setClarificationResponseToId(null);
-        setAssistantMessage(responseText);
-        if (responseText && typeof responseText === 'string') await speakResponse(responseText);
         setThinkingSteps([]);
         setIsThinking(false);
 
         if (data.status === "clarification_needed") {
+          const questionText = extractReadableText(data.question) || t("Could you clarify?", "هل يمكنك التوضيح؟");
+          setClarificationResponseToId(data.response_id);
+          setAssistantMessage(questionText);
+
+          if (data.user_language) {
+            userLanguageRef.current = data.user_language;
+            setUserLanguage(data.user_language);
+            localStorage.setItem("userLanguage", data.user_language);
+          }
+
+          rememberUserLanguageFromText(questionText);
+          await speakAssistantResponse(
+            questionText,
+            data.user_language || userLanguageRef.current || detectLanguageFromText(questionText)
+          );
+        } else {
+          const responseText = data.spoken_text || data.text || data.result?.response || data.result || t("Task completed", "تم تنفيذ المهمة بنجاح");
+          const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
+          setClarificationResponseToId(null);
+          setAssistantMessage(cleanResponseText);
+
+          if (data.user_language) {
+            userLanguageRef.current = data.user_language;
+            setUserLanguage(data.user_language);
+            localStorage.setItem("userLanguage", data.user_language);
+          }
+
           const sr = data.structured_response || null;
           if (sr) {
             const cleanFullContent = extractReadableText(sr.full_content || sr.content || sr.result || "");
             setStructuredResponse({ ...sr, full_content: cleanFullContent });
             setOfferReadAloud(sr.offer_read_aloud === true && !!cleanFullContent);
           }
-          if (data.user_language) {
-            userLanguageRef.current = data.user_language;
-            setUserLanguage(data.user_language);
-            localStorage.setItem("userLanguage", data.user_language);
-          }
-          setClarificationResponseToId(data.response_id);
-          setAssistantMessage(data.question);
-          rememberUserLanguageFromText(data.question);
-          speakAssistantResponse(data.question, data.user_language || userLanguageRef.current || detectLanguageFromText(data.question));
-        } else {
-          const responseText = data.text || data.result?.response || data.result || t("Task completed", "تم تنفيذ المهمة بنجاح");
-          const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
-          setClarificationResponseToId(null);
-          setAssistantMessage(cleanResponseText);
+
           rememberUserLanguageFromText(cleanResponseText);
-          speakAssistantResponse(cleanResponseText, userLanguage || detectLanguageFromText(cleanResponseText));
+          await speakAssistantResponse(cleanResponseText, data.user_language || userLanguage || detectLanguageFromText(cleanResponseText));
         }
       }
     } catch (error) {
@@ -1407,19 +1390,7 @@ function App() {
       {showOnboarding ? (
         <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
       ) : (
-        <div className="app-root">
-          <Sidebar
-            collapsed={isSidebarCollapsed}
-            onToggle={() => {
-              console.log("[UI] Sidebar toggled");
-              setIsSidebarCollapsed((p) => !p);
-            }}
-            onSettingsClick={handleSettingsClick}
-            onNewChat={handleNewChat}
-            chats={chats}
-            onSwitchChat={handleSwitchChat}
-            currentSessionId={sessionId}
-    <div className={appClassName}>
+        <div className={appClassName}>
       {/* ===== Title bar (custom — frameless window) ===== */}
       {executionMode !== "widget" && (
         <div className="titlebar">
@@ -1539,6 +1510,9 @@ function App() {
         }}
         onSettingsClick={handleSettingsClick}
         onNewChat={handleNewChat}
+        chats={chats}
+        onSwitchChat={handleSwitchChat}
+        currentSessionId={sessionId}
       />
 
       <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
@@ -1584,47 +1558,18 @@ function App() {
             isExecuting={isExecuting}
             onInterrupt={sendInterrupt}
           />
-
-          <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-            <video autoPlay muted loop playsInline>
-              <source src="/Background3.mp4" type="video/mp4" />
-            </video>
-            
-            <div className="main-overlay">
-              <HeaderContent userName={userName} chatTitle={chatTitle} />
-
-              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-              {assistantMessage && !isThinking && (
-                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-                  <div className="response-message">
-                    {assistantMessage}
-                  </div>
-                </div>
-              )}
-
-              <VoiceControls
-                isRecording={isRecording}
-                orbState={orbState}
-                onMicClick={handleMicClick}
-                onCancel={handleCancel}
-                chatMode={chatMode}
-                setChatMode={setChatMode}
-                onSendText={handleTextSubmit}
-                onSettingsClick={handleSettingsClick}
-              />
-            </div>
-          </main>
-
-          {showSettings && (
-            <SettingsModal 
-              onClose={() => setShowSettings(false)} 
-              onSave={handleSettingsSave}
-              initialName={userName}
-              initialVoice={ttsVoice}
-            />
-          )}
         </div>
+      </main>
+
+      {showSettings && (
+        <SettingsModal 
+          onClose={() => setShowSettings(false)} 
+          onSave={handleSettingsSave}
+          initialName={userName}
+          initialVoice={ttsVoice}
+        />
+      )}
+    </div>
       )}
     </>
   );

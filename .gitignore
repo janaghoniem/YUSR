@@ -25,6 +25,8 @@ __pycache__/
 env/
 venv/
 backend/venv_apo/
+.venv/
+**/.venv/
 aura-venv/
 ENV/
 build/

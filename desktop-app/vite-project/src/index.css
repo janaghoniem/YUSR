@@ -3,7 +3,9 @@
 @import "@fontsource/inter";
 
 body {
-  @apply bg-black text-white overflow-hidden;
+  background-color: #000;
+  color: #fff;
+  overflow: hidden;
   font-family: "Poppins", sans-serif;
   background-color: #0b0014;
 }
@@ -1388,4 +1390,473 @@ body {
   .intro-line {
     font-size: 16px;
   }
+}
+
+/* ==================== TRANSPARENT EXECUTION MODE ==================== */
+/* Like Zoom screen share - app becomes semi-transparent so user 
+   can see their desktop while AURA works */
+
+.app-root.transparent-mode {
+  opacity: 0.25;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+}
+
+/* Keep controls interactive even in transparent mode */
+.app-root.transparent-mode .voice-controls,
+.app-root.transparent-mode .chat-input-wrapper,
+.app-root.transparent-mode .interrupt-controls,
+.app-root.transparent-mode .interrupt-controls-inline,
+.app-root.transparent-mode .execution-mode-toggle {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Re-show controls area at full opacity */
+.app-root.transparent-mode .main-overlay {
+  position: relative;
+  z-index: 100;
+}
+
+/* ==================== CUSTOM TITLE BAR (frameless) ==================== */
+
+.titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(11, 0, 20, 0.6);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.titlebar-drag {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding-left: 18px;
+  -webkit-app-region: drag;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.45);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.titlebar-buttons {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 0;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  width: 44px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+  padding: 0;
+  line-height: 1;
+}
+
+.titlebar-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+}
+
+.titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.titlebar-btn.titlebar-mode {
+  width: 44px;
+}
+
+.titlebar-btn.titlebar-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+/* Push content below title bar */
+.app-root .sidebar {
+  padding-top: 40px;
+}
+
+.app-root .main-area {
+  padding-top: 0;
+}
+
+.app-root .main-overlay {
+  padding-top: 48px;
+}
+
+/* ==================== WIDGET MODE ==================== */
+
+.app-root.widget-mode {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, #0b0014 0%, #16001f 100%);
+  border: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  z-index: 99999;
+  -webkit-app-region: no-drag;
+}
+
+.app-root.widget-mode .sidebar,
+.app-root.widget-mode .main-area,
+.app-root.widget-mode .titlebar {
+  display: none !important;
+  pointer-events: none !important;
+}
+
+/* Widget mini-player — glass-morphism pill */
+.widget-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  position: relative;
+  z-index: 100000;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  background: rgba(30, 10, 40, 0.4);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-family: "Poppins", sans-serif;
+}
+
+/* Thin draggable strip at the very top */
+.widget-drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  -webkit-app-region: drag;
+  cursor: grab;
+  z-index: 100001;
+}
+
+/* Left section: orb + status */
+.widget-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+}
+
+.widget-player .widget-orb {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  transition: all 0.3s ease;
+  -webkit-app-region: no-drag;
+}
+
+.widget-orb.orb-processing {
+  background: radial-gradient(circle, rgba(255, 77, 109, 0.6) 0%, rgba(255, 77, 109, 0.15) 70%);
+  animation: widget-pulse 1.5s ease-in-out infinite;
+}
+
+.widget-orb.orb-speaking {
+  background: radial-gradient(circle, rgba(77, 166, 255, 0.6) 0%, rgba(77, 166, 255, 0.15) 70%);
+  animation: widget-pulse 1.2s ease-in-out infinite;
+}
+
+.widget-orb.orb-idle {
+  background: radial-gradient(circle, rgba(255, 77, 109, 0.3) 0%, rgba(122, 31, 162, 0.15) 70%);
+}
+
+@keyframes widget-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.08); opacity: 0.85; }
+}
+
+.widget-status-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  letter-spacing: 0.02em;
+  -webkit-app-region: no-drag;
+}
+
+/* Center: Input area — matches chat-input glass style */
+.widget-input-area {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 4px 6px 4px 14px;
+  min-width: 0;
+  transition: all 0.2s ease;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-input-area:focus-within {
+  border-color: rgba(255, 77, 109, 0.3);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 12px rgba(255, 77, 109, 0.1);
+}
+
+.widget-text-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: white;
+  font-size: 13px;
+  font-family: "Poppins", sans-serif;
+  min-width: 0;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-text-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* Mic button in widget — mini version of main mic-btn gradient */
+.widget-mic-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: radial-gradient(circle, #ff4d6d, #7a1fa2);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 8px rgba(255, 77, 109, 0.3);
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-mic-btn:hover {
+  box-shadow: 0 4px 16px rgba(255, 77, 109, 0.5);
+  transform: scale(1.08);
+}
+
+/* Execution controls (pause/stop) — shown during execution in place of input */
+.widget-exec-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-action-btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 12px;
+  font-family: "Poppins", sans-serif;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-action-btn.widget-pause {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.widget-action-btn.widget-pause:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: white;
+}
+
+.widget-action-btn.widget-stop {
+  background: rgba(255, 77, 109, 0.15);
+  color: #ff4d6d;
+  border-color: rgba(255, 77, 109, 0.3);
+}
+
+.widget-action-btn.widget-stop:hover {
+  background: rgba(255, 77, 109, 0.3);
+}
+
+/* Right: window controls */
+.widget-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+}
+
+.widget-win-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  padding: 0;
+  line-height: 1;
+}
+
+.widget-win-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+}
+
+.widget-win-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.widget-win-btn.widget-win-close:hover {
+  background: rgba(255, 50, 50, 0.35);
+  color: #fff;
+}
+
+/* ==================== INTERRUPT CONTROLS ==================== */
+
+.interrupt-controls {
+  position: absolute;
+  top: -50px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  animation: slideDown 0.3s ease;
+}
+
+.interrupt-controls-inline {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 8px;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.interrupt-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(30, 10, 40, 0.6);
+  backdrop-filter: blur(10px);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  font-family: "Inter", sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.interrupt-btn:hover {
+  transform: scale(1.05);
+}
+
+.interrupt-pause:hover {
+  background: rgba(255, 193, 7, 0.3);
+  border-color: rgba(255, 193, 7, 0.5);
+}
+
+.interrupt-stop:hover {
+  background: rgba(255, 77, 109, 0.3);
+  border-color: rgba(255, 77, 109, 0.5);
+}
+
+.interrupt-resume:hover {
+  background: rgba(76, 175, 80, 0.3);
+  border-color: rgba(76, 175, 80, 0.5);
+}
+
+/* ==================== READ ALOUD BUTTON ==================== */
+
+.read-aloud-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 16px;
+  border-radius: 16px;
+  background: rgba(122, 31, 162, 0.2);
+  border: 1px solid rgba(122, 31, 162, 0.4);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  font-family: "Inter", sans-serif;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.read-aloud-btn:hover {
+  background: rgba(122, 31, 162, 0.4);
+  border-color: rgba(122, 31, 162, 0.6);
+  transform: scale(1.03);
 }

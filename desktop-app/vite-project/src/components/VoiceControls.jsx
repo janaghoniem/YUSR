@@ -1,6 +1,6 @@
 // VoiceControls.jsx
 import React, { useState } from "react";
-import { Mic, Settings, X, Send } from "lucide-react";
+import { Mic, Settings, X, Send, Pause, Square, Play } from "lucide-react";
 
 const VoiceControls = ({
   isRecording,
@@ -11,8 +11,11 @@ const VoiceControls = ({
   setChatMode,
   onSendText,
   onSettingsClick,
+  isExecuting = false,
+  onInterrupt,
 }) => {
   const [text, setText] = useState("");
+  const [isPaused, setIsPaused] = useState(false);
 
   if (chatMode) {
     const handleSend = () => {
@@ -26,7 +29,7 @@ const VoiceControls = ({
         <div className="chat-input-container">
           <input
             type="text"
-            placeholder="Type your message..."
+            placeholder={isExecuting ? "Type interrupt command or message..." : "Type your message..."}
             className="chat-input"
             aria-label="Chat message input"
             role="textbox"
@@ -50,6 +53,36 @@ const VoiceControls = ({
             <Mic size={18} />
           </button>
         </div>
+
+        {/* Interrupt buttons shown during execution in chat mode too */}
+        {isExecuting && onInterrupt && (
+          <div className="interrupt-controls-inline">
+            {!isPaused ? (
+              <button 
+                className="interrupt-btn interrupt-pause"
+                onClick={() => { onInterrupt("pause"); setIsPaused(true); }}
+                title="Pause execution"
+              >
+                <Pause size={14} /> Pause
+              </button>
+            ) : (
+              <button 
+                className="interrupt-btn interrupt-resume"
+                onClick={() => { onInterrupt("resume"); setIsPaused(false); }}
+                title="Resume execution"
+              >
+                <Play size={14} /> Resume
+              </button>
+            )}
+            <button 
+              className="interrupt-btn interrupt-stop"
+              onClick={() => { onInterrupt("stop"); setIsPaused(false); }}
+              title="Stop execution"
+            >
+              <Square size={14} /> Stop
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -63,11 +96,10 @@ const VoiceControls = ({
       <button
         className="mic-btn"
         onClick={onMicClick}
-        disabled={orbState === "processing" || orbState === "speaking"}
         aria-label={isRecording ? "Stop recording" : "Activate microphone"}
         aria-pressed={isRecording}
         role="button"
-        title={isRecording ? "Stop recording" : "Activate microphone"}
+        title={isRecording ? "Stop recording" : "Activate microphone (voice interrupts always work)"}
       >
         <Mic size={22} />
       </button>
@@ -80,6 +112,36 @@ const VoiceControls = ({
       >
         <Settings size={20} />
       </button>
+
+      {/* Interrupt controls - visible during execution */}
+      {isExecuting && onInterrupt && (
+        <div className="interrupt-controls">
+          {!isPaused ? (
+            <button 
+              className="interrupt-btn interrupt-pause"
+              onClick={() => { onInterrupt("pause"); setIsPaused(true); }}
+              title="Pause (or say 'AURA pause')"
+            >
+              <Pause size={16} />
+            </button>
+          ) : (
+            <button 
+              className="interrupt-btn interrupt-resume"
+              onClick={() => { onInterrupt("resume"); setIsPaused(false); }}
+              title="Resume (or say 'AURA resume')"
+            >
+              <Play size={16} />
+            </button>
+          )}
+          <button 
+            className="interrupt-btn interrupt-stop"
+            onClick={() => { onInterrupt("stop"); setIsPaused(false); }}
+            title="Stop (or say 'AURA stop')"
+          >
+            <Square size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -12,8 +12,220 @@ libraries are available (e.g., python-docx for Word, openpyxl for Excel).
 from dataclasses import dataclass
 from typing import Optional, List
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Common Data Extraction Rules (DRY Principle)
+# ============================================================================
+
+CRITICAL_DATA_EXTRACTION_RULES = """
+================================================================================
+CRITICAL - DATA EXTRACTION AND OUTPUT RULES (NON-NEGOTIABLE)
+================================================================================
+
+When your code performs data extraction, copying, reading, or retrieval:
+
+**YOU MUST OUTPUT THE ACTUAL DATA BEFORE ANY STATUS MESSAGE**
+
+This is CRITICAL for multi-step workflows where subsequent tasks depend on your output.
+
+✅ CORRECT PATTERN:
+```python
+# Extract/copy/read the data
+content = pyperclip.paste()  # or file.read(), or extracted_data, etc.
+
+# OUTPUT THE ACTUAL DATA FIRST
+print(content)
+
+# THEN print success indicator
+print("EXECUTION_SUCCESS")
+```
+
+❌ WRONG PATTERN (DATA IS LOST):
+```python
+content = pyperclip.paste()
+if content:
+    print("EXECUTION_SUCCESS")  # ← Only status message, actual data is lost!
+```
+
+**Why this matters:**
+- The next task in the pipeline receives your printed output as its input
+- If you only print "EXECUTION_SUCCESS", the next task receives an empty string
+- The entire workflow fails silently
+- Always output data BEFORE status messages
+
+**FILE TYPE SPECIFIC EXTRACTION METHODS:**
+
+PDF FILES - Use PyPDF2 for accurate text extraction:
+```python
+from PyPDF2 import PdfReader
+import os
+
+try:
+    pdf_path = "path/to/file.pdf"  # Use actual file path
+
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"File not found: {{pdf_path}}")
+
+    # Extract text from PDF with None handling
+    reader = PdfReader(pdf_path)
+    text = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:  # Handle None and empty strings
+            text += page_text
+
+    # Check if we extracted any content
+    if not text.strip():
+        text = "[No text content found in PDF]"
+
+    # OUTPUT THE ACTUAL PDF CONTENT FIRST
+    print(text)
+
+    # THEN indicate success
+    print("EXECUTION_SUCCESS")
+except Exception as e:
+    print(f"Exception: {{e}}")
+```
+
+COPYING FILE CONTENT (NON-PDF):
+```python
+import pyautogui
+import pyperclip
+import time
+
+try:
+    # Select all and copy
+    pyautogui.hotkey('ctrl', 'a')
+    time.sleep(0.2)
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(0.2)
+
+    # Get the copied content
+    content = pyperclip.paste()
+
+    # OUTPUT THE ACTUAL CONTENT FIRST
+    print(content)
+
+    # THEN indicate success
+    print("EXECUTION_SUCCESS")
+except Exception as e:
+    print(f"Exception: {{e}}")
+```
+
+READING A FILE:
+```python
+import os
+
+try:
+    filepath = "D:/Downloads/file.txt"
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"File not found: {{filepath}}")
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # OUTPUT THE FILE CONTENT FIRST
+    print(content)
+
+    # THEN indicate success
+    print("EXECUTION_SUCCESS")
+except Exception as e:
+    print(f"Exception: {{e}}")
+```
+
+EXTRACTING TEXT FROM UI:
+```python
+import pyautogui
+import pyperclip
+import time
+
+try:
+    # Select text
+    pyautogui.hotkey('ctrl', 'a')
+    time.sleep(0.1)
+
+    # Copy to clipboard
+    pyautogui.hotkey('ctrl', 'c')
+    time.sleep(0.2)
+
+    # Extract from clipboard
+    extracted_text = pyperclip.paste()
+
+    # OUTPUT THE EXTRACTED TEXT FIRST
+    print(extracted_text)
+
+    # THEN indicate success
+    print("EXECUTION_SUCCESS")
+except Exception as e:
+    print(f"Exception: {{e}}")
+```
+
+WEB SCRAPING / DATA EXTRACTION:
+```python
+# Whatever extraction method you use...
+extracted_data = element.get_text()
+
+# OUTPUT THE EXTRACTED DATA FIRST
+print(extracted_data)
+
+# THEN indicate success
+print("EXECUTION_SUCCESS")
+```
+
+**SMART FILE TYPE DETECTION:**
+- **PDF files (.pdf)**: Use PyPDF2 for text extraction
+- **Office files (.docx, .xlsx, .pptx)**: Use appropriate libraries (python-docx, openpyxl, python-pptx)
+- **Text files (.txt, .py, .json, etc.)**: Use file reading with UTF-8 encoding
+- **Other files**: Use clipboard copying as fallback
+
+**Remember:**
+- Data output FIRST
+- Status message SECOND
+- Choose the RIGHT extraction method based on file type
+- This applies to ANY task that extracts, copies, reads, or retrieves information
+- Failure to follow this pattern breaks the entire workflow
+"""
+
+
+# ============================================================================
+# Dynamic Folder Configuration
+# ============================================================================
+
+def get_agent_folder(subfolder: str) -> str:
+    """
+    Get dynamic agent folder path that works across different systems
+
+    Args:
+        subfolder: The specific subfolder ('docs', 'excel', 'ppts')
+
+    Returns:
+        Full path to the agent subfolder
+    """
+    import os
+
+    # Try multiple common desktop locations - user's preference first
+    possible_paths = [
+        "D:/OneDrive/Desktop/agent",  # User's preferred path - FIRST PRIORITY
+        os.path.expanduser("~/OneDrive/Desktop/agent"),
+        os.path.expanduser("~/Desktop/agent"),
+        os.path.expanduser("~/Documents/agent"),
+    ]
+
+    for base_path in possible_paths:
+        if os.path.exists(os.path.dirname(base_path)) or os.path.exists(base_path):
+            agent_folder = os.path.join(base_path, subfolder)
+            os.makedirs(agent_folder, exist_ok=True)
+            return agent_folder.replace("\\", "\\\\")
+
+    # Final fallback - create in user's home directory
+    fallback_path = os.path.join(os.path.expanduser("~"), "agent", subfolder)
+    os.makedirs(fallback_path, exist_ok=True)
+    return fallback_path.replace("\\", "\\\\")
 
 
 # ============================================================================
@@ -46,14 +258,34 @@ MODULES = {
         library_name="python-docx",
         library_import="from docx import Document",
         keywords=["word", "document", "docx", "page", "paragraph", "heading", "table", "text formatting"],
-        guidance="""
+        guidance=f"""
 Work with .docx files using python-docx. Identify TASK TYPE first, then follow ONLY that branch.
+
+{CRITICAL_DATA_EXTRACTION_RULES}
 
 SETUP:
 import os, glob
 from docx import Document
 from datetime import datetime
-folder = 'D:\\\\OneDrive\\\\Desktop\\\\agent\\\\docs\\\\'
+
+# Dynamic folder detection - user's preferred path first
+possible_paths = [
+    "D:/OneDrive/Desktop/agent/docs",  # User's preferred path - FIRST PRIORITY
+    os.path.expanduser("~/OneDrive/Desktop/agent/docs"),
+    os.path.expanduser("~/Desktop/agent/docs"),
+    os.path.expanduser("~/Documents/agent/docs"),
+]
+
+folder = None
+for path in possible_paths:
+    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
+        folder = path
+        break
+
+# Final fallback
+if not folder:
+    folder = os.path.join(os.path.expanduser("~"), "agent", "docs")
+
 os.makedirs(folder, exist_ok=True)
 files = glob.glob(os.path.join(folder, '*.docx'))
 latest = max(files, key=os.path.getctime) if files else None
@@ -69,33 +301,63 @@ TASK TYPE — match ONE, execute ONLY that branch:
     print("EXECUTION_SUCCESS")
     # Done. No file operations.
 
-[2] CREATE — task says "create/new/make/generate" + document/file:
-    save_path = os.path.join(folder, f'descriptive_name_{ts}.docx')
+[2] OPEN FILE — task mentions a specific filename or path (e.g. "open report.docx", "open existing file named X"):
+    target = 'exact_filename_from_task.docx'  # extract from task description
+    if os.path.isabs(target) and os.path.exists(target):
+        found_path = target
+    else:
+        search_roots = [
+            os.path.expanduser('~\\Desktop'),
+            os.path.expanduser('~\\OneDrive\\Desktop'),
+            os.path.expanduser('~\\Documents'),
+            os.path.expanduser('~\\Downloads'),
+            'D:\\OneDrive\\Desktop',
+            folder,
+        ]
+        found_path = None
+        for root in search_roots:
+            if not os.path.exists(root):
+                continue
+            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
+            if matches:
+                found_path = matches[0]
+                break
+    if not found_path:
+        raise FileNotFoundError(f"Could not find file: {{target}}")
+    os.startfile(found_path)
+    print(f"[FILE]: {{found_path}}")
+    print("EXECUTION_SUCCESS")
+    # Done.
+
+[3] CREATE — task says "create/new/make/generate" + document/file:
+    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.docx')
     doc = Document()
     doc.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
     print("EXECUTION_SUCCESS")
     # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
-[3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
+[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
     "confirm saving", "press enter to confirm":
     check_path = active_file
     if check_path and os.path.exists(check_path):
         os.startfile(check_path)  # Open in Word now that all edits are done
-        print(f"[FILE]: {check_path}")
+        print(f"[FILE]: {{check_path}}")
     print("EXECUTION_SUCCESS")
     # Done. NO doc.save() call.
 
-[4] DEFAULT — task says write/type/add/modify/edit/set/insert/format/heading/paragraph:
+[5] DEFAULT — task says write/type/add/modify/edit/set/insert/format/heading/paragraph:
     doc = Document(active_file) if active_file and os.path.exists(active_file) else Document()
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'document_{ts}.docx')
+    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'document_{{ts}}.docx')
     # ... apply changes using python-docx ...
     try:
         doc.save(save_path)
     except PermissionError:
         save_path = os.path.splitext(save_path)[0] + '_v2.docx'
         doc.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
+    # Automatically open the file after editing operations are complete
+    os.startfile(save_path)
     print("EXECUTION_SUCCESS")
 
 Key python-docx patterns:
@@ -112,14 +374,34 @@ AVOID: subprocess, pyautogui, Word UI, mouse/keyboard events
         library_name="openpyxl",
         library_import="from openpyxl import Workbook",
         keywords=["excel", "spreadsheet", "xlsx", "sheet", "cell", "row", "column", "formula", "data table"],
-        guidance="""
+        guidance=f"""
 Work with .xlsx files using openpyxl. Identify TASK TYPE first, then follow ONLY that branch.
+
+{CRITICAL_DATA_EXTRACTION_RULES}
 
 SETUP:
 import os, glob
 from openpyxl import Workbook, load_workbook
 from datetime import datetime
-folder = 'D:\\\\OneDrive\\\\Desktop\\\\agent\\\\excel\\\\'
+
+# Dynamic folder detection - user's preferred path first
+possible_paths = [
+    "D:/OneDrive/Desktop/agent/excel",  # User's preferred path - FIRST PRIORITY
+    os.path.expanduser("~/OneDrive/Desktop/agent/excel"),
+    os.path.expanduser("~/Desktop/agent/excel"),
+    os.path.expanduser("~/Documents/agent/excel"),
+]
+
+folder = None
+for path in possible_paths:
+    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
+        folder = path
+        break
+
+# Final fallback
+if not folder:
+    folder = os.path.join(os.path.expanduser("~"), "agent", "excel")
+
 os.makedirs(folder, exist_ok=True)
 files = glob.glob(os.path.join(folder, '*.xlsx'))
 latest = max(files, key=os.path.getctime) if files else None
@@ -135,35 +417,65 @@ TASK TYPE — match ONE, execute ONLY that branch:
     print("EXECUTION_SUCCESS")
     # Done. No file operations.
 
-[2] CREATE — task says "create/new/make/generate" + spreadsheet/file:
-    save_path = os.path.join(folder, f'descriptive_name_{ts}.xlsx')
+[2] OPEN FILE — task mentions a specific filename or path (e.g. "open sales.xlsx", "open acm_export.csv"):
+    target = 'exact_filename_from_task.xlsx'  # extract from task description (.xlsx or .csv)
+    if os.path.isabs(target) and os.path.exists(target):
+        found_path = target
+    else:
+        search_roots = [
+            os.path.expanduser('~\\Desktop'),
+            os.path.expanduser('~\\OneDrive\\Desktop'),
+            os.path.expanduser('~\\Documents'),
+            os.path.expanduser('~\\Downloads'),
+            'D:\\OneDrive\\Desktop',
+            folder,
+        ]
+        found_path = None
+        for root in search_roots:
+            if not os.path.exists(root):
+                continue
+            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
+            if matches:
+                found_path = matches[0]
+                break
+    if not found_path:
+        raise FileNotFoundError(f"Could not find file: {{target}}")
+    os.startfile(found_path)
+    print(f"[FILE]: {{found_path}}")
+    print("EXECUTION_SUCCESS")
+    # Done.
+
+[3] CREATE — task says "create/new/make/generate" + spreadsheet/file:
+    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.xlsx')
     wb = Workbook()
     ws = wb.active
     wb.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
     print("EXECUTION_SUCCESS")
     # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
-[3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
+[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
     "confirm saving", "press enter to confirm":
     check_path = active_file
     if check_path and os.path.exists(check_path):
         os.startfile(check_path)  # Open in Excel now that all edits are done
-        print(f"[FILE]: {check_path}")
+        print(f"[FILE]: {{check_path}}")
     print("EXECUTION_SUCCESS")
     # Done. NO wb.save() call.
 
-[4] DEFAULT — task says write/enter/add/modify/edit/set/insert/update/fill/format:
+[5] DEFAULT — task says write/enter/add/modify/edit/set/insert/update/fill/format:
     wb = load_workbook(active_file) if active_file and os.path.exists(active_file) else Workbook()
     ws = wb.active
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'spreadsheet_{ts}.xlsx')
+    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'spreadsheet_{{ts}}.xlsx')
     # ... apply changes using openpyxl ...
     try:
         wb.save(save_path)
     except PermissionError:
         save_path = os.path.splitext(save_path)[0] + '_v2.xlsx'
         wb.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
+    # Automatically open the file after editing operations are complete
+    os.startfile(save_path)
     print("EXECUTION_SUCCESS")
 
 Key openpyxl patterns:
@@ -180,14 +492,34 @@ AVOID: subprocess, pyautogui, Excel UI, mouse/keyboard events
         library_name="python-pptx",
         library_import="from pptx import Presentation",
         keywords=["powerpoint", "pptx", "slide", "presentation", "bullet point", "layout", "slide show"],
-        guidance="""
+        guidance=f"""
 Work with .pptx files using python-pptx. Identify TASK TYPE first, then follow ONLY that branch.
+
+{CRITICAL_DATA_EXTRACTION_RULES}
 
 SETUP:
 import os, glob
 from pptx import Presentation
 from datetime import datetime
-folder = 'D:\\\\OneDrive\\\\Desktop\\\\agent\\\\ppts\\\\'
+
+# Dynamic folder detection - user's preferred path first
+possible_paths = [
+    #"D:/OneDrive/Desktop/agent/ppts",  # User's preferred path - FIRST PRIORITY
+    os.path.expanduser("~/OneDrive/Desktop/agent/ppts"),
+    os.path.expanduser("~/Desktop/agent/ppts"),
+    os.path.expanduser("~/Documents/agent/ppts"),
+]
+
+folder = None
+for path in possible_paths:
+    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
+        folder = path
+        break
+
+# Final fallback
+if not folder:
+    folder = os.path.join(os.path.expanduser("~"), "agent", "ppts")
+
 os.makedirs(folder, exist_ok=True)
 files = glob.glob(os.path.join(folder, '*.pptx'))
 latest = max(files, key=os.path.getctime) if files else None
@@ -203,33 +535,63 @@ TASK TYPE — match ONE, execute ONLY that branch:
     print("EXECUTION_SUCCESS")
     # Done. No file operations.
 
-[2] CREATE — task says "create/new/make/generate" + presentation/file:
-    save_path = os.path.join(folder, f'descriptive_name_{ts}.pptx')
+[2] OPEN FILE — task mentions a specific filename or path (e.g. "open slides.pptx", "open existing presentation"):
+    target = 'exact_filename_from_task.pptx'  # extract from task description
+    if os.path.isabs(target) and os.path.exists(target):
+        found_path = target
+    else:
+        search_roots = [
+            os.path.expanduser('~\\Desktop'),
+            os.path.expanduser('~\\OneDrive\\Desktop'),
+            os.path.expanduser('~\\Documents'),
+            os.path.expanduser('~\\Downloads'),
+            'D:\\OneDrive\\Desktop',
+            folder,
+        ]
+        found_path = None
+        for root in search_roots:
+            if not os.path.exists(root):
+                continue
+            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
+            if matches:
+                found_path = matches[0]
+                break
+    if not found_path:
+        raise FileNotFoundError(f"Could not find file: {{target}}")
+    os.startfile(found_path)
+    print(f"[FILE]: {{found_path}}")
+    print("EXECUTION_SUCCESS")
+    # Done.
+
+[3] CREATE — task says "create/new/make/generate" + presentation/file:
+    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.pptx')
     prs = Presentation()
     prs.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
     print("EXECUTION_SUCCESS")
     # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
 
-[3] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
+[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
     "confirm saving", "press enter to confirm":
     check_path = active_file
     if check_path and os.path.exists(check_path):
         os.startfile(check_path)  # Open in PowerPoint now that all edits are done
-        print(f"[FILE]: {check_path}")
+        print(f"[FILE]: {{check_path}}")
     print("EXECUTION_SUCCESS")
     # Done. NO prs.save() call.
 
-[4] DEFAULT — task says write/type/add/modify/edit/set/insert/format/slide/heading/bullet:
+[5] DEFAULT — task says write/type/add/modify/edit/set/insert/format/slide/heading/bullet:
     prs = Presentation(active_file) if active_file and os.path.exists(active_file) else Presentation()
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'presentation_{ts}.pptx')
+    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'presentation_{{ts}}.pptx')
     # ... apply changes using python-pptx ...
     try:
         prs.save(save_path)
     except PermissionError:
         save_path = os.path.splitext(save_path)[0] + '_v2.pptx'
         prs.save(save_path)
-    print(f"[FILE]: {save_path}")
+    print(f"[FILE]: {{save_path}}")
+    # Automatically open the file after editing operations are complete
+    os.startfile(save_path)
     print("EXECUTION_SUCCESS")
 
 Key python-pptx patterns:

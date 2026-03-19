@@ -89,7 +89,12 @@ class RAGTaskAdapter:
             if 'text_to_type' in task.extra_params:
                 query_parts.append(f"Text to type: {task.extra_params['text_to_type']}")
             if 'input_content' in task.extra_params:
-                query_parts.append(f"Input data: {task.extra_params['input_content'][:200]}...")
+                content = task.extra_params['input_content']
+                # Use smart truncation that preserves data integrity
+                if len(content) > 5000:
+                    query_parts.append(f"Input data: {content[:4900]}...\n[TRUNCATED - Content too large]")
+                else:
+                    query_parts.append(f"Input data: {content}")
         
         if task.context == "local":
             query_parts.append("(desktop automation)")
@@ -432,7 +437,7 @@ class CoordinatorRAGBridge:
                     import sys
                     import time
                     
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
                         f.write(cached_action['code'])
                         temp_file = f.name
                     

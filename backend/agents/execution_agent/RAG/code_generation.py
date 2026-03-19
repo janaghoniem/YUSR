@@ -972,7 +972,11 @@ OUTPUT FORMAT (STRICT)
             parts = response.split("```python")
             if len(parts) > 1:
                 code_part = parts[1].split("```")[0].strip()
-                code = code_part
+                # Add UTF-8 encoding header for Unicode characters support
+                if code_part and not code_part.startswith("# -*- coding:"):
+                    code = f"# -*- coding: utf-8 -*-\n{code_part}"
+                else:
+                    code = code_part
                 
                 # Get explanation (text after code block)
                 remaining = parts[1].split("```", 1)

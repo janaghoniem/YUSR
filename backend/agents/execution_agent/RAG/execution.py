@@ -447,7 +447,7 @@ class LocalSandbox:
         start_time = time.time()
         
         # Create temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
             f.write(code)
             temp_file = f.name
         

@@ -3,6 +3,7 @@ import logging
 import asyncio
 import os
 import sys
+import re
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -230,7 +231,12 @@ class CoordinatorRAGBridge:
 
     def _extract_element_description(self, task: ActionTask, error_msg: str) -> Optional[str]:
         """
-        Extract what UI element to look for based on task and error
+        FIXED: Extract UI element from task prompt - prioritize app/section names
+        
+        Examples:
+        - "Navigate to gaming section" → "Gaming"
+        - "Click on Settings icon" → "Settings"
+        - "Open YouTube app" → "YouTube"
         """
         prompt = task.ai_prompt.lower()
         
@@ -242,44 +248,66 @@ class CoordinatorRAGBridge:
             logger.info(f"⏭️ Skipping OmniParser - this is an app launch task")
             return None
         
-        # ========================================================================
-        # IMPROVED: Extract just the element name, not the full phrase
-        # ========================================================================
-        import re
+        # ═══════════════════════════════════════════════════════════════════
+        # CRITICAL FIX: Extract target element, NOT navigation verbs
+        # ═══════════════════════════════════════════════════════════════════
         
-        # Pattern 1: "click on X" → extract X
-        # Example: "click on Gaming" → "Gaming"
-        pattern1 = r'click\s+(?:on\s+)?(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
-        match = re.search(pattern1, task.ai_prompt)  # Use original case!
-        if match:
-            element_text = match.group(1).strip()
-            logger.info(f"📝 Extracted element name: '{element_text}'")
-            return element_text
+        # Strategy 1: Look for "X section/tab/menu" patterns
+        section_patterns = [
+            r'(?:to|the)\s+([a-z]+)\s+(?:section|tab|menu|page)',  # "to gaming section"
+            r'([a-z]+)\s+(?:section|tab|menu|page)',               # "gaming section"
+        ]
         
-        # Pattern 2: "click the X button/icon" → extract X
-        # Example: "click the Submit button" → "Submit"
-        pattern2 = r'click\s+(?:the\s+)?([A-Z][a-z]+)(?:\s+button|\s+icon)'
-        match = re.search(pattern2, task.ai_prompt)
-        if match:
-            element_text = match.group(1).strip()
-            logger.info(f"📝 Extracted button/icon name: '{element_text}'")
-            return element_text
+        for pattern in section_patterns:
+            match = re.search(pattern, prompt)
+            if match:
+                element_text = match.group(1).capitalize()
+                logger.info(f"📝 Extracted from section pattern: '{element_text}'")
+                return element_text
         
-        # Pattern 3: Fallback - look for capitalized words (likely UI element names)
-        # Example: "Gaming in Microsoft Store" → "Gaming"
+        # Strategy 2: Look for "click [on] X" patterns (skip verbs)
+        click_patterns = [
+            r'click\s+(?:on\s+)?(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+            r'tap\s+(?:on\s+)?(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
+        ]
+        
+        navigation_verbs = {'Navigate', 'Open', 'Go', 'Close', 'Switch', 'Move'}
+        
+        for pattern in click_patterns:
+            match = re.search(pattern, task.ai_prompt)  # Use original case
+            if match:
+                element_text = match.group(1).strip()
+                
+                # ✅ FIX: Skip navigation verbs, get NEXT word instead
+                if element_text in navigation_verbs:
+                    logger.info(f"⚠️ Skipped verb '{element_text}', looking for actual target...")
+                    # Try to get the word after "to" or next capitalized word
+                    after_verb = task.ai_prompt[match.end():].strip()
+                    # Pattern: "Navigate to Gaming" → extract "Gaming"
+                    next_match = re.search(r'(?:to|the)\s+([A-Z][a-z]+)', after_verb)
+                    if next_match:
+                        element_text = next_match.group(1)
+                        logger.info(f"📝 Extracted target after verb: '{element_text}'")
+                        return element_text
+                else:
+                    logger.info(f"📝 Extracted element name: '{element_text}'")
+                    return element_text
+        
+        # Strategy 3: Look for capitalized words (skip common verbs)
         capital_words = re.findall(r'\b[A-Z][a-z]+\b', task.ai_prompt)
         if capital_words:
-            # Filter out common words
-            stopwords = {'Click', 'Open', 'The', 'In', 'Microsoft', 'Store', 'Discord', 'On'}
+            stopwords = {'Click', 'Open', 'The', 'In', 'Microsoft', 'Store', 'On', 
+                        'Navigate', 'Go', 'To', 'Close', 'Switch'}
             filtered = [w for w in capital_words if w not in stopwords]
             if filtered:
-                element_text = filtered[0]  # Take first meaningful word
+                element_text = filtered[0]
                 logger.info(f"📝 Extracted from capitalized words: '{element_text}'")
                 return element_text
         
         # If nothing found, skip OmniParser
-        logger.warning(f"⚠️ Could not extract specific UI element - skipping OmniParser")
+        logger.warning(f"⚠️ Could not extract UI element - skipping OmniParser")
         return None
+
 
     def _regenerate_code_with_coordinates(self,
                                                 task: ActionTask, 

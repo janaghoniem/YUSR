@@ -108,17 +108,39 @@ class MobileActionHandler:
                     timeout=float(timeout_seconds)
                 )
             except asyncio.TimeoutError:
+                # Pull whatever metrics the strategy accumulated before timeout
+                strat = self.mobile_strategy
+                logger.warning(
+                    f"⏱️ Task timed out after {timeout_seconds}s — "
+                    f"steps: {len(strat.action_history)}, "
+                    f"LLM calls: {strat.total_llm_calls}, "
+                    f"tiers: {dict(strat.tier_stats)}"
+                )
                 return ExecutionResult(
                     task_id=task_id,
                     status="failed",
-                    error=f"Task timed out after {timeout_seconds}s"
+                    error=f"Task timed out after {timeout_seconds}s",
+                    metadata={
+                        "token_usage": dict(strat.token_usage),
+                        "llm_calls": strat.total_llm_calls,
+                        "steps_taken": len(strat.action_history),
+                        "execution_time_ms": int(timeout_seconds * 1000),
+                        "tier_stats": dict(strat.tier_stats),
+                    }
                 )
             
             success = result.status == "success"
             return ExecutionResult(
                 status="success" if success else "failed",
                 details=result.completion_reason or "Mobile task executed",
-                error=result.error
+                error=result.error,
+                metadata={
+                    "token_usage": result.token_usage or {},
+                    "llm_calls": result.llm_calls,
+                    "steps_taken": result.steps_taken,
+                    "execution_time_ms": result.execution_time_ms,
+                    "tier_stats": dict(self.mobile_strategy.tier_stats),
+                }
             )
         
         except Exception as e:

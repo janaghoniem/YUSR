@@ -43,7 +43,7 @@ const getTimeGreeting = (user) => {
   return `💤 Burning the midnight oil, ${user}?`;
 };
 
-const HeaderContent = ({ userName = "Labubu", mode = "default" }) => {
+const HeaderContent = ({ userName = "User", mode = "default", chatTitle = "New Chat" }) => {
   const [greeting] = useState(getTimeGreeting(userName));
 
   const headline = useMemo(() => {
@@ -54,6 +54,11 @@ const HeaderContent = ({ userName = "Labubu", mode = "default" }) => {
     <header className="center-content" role="banner" aria-label="Main banner">
       <p className="greeting" aria-live="polite">{greeting}</p>
       <h1 id="main-headline" className="headline" aria-live="polite" aria-atomic="true">{headline}</h1>
+      {chatTitle && chatTitle !== "New Chat" && (
+        <p className="chat-title" style={{ fontSize: "0.9em", opacity: 0.7, marginTop: "8px" }}>
+          📌 {chatTitle}
+        </p>
+      )}
     </header>
   );
 };

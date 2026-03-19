@@ -21,6 +21,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import hashlib
+from .web_rag_sandbox import rag_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ async def observe_page_state(page) -> Dict[str, Any]:
                         muted: video.muted,
                         volume: video.volume,
                         currentTime: video.currentTime,
-                        duration: video.duration,
+                        duration: isNaN(video.duration) ? null : video.duration,
                         playing: !video.paused && video.currentTime > 0,
                         ended: video.ended,
                         readyState: video.readyState,
@@ -392,7 +393,7 @@ async def observe_page_state(page) -> Dict[str, Any]:
                         muted: audio.muted,
                         volume: audio.volume,
                         currentTime: audio.currentTime,
-                        duration: audio.duration,
+                        duration: isNaN(audio.duration) ? null : audio.duration,
                         playing: !audio.paused && audio.currentTime > 0,
                     };
                 }
@@ -401,31 +402,53 @@ async def observe_page_state(page) -> Dict[str, Any]:
             }
         """)
         
-        # Add detected site info
+        # ✅ FIX 1: page.evaluate returns None when page is blank or mid-navigation
+        if not state:
+            state = {
+                'url': page.url if page else 'unknown',
+                'platform': 'unknown',
+                'siteType': 'generic',
+                'capabilities': []
+            }
+
+        # Add detected site info - with null safety
+        if not site_info:
+            site_info = {
+                'site_type': 'generic',
+                'platform': 'unknown',
+                'capabilities': []
+            }
+
         state['siteInfo'] = site_info
-        state['platform'] = site_info['platform']
-        state['siteType'] = site_info['site_type']
-        state['capabilities'] = site_info['capabilities']
+        state['platform'] = site_info.get('platform', 'unknown')
+        state['siteType'] = site_info.get('site_type', 'generic')
+        state['capabilities'] = site_info.get('capabilities', [])
         
         # Platform-specific detection (for backward compatibility)
-        state['isYouTube'] = site_info['platform'] == 'youtube'
+        state['isYouTube'] = state.get('platform') == 'youtube'
         state['isPlaylist'] = False
         
         if state['isYouTube']:
             # YouTube-specific checks
-            playlist_check = await page.evaluate("""
-                () => !!document.querySelector('[aria-label*="playlist" i], #playlist, .playlist')
-            """)
-            state['isPlaylist'] = playlist_check
+            try:
+                playlist_check = await page.evaluate("""
+                    () => !!document.querySelector('[aria-label*="playlist" i], #playlist, .playlist')
+                """)
+                state['isPlaylist'] = playlist_check
+            except:
+                state['isPlaylist'] = False
         
-        logger.info(f"✅ Page state: platform={state['platform']}, type={state['siteType']}, "
-                   f"video={state.get('video', {}).get('exists', False)}, "
-                   f"capabilities={state['capabilities']}")
+        # Safe access to video state (may be null from JS)
+        video_state = state.get('video') or {}
+        has_video = video_state.get('exists', False) if isinstance(video_state, dict) else False
+
+        logger.info(f"✅ Page state: platform={state.get('platform', 'unknown')}, type={state.get('siteType', 'generic')}, "
+                   f"video={has_video}, capabilities={state.get('capabilities', [])}")
         
         return state
         
     except Exception as e:
-        logger.error(f"❌ Failed to observe page state: {e}")
+        logger.debug(f"⚠️ Could not observe page state (expected on blank/loading page): {e}")
         return {
             'error': str(e),
             'url': page.url if page else 'unknown',
@@ -441,10 +464,12 @@ def validate_action_context(page_state: Dict, action_type: str, ai_prompt: str) 
     Validate if action can be performed in current page context.
     """
     
-    # Media control actions
+    # Media control actions — but not when user is selecting a result
     media_actions = ['pause', 'play', 'mute', 'unmute', 'skip', 'next', 'previous', 'forward', 'rewind']
-    
-    if any(action in ai_prompt.lower() for action in media_actions):
+    selection_keywords = ['first', 'second', 'third', 'result', 'item', 'one', 'video', 'song']
+    is_selecting = any(w in ai_prompt.lower() for w in selection_keywords)
+
+    if any(action in ai_prompt.lower() for action in media_actions) and not is_selecting:
         video_state = page_state.get('video')
         audio_state = page_state.get('audio')
         
@@ -491,25 +516,25 @@ async def compare_states(before: Dict, after: Dict) -> Dict[str, Any]:
     }
     
     # Check video state changes
-    video_before = before.get('video', {})
-    video_after = after.get('video', {})
+    video_before = before.get('video') or {}
+    video_after = after.get('video') or {}
     
     if video_before.get('exists') and video_after.get('exists'):
         changes['media_state_changed'] = (
             video_before.get('paused') != video_after.get('paused') or
             video_before.get('muted') != video_after.get('muted') or
-            abs(video_before.get('currentTime', 0) - video_after.get('currentTime', 0)) > 0.1
+            abs((video_before.get('currentTime') or 0) - (video_after.get('currentTime') or 0)) > 0.1
         )
         
         changes['media_details'] = {
             'paused_changed': video_before.get('paused') != video_after.get('paused'),
             'muted_changed': video_before.get('muted') != video_after.get('muted'),
-            'time_changed': abs(video_before.get('currentTime', 0) - video_after.get('currentTime', 0)) > 0.1,
+            'time_changed': abs((video_before.get('currentTime') or 0) - (video_after.get('currentTime') or 0)) > 0.1,
         }
     
     # Check audio state changes
-    audio_before = before.get('audio', {})
-    audio_after = after.get('audio', {})
+    audio_before = before.get('audio') or {}
+    audio_after = after.get('audio') or {}
     
     if audio_before.get('exists') and audio_after.get('exists'):
         if not changes['media_state_changed']:  # Only check if video didn't change
@@ -988,7 +1013,11 @@ class WebExecutionPipeline:
             
             # ✅ STEP 2: TRY PLATFORM-SPECIFIC KEYBOARD SHORTCUTS (GENERIC)
             media_keywords = ['pause', 'play', 'mute', 'unmute', 'skip', 'next', 'previous', 'forward', 'rewind']
-            is_media_action = any(keyword in ai_prompt.lower() for keyword in media_keywords)
+            # ✅ FIX 2: Don't intercept with shortcuts when user is selecting a result
+            # e.g. "play the first one", "open first video" should NOT trigger keyboard shortcut
+            selection_keywords = ['first', 'second', 'third', 'result', 'item', 'one', 'video', 'song']
+            is_selecting = any(w in ai_prompt.lower() for w in selection_keywords)
+            is_media_action = any(keyword in ai_prompt.lower() for keyword in media_keywords) and not is_selecting
             
             if is_media_action and page_state_before:
                 platform = page_state_before.get('platform', 'unknown')
@@ -1021,7 +1050,7 @@ class WebExecutionPipeline:
                             return WebExecutionResult(
                                 validation_passed=True,
                                 security_passed=True,
-                                output=f"EXECUTION_SUCCESS: Media control via keyboard shortcut ({shortcut_result['shortcut']}) on {platform}",
+                                output=f"EXECUTION_SUCCESS: Media control via keyboard shortcut ({shortcut_result['shortcut']}) on {platform}" + (f"\nPAGE_URL:{page.url}" if page.url and page.url != 'about:blank' else ''),
                                 page_url=page.url,
                                 page_title=await page.title(),
                                 page_state_before=page_state_before,
@@ -1052,7 +1081,7 @@ class WebExecutionPipeline:
                 )
             
             # Security check
-            security_result = self._security_check(generated_code)
+            security_result = rag_sandbox.check(generated_code)
             if not security_result['passed']:
                 return WebExecutionResult(
                     validation_passed=False,
@@ -1138,7 +1167,7 @@ class WebExecutionPipeline:
             return WebExecutionResult(
                 validation_passed=result.get('success', False),
                 security_passed=True,
-                output=result.get('output', ''),
+                output=(result.get('output', '') or '') + (f"\nPAGE_URL:{page.url}" if page.url and page.url != 'about:blank' else ''),
                 error=result.get('error'),
                 page_url=page_url,
                 page_title=page_title,
@@ -1239,6 +1268,11 @@ class WebExecutionPipeline:
             code = re.sub(r'await\s+context\.close\(\)', 'pass  # Context kept open', code)
             code = re.sub(r'context\.close\(\)', 'pass  # Context kept open', code)
             code = re.sub(r'await\s+playwright\.stop\(\)', 'pass  # Playwright kept running', code)
+            # ✅ FIX 3: .first/.last are Locator properties, not coroutines
+            # The LLM often writes `await locator.first` which crashes with
+            # "object Locator can't be used in 'await' expression"
+            code = re.sub(r'await\s+([\w.()\[\]]+)\.first\b', r'\1.first', code)
+            code = re.sub(r'await\s+([\w.()\[\]]+)\.last\b', r'\1.last', code)
             
             # Wrap in async function
             def _indent(text, spaces=4):
@@ -1326,7 +1360,7 @@ async def __rag_step__(page):
         return False, "No output generated (execution may have failed)"
     
     def _security_check(self, code: str) -> Dict[str, Any]:
-        """Basic security validation"""
+        """Basic security validation (kept for backward compat — rag_sandbox.check() is used instead)"""
         
         violations = []
         

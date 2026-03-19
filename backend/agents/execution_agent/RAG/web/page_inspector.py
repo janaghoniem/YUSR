@@ -25,7 +25,7 @@ async def get_page_semantics_fallback(page) -> str:
         # Extract interactive elements using comprehensive evaluate
         elements_info = await page.evaluate("""
             () => {
-                // Strategy 1: Standard interactive elements
+        // Strategy 1: Standard interactive elements
                 const buttons = Array.from(document.querySelectorAll('button, [role="button"], [type="button"], [type="submit"]'));
                 const links = Array.from(document.querySelectorAll('a[href]'));
                 const inputs = Array.from(document.querySelectorAll('input, textarea, select'));
@@ -34,7 +34,26 @@ async def get_page_semantics_fallback(page) -> str:
                 const videoElements = Array.from(document.querySelectorAll('video'));
                 const audioElements = Array.from(document.querySelectorAll('audio'));
                 
-                // Strategy 3: Common UI patterns
+                // Strategy 3: Generic media items (works across YouTube, Netflix, e-commerce, education platforms, etc.)
+                const mediaItems = Array.from(document.querySelectorAll(
+                    'a[href*="watch"], a[href*="video"], a[href*="play"], ' +  // Generic video links
+                    'a[href*="product"], a[href*="item"], a[href*="course"], ' +  // E-commerce, education
+                    '[data-video-id], [data-media-id], [data-item-id], ' +  // Media/item identifiers
+                    '[class*="thumbnail"], [class*="video-tile"], [class*="product-card"], [class*="item-card"], ' +  // Common container classes
+                    '[class*="media-item"], [class*="content-item"], [class*="video-item"], ' +
+                    'article[data-content-type], article[data-media], ' +  // Article-based media
+                    '.video, .media, .product, .thumbnail, .item, .card' +  // Generic classes
+                    '[role="link"][data-content], [role="button"][data-video], [role="button"][data-content]'  // ARIA roles with data
+                )).slice(0, 50);
+                
+                // Strategy 4: Platform-specific UI (YouTube ads, etc.)
+                const youtubeAds = Array.from(document.querySelectorAll(
+                    'button[aria-label*="Skip"], ' +  // YouTube skip ad buttons
+                    '.ytp-ad-skip-button, ' +  // YouTube skip button class
+                    'button[title*="Skip"]'  // Skip button with title attribute
+                ));
+                
+                // Strategy 5: Common UI patterns
                 const clickableElements = Array.from(document.querySelectorAll('[onclick], [data-action]'));
                 
                 return {
@@ -63,6 +82,17 @@ async def get_page_semantics_fallback(page) -> str:
                         muted: el.muted,
                         duration: el.duration,
                         currentTime: el.currentTime,
+                    })),
+                    mediaItems: mediaItems.map(el => ({
+                        title: el.textContent?.trim() || el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || 'Item',
+                        href: el.href || el.getAttribute('href') || '',
+                        itemId: el.getAttribute('data-video-id') || el.getAttribute('data-media-id') || el.getAttribute('data-item-id') || el.getAttribute('data-id') || '',
+                        dataAttributes: Array.from(el.attributes).filter(a => a.name.startsWith('data-')).slice(0, 5).map(a => `${a.name}=${a.value}`),
+                    })).filter((v, idx, arr) => arr.findIndex(x => x.href === v.href && x.title === v.title) === idx),  // Dedupe
+                    youtubeAds: youtubeAds.map(el => ({
+                        text: el.textContent?.trim() || el.getAttribute('aria-label') || el.getAttribute('title') || 'Skip Ad Button',
+                        ariaLabel: el.getAttribute('aria-label') || '',
+                        classes: el.className || '',
                     })),
                     audios: audioElements.map(el => ({
                         src: el.src || el.currentSrc || '',
@@ -113,6 +143,22 @@ async def get_page_semantics_fallback(page) -> str:
                 if video['duration']:
                     descriptions.append(f"    Duration: {video['duration']:.1f}s, Current: {video['currentTime']:.1f}s")
         
+        # ✅ NEW: Format media/content items (YouTube, Netflix, e-commerce, education platforms, etc.)
+        if elements_info.get('mediaItems'):
+            descriptions.append("\nCONTENT/MEDIA ITEMS (Videos, Products, Courses, etc.):")
+            for item in elements_info['mediaItems'][:20]:
+                item_id = item['itemId'] if item['itemId'] else "no-id"
+                href_info = f" [{item['href'][:45]}...]" if item['href'] else ""
+                data_info = f" ({', '.join(item['dataAttributes'][:2])})" if item['dataAttributes'] else ""
+                descriptions.append(f"  - {item['title'][:60]} [ID: {item_id}]{data_info}{href_info}")
+        
+        # ✅ NEW: Format YouTube ad skip buttons (important for ad handling)
+        if elements_info.get('youtubeAds'):
+            descriptions.append("\n⚠️️ YOUTUBE AD/UI ELEMENTS:")
+            for ad_btn in elements_info['youtubeAds']:
+                aria_info = f" (aria: {ad_btn['ariaLabel'][:40]})" if ad_btn['ariaLabel'] else ""
+                descriptions.append(f"  - {ad_btn['text']}{aria_info}")
+        
         # ✅ NEW: Format clickable elements
         if elements_info.get('clickables'):
             descriptions.append("\nOTHER CLICKABLE ELEMENTS:")
@@ -124,7 +170,9 @@ async def get_page_semantics_fallback(page) -> str:
         logger.info(f"✅ Extracted {len(elements_info.get('buttons', []))} buttons, "
                    f"{len(elements_info.get('inputs', []))} inputs, "
                    f"{len(elements_info.get('links', []))} links, "
-                   f"{len(elements_info.get('videos', []))} videos")
+                   f"{len(elements_info.get('videos', []))} videos, "
+                   f"{len(elements_info.get('mediaItems', []))} media/content items, "
+                   f"{len(elements_info.get('youtubeAds', []))} platform-specific UI elements")
         return result
         
     except Exception as e:
@@ -153,11 +201,11 @@ async def get_page_semantics(page) -> str:
             snapshot = await page.accessibility.snapshot()
             
             if not snapshot:
-                logger.warning("⚠️ Accessibility snapshot returned None, using fallback")
+                logger.debug("ℹ️ Accessibility tree unavailable (page uses shadow DOM or dynamic rendering), using DOM extraction fallback")
                 return await get_page_semantics_fallback(page)
             
         except (AttributeError, TypeError, Exception) as e:
-            logger.warning(f"⚠️ Accessibility API failed ({type(e).__name__}: {e}), using fallback")
+            logger.debug(f"ℹ️ Accessibility API unavailable ({type(e).__name__}), using DOM extraction fallback")
             return await get_page_semantics_fallback(page)
         
         # Continue with original accessibility-based extraction

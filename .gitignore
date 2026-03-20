@@ -219,4 +219,11 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
+
+/.venv
+
+**tmpclaude**
+
+
+backend/agents/execution_agent/RAG/analysis
 .venv/

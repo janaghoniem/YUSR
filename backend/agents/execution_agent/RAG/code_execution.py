@@ -90,7 +90,12 @@ class RAGTaskAdapter:
             if 'text_to_type' in task.extra_params:
                 query_parts.append(f"Text to type: {task.extra_params['text_to_type']}")
             if 'input_content' in task.extra_params:
-                query_parts.append(f"Input data: {task.extra_params['input_content'][:200]}...")
+                content = task.extra_params['input_content']
+                # Use smart truncation that preserves data integrity
+                if len(content) > 5000:
+                    query_parts.append(f"Input data: {content[:4900]}...\n[TRUNCATED - Content too large]")
+                else:
+                    query_parts.append(f"Input data: {content}")
         
         if task.context == "local":
             query_parts.append("(desktop automation)")
@@ -136,6 +141,7 @@ class CoordinatorRAGBridge:
         self.sandbox = sandbox_pipeline
         self.adapter = RAGTaskAdapter()
         self.omniparser = None
+        self.last_file_path = None  # Tracks active file across sequential tasks
 
     #added by shahd for omniparser
     def _detect_element_coordinates(self, element_description: str) -> Optional[tuple]:
@@ -427,9 +433,16 @@ class CoordinatorRAGBridge:
                 status="failed",
                 error="Not an action task - should be handled by reasoning agent"
             )
+            
+        
         
         # Build enhanced query for RAG
         rag_query = self.adapter.build_rag_query(task)
+
+        # Inject active file context so consecutive tasks work on the same file
+        if self.last_file_path:
+            rag_query = f"[ACTIVE FILE: {self.last_file_path}]\n\n{rag_query}"
+            logger.info(f"[FILE CONTEXT] Injecting active file: {self.last_file_path}")
         
         # ========================================================================
         # STEP 0: CHECK CACHE FIRST (if enabled and available)
@@ -452,7 +465,7 @@ class CoordinatorRAGBridge:
                     import sys
                     import time
                     
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
                         f.write(cached_action['code'])
                         temp_file = f.name
                     
@@ -511,6 +524,40 @@ class CoordinatorRAGBridge:
         # ========================================================================
         # CACHE MISS OR DISABLED - FULL RAG + SANDBOX FLOW
         # ========================================================================
+        # from agents.execution_agent.RAG.fast_window_detector import get_current_window
+
+        # Get current screen state BEFORE generating code
+        # With this:
+        import pygetwindow as gw
+
+        try:
+            active_window = gw.getActiveWindow()
+            
+            if active_window:
+                screen_state = {
+                    'active_window': active_window.title,
+                    'process': active_window.title.split(' - ')[-1] if ' - ' in active_window.title else 'Unknown',
+                    'controls': []  # pygetwindow doesn't provide controls
+                }
+                logger.info(f"🪟 Active window: '{active_window.title}'")
+            else:
+                # Fallback if no active window
+                screen_state = {
+                    'active_window': 'Desktop',
+                    'process': 'explorer',
+                    'controls': []
+                }
+                logger.info("🪟 No active window, using Desktop")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Could not get active window: {e}")
+            # Fallback
+            screen_state = {
+                'active_window': 'Unknown',
+                'process': 'Unknown',
+                'controls': []
+            }
+                
         attempt = 0
         error_context = ""
         start_context_index = 0
@@ -519,6 +566,7 @@ class CoordinatorRAGBridge:
             attempt += 1
             logger.info(f"🔍 Attempt {attempt}/{max_retries} for task {task.task_id}")
             
+            enhanced_query = f"\nCurrent Screen: {screen_state['active_window']}\nVisible Controls: {', '.join(screen_state['controls'])}"
             # Build enhanced query with error context if retry
             enhanced_query = rag_query
             if error_context:
@@ -532,7 +580,8 @@ class CoordinatorRAGBridge:
                     enhanced_query,
                     cache_key=task.ai_prompt,  # Use original prompt for cache key
                     start_context_index=start_context_index,
-                    num_contexts=self.rag.config.top_k
+                    num_contexts=self.rag.config.top_k,
+                    screen_state=screen_state
                 )
                 
                 generated_code = rag_result.get('code', '')
@@ -561,7 +610,15 @@ class CoordinatorRAGBridge:
                 # Step 3: Check execution result
                 if exec_result.validation_passed and exec_result.security_passed:
                     logger.info(f"✅ Task {task.task_id} completed successfully")
-                    
+
+                    # Parse [FILE]: from stdout to track active file for next task
+                    if exec_result.stdout:
+                        for line in exec_result.stdout.splitlines():
+                            if line.startswith('[FILE]:'):
+                                self.last_file_path = line[7:].strip()
+                                logger.info(f"[FILE CONTEXT] Captured: {self.last_file_path}")
+                                break
+
                     # ============================================================
                     # CACHE THE SUCCESSFUL RESULT (if cache enabled and available)
                     # ============================================================
@@ -589,64 +646,64 @@ class CoordinatorRAGBridge:
                 # ========================================================================
                 # NEW: Try OmniParser detection if error suggests element not found
                 # ========================================================================
-                if any(keyword in error_context.lower() for keyword in 
-                    [
-                        'not found', 'cannot find', 'no such element', 'failed to locate',
-                        'modulenotfounderror', 'importerror',
-                        'pywinauto', 'uiautomation',
-                        'element', 'button', 'window',
-                        'failed:', 'error:',
-                        'locateonscreen'
-                    ]):
+            #     if any(keyword in error_context.lower() for keyword in 
+            #         [
+            #             'not found', 'cannot find', 'no such element', 'failed to locate',
+            #             'modulenotfounderror', 'importerror',
+            #             'pywinauto', 'uiautomation',
+            #             'element', 'button', 'window',
+            #             'failed:', 'error:',
+            #             'locateonscreen'
+            #         ]):
 
-                    logger.info(f"🔍 OmniParser trigger check:")
-                    logger.info(f"   Error context: {error_context[:200]}")
-                    logger.info(f"   Attempting OmniParser fallback...")
+            #         logger.info(f"🔍 OmniParser trigger check:")
+            #         logger.info(f"   Error context: {error_context[:200]}")
+            #         logger.info(f"   Attempting OmniParser fallback...")
                                                     
-                    logger.warning("🔍 Error suggests element detection issue - trying OmniParser...")
+            #         logger.warning("🔍 Error suggests element detection issue - trying OmniParser...")
                     
-                    # Extract what to look for
-                    element_desc = self._extract_element_description(task, error_context)
+            #         # Extract what to look for
+            #         element_desc = self._extract_element_description(task, error_context)
                     
-                    if element_desc is None:
-                        logger.info("⏭️ Skipping OmniParser - not a UI interaction task")
-                        # Don't continue here - let it retry with next context
-                    elif element_desc:
-                        # Try to detect coordinates
-                        logger.info(f"🎯 Valid UI element detected: '{element_desc}'")
-                        coords = self._detect_element_coordinates(element_desc)
+            #         if element_desc is None:
+            #             logger.info("⏭️ Skipping OmniParser - not a UI interaction task")
+            #             # Don't continue here - let it retry with next context
+            #         elif element_desc:
+            #             # Try to detect coordinates
+            #             logger.info(f"🎯 Valid UI element detected: '{element_desc}'")
+            #             coords = self._detect_element_coordinates(element_desc)
                         
-                        if coords:
-                            logger.info(f"✅ OmniParser found element at {coords}!")
+            #             if coords:
+            #                 logger.info(f"✅ OmniParser found element at {coords}!")
                             
-                            # Generate new code with exact coordinates
-                            new_code = self._regenerate_code_with_coordinates(
-                                task, coords, element_desc
-                            )
+            #                 # Generate new code with exact coordinates
+            #                 new_code = self._regenerate_code_with_coordinates(
+            #                     task, coords, element_desc
+            #                 )
                             
-                            # Execute the new code
-                            logger.info("🔄 Executing OmniParser-assisted code...")
-                            logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
+            #                 # Execute the new code
+            #                 logger.info("🔄 Executing OmniParser-assisted code...")
+            #                 logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
                             
-                            exec_result = self.sandbox.execute_code(
-                                code=new_code,
-                                use_docker=False,
-                                retry_on_failure=False
-                            )
+            #                 exec_result = self.sandbox.execute_code(
+            #                     code=new_code,
+            #                     use_docker=False,
+            #                     retry_on_failure=False
+            #                 )
                             
-                            if exec_result.validation_passed and exec_result.security_passed:
-                                logger.info(f"✅✅✅ Task succeeded with OmniParser assistance!")
-                                return self.adapter.execution_result_to_task_result(task, exec_result)
-                            else:
-                                logger.warning("⚠️ OmniParser-assisted code also failed")
-                                logger.debug(f"OmniParser execution stdout: {exec_result.stdout}")
-                                logger.debug(f"OmniParser execution stderr: {exec_result.stderr}")
-                        else:
-                            logger.warning(f"❌ OmniParser couldn't find: '{element_desc}'")
+            #                 if exec_result.validation_passed and exec_result.security_passed:
+            #                     logger.info(f"✅✅✅ Task succeeded with OmniParser assistance!")
+            #                     return self.adapter.execution_result_to_task_result(task, exec_result)
+            #                 else:
+            #                     logger.warning("⚠️ OmniParser-assisted code also failed")
+            #                     logger.debug(f"OmniParser execution stdout: {exec_result.stdout}")
+            #                     logger.debug(f"OmniParser execution stderr: {exec_result.stderr}")
+            #             else:
+            #                 logger.warning(f"❌ OmniParser couldn't find: '{element_desc}'")
                 
-                logger.debug(f"Error context for retry: {error_context}")
+            #     logger.debug(f"Error context for retry: {error_context}")
                 
-                start_context_index += self.rag.config.top_k
+            #     start_context_index += self.rag.config.top_k
                 
             except Exception as e:
                 logger.error(f"❌ Exception during RAG execution: {e}")
@@ -829,7 +886,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             from agents.execution_agent.RAG.code_generation import RAGSystem, RAGConfig
 
             logger.info("🔧 Initializing RAG system...")
-            desktop_rag_config = RAGConfig(library_name="pyautogui",retrieval_mode="api",use_rag=False)
+            desktop_rag_config = RAGConfig(library_name="pyautogui",retrieval_mode="local",use_rag=False)
             desktop_rag = RAGSystem(desktop_rag_config)
             desktop_rag.initialize()
             logger.info("✅ RAG system ready")
@@ -842,6 +899,7 @@ async def initialize_execution_agent_for_server(broker_instance):
         # Desktop Sandbox
         try:
             logger.info("🔧 Initializing Desktop sandbox pipeline...")
+            
             from agents.execution_agent.RAG.execution import (
                 SandboxExecutionPipeline, 
                 SandboxConfig,

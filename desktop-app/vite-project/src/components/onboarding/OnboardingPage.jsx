@@ -28,6 +28,7 @@ const OnboardingPage = ({ userId, onComplete }) => {
   const handleFinalSubmit = async () => {
     setIsSubmitting(true);
     setError("");
+    console.log("Submitting with userId:", userId, "| formData:", formData);
 
     try {
       const payload = {
@@ -46,7 +47,13 @@ const OnboardingPage = ({ userId, onComplete }) => {
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.detail || "Account creation failed");
+        console.log("Backend error response:", data); // temporary, helps debug
+        const errorMsg = typeof data.detail === "string"
+          ? data.detail
+          : Array.isArray(data.detail)
+            ? data.detail.map(e => e.msg).join(", ")
+            : "Account creation failed";
+        throw new Error(errorMsg);
       }
 
       // Persist onboarding state so we never show it again

@@ -543,22 +543,34 @@ function App() {
 
 
   /* ---------- ONBOARDING COMPLETE ---------- */
+  // const handleOnboardingComplete = ({ username, preferences }) => {
+  //     setUserName(username);
+  //     if (preferences?.voice) setTtsVoice(preferences.voice);
+  //     setAuthState("app");
+  // };
+
   const handleOnboardingComplete = ({ username, preferences }) => {
-      setUserName(username);
-      if (preferences?.voice) setTtsVoice(preferences.voice);
-      setAuthState("app");
+    setUserName(username);
+    localStorage.setItem("userName", username);
+    if (preferences?.voice) {
+      setTtsVoice(preferences.voice);
+      localStorage.setItem("ttsVoice", preferences.voice);
+    }
+    localStorage.setItem("onboardingComplete", "true");
+    setAuthState("app");
   };
 
   /* ---------- LOGOUT ---------- */
   const handleLogout = () => {
-      // Clear auth state but preserve the remembered username hint
-      const rememberedUsername = localStorage.getItem("userName") || "";
-      localStorage.removeItem("onboardingComplete");
+      // Clear everything user-specific
+      localStorage.removeItem("userId");
+      localStorage.removeItem("userName");
       localStorage.removeItem("currentSessionId");
-      // Keep userId so data isn't orphaned, keep userName so login can prefill
+      localStorage.removeItem("onboardingComplete");
+      
+      // Reset state
+      setUserId(null);
       setAuthState("login");
-      setUserName("Labubu");
-      console.log("[Auth] Logged out");
   };
 
   /* ---------- TEXT → AGENT ---------- */

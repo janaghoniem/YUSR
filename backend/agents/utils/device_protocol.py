@@ -118,7 +118,11 @@ class SemanticUITree(BaseModel):
         lines = [f"Screen: {self.screen_name or self.app_name}"]
         
         for elem in self.elements:
-            if elem.visibility != "visible" or not elem.enabled:
+            if elem.visibility != "visible":
+                continue
+            # Keep disabled elements that have a content_description
+            # (e.g. Send button may become disabled but is still targetable)
+            if not elem.enabled and not elem.content_description:
                 continue
                 
             # Format: [id] type "text" | description
@@ -126,6 +130,8 @@ class SemanticUITree(BaseModel):
             desc_part = f" | {elem.content_description}" if elem.content_description else ""
             
             line = f"[{elem.element_id}] {elem.type.upper()} {text_part}{desc_part}"
+            if not elem.enabled:
+                line += " [DISABLED]"
             if elem.clickable:
                 line += " [CLICKABLE]"
             if elem.focusable:
@@ -238,6 +244,10 @@ class MobileTaskResult(BaseModel):
     # Metadata
     execution_time_ms: int
     completion_reason: Optional[str] = None
+    
+    # LLM usage metrics (populated by MobileReActStrategy)
+    token_usage: Optional[Dict[str, int]] = None  # {"prompt": N, "completion": N, "total": N}
+    llm_calls: int = 0
     
     class Config:
         json_schema_extra = {

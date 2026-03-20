@@ -24,6 +24,9 @@ __pycache__/
 .Python
 env/
 venv/
+backend/venv_apo/
+.venv/
+**/.venv/
 aura-venv/
 ENV/
 build/
@@ -223,3 +226,4 @@ app.*.symbols
 
 
 backend/agents/execution_agent/RAG/analysis
+.venv/

@@ -20,6 +20,11 @@ class MessageType(str, Enum):
     SESSION_CONTROL = "session_control"
     STORE_PREFERENCE = "store_preference"
     MEMORY_INSPECTION = "memory_inspection"  # Optional
+    INTERRUPT_COMMAND = "interrupt_command"
+    INTERRUPT_ACK = "interrupt_ack"
+    PROACTIVE_PROMPT = "proactive_prompt"
+    STRUCTURED_RESPONSE = "structured_response"
+    TASK_PROGRESS = "task_progress"
 
 class AgentType(str, Enum):
     """Agent types in the system"""
@@ -69,8 +74,43 @@ class ExecutionResult(BaseModel):
     """Execution result message"""
     status: str  # success, failed, pending
     details: str = ""
-    # metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+    needs_clarification: bool = False
+    clarification_question: Optional[str] = None
+    clarification_type: Optional[str] = None
+    recoverable: bool = False
+
+class ResponseType(str, Enum):
+    """Structured response types for proactive voice UX"""
+    SIMPLE_ACK = "simple_ack"
+    RESULT_WITH_CONTENT = "result_content"
+    RESULT_WITH_ACTION = "result_action"
+    ERROR_RECOVERABLE = "error_recover"
+    ERROR_FATAL = "error_fatal"
+    PARTIAL_RESULT = "partial_result"
+
+class StructuredResponse(BaseModel):
+    """Rich response for proactive voice UX"""
+    type: str  # ResponseType value
+    spoken_text: str
+    full_content: str = ""
+    offer_read_aloud: bool = False
+    offer_actions: List[str] = Field(default_factory=list)
+    context_for_undo: Dict[str, Any] = Field(default_factory=dict)
+
+class ContextSnapshot(BaseModel):
+    """Snapshot for undo/resume on interrupt"""
+    snapshot_id: str = Field(default_factory=lambda: f"snap_{datetime.now().timestamp()}")
+    session_id: str
+    user_id: str
+    original_request: str = ""
+    completed_tasks: List[Dict] = Field(default_factory=list)
+    pending_tasks: List[Dict] = Field(default_factory=list)
+    current_task_state: Optional[Dict] = None
+    execution_outputs: Dict[str, str] = Field(default_factory=dict)
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    is_reversible: bool = False
 
 # Channel names for pub/sub
 class Channels:
@@ -95,4 +135,5 @@ class Channels:
     SESSION_CONTROL = "session_control"
     PREFERENCE_STORAGE = "preference_storage"
     
-    INTERRUPT_CONTROL="interrupt_control"
+    INTERRUPT_CONTROL = "interrupt_control"
+    WEBSOCKET_OUTPUT = "websocket.output"  # For sending messages to WebSocket clients

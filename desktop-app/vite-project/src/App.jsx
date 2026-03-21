@@ -1516,9 +1516,9 @@ function App() {
       />
 
       <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-        <video autoPlay muted loop playsInline>
+        {/* <video autoPlay muted loop playsInline>
           <source src="/Background3.mp4" type="video/mp4" />
-        </video>
+        </video> */}
         
         <div className="main-overlay">
           <HeaderContent userName={userName} />

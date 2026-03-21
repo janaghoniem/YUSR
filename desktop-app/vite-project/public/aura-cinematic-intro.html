@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AURA</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #000;
+    font-family: -apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+  }
+
+  canvas { display: block; position: fixed; inset: 0; }
+
+  #ui {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-end;
+    padding-bottom: 52px;
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  #label {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.28);
+    opacity: 0;
+    transition: opacity 0.9s cubic-bezier(0.25,0,0,1);
+  }
+
+  #label.visible { opacity: 1; }
+
+  #title {
+    margin-top: 14px;
+    font-size: clamp(28px, 5vw, 46px);
+    font-weight: 200;
+    letter-spacing: 0.34em;
+    color: rgba(255,255,255,0.9);
+    opacity: 0;
+    transition: opacity 1.2s cubic-bezier(0.25,0,0,1) 0.25s;
+  }
+
+  #title.visible { opacity: 1; }
+
+  #dot {
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.4);
+    margin-top: 28px;
+    opacity: 0;
+    transition: opacity 0.8s ease 1s;
+  }
+  #dot.visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div id="label">Adaptive Universal Response Agent</div>
+  <div id="title">A U R A</div>
+  <div id="dot"></div>
+</div>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.158/build/three.module.js";
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const COUNT   = 18000;
+const W = window.innerWidth, H = window.innerHeight;
+
+// ─── Renderer ─────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x000000, 1);
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, W/H, 0.01, 200);
+camera.position.set(0, 0, 6.5);
+
+// ─── Cymatics / shape generators ─────────────────────────────────────────────
+// All return Float32Array of length COUNT*3
+// Each is a genuine physical / mathematical pattern
+
+function chladniPoints(m, n, count, scale = 2.2) {
+  // Chladni figure: sin(m*PI*x)*cos(n*PI*y) - cos(m*PI*x)*sin(n*PI*y) ≈ 0
+  const pts = new Float32Array(count * 3);
+  let filled = 0;
+  const attempts = count * 80;
+  for (let a = 0; a < attempts && filled < count; a++) {
+    const x = (Math.random() - 0.5) * 2;
+    const y = (Math.random() - 0.5) * 2;
+    const v = Math.sin(m * Math.PI * x) * Math.cos(n * Math.PI * y)
+            - Math.cos(m * Math.PI * x) * Math.sin(n * Math.PI * y);
+    if (Math.abs(v) < 0.10 + Math.random() * 0.04) {
+      pts[filled*3]   = x * scale;
+      pts[filled*3+1] = y * scale;
+      pts[filled*3+2] = (Math.random()-0.5)*0.12;
+      filled++;
+    }
+  }
+  // fill remaining with outliers for realism
+  while (filled < count) {
+    const x = (Math.random()-0.5)*2;
+    const y = (Math.random()-0.5)*2;
+    pts[filled*3]   = x * scale * (1 + Math.random()*0.35);
+    pts[filled*3+1] = y * scale * (1 + Math.random()*0.35);
+    pts[filled*3+2] = (Math.random()-0.5)*0.4;
+    filled++;
+  }
+  return pts;
+}
+
+function faradayRipple(rings, count, scale = 2.4) {
+  // Faraday standing wave: concentric interference rings
+  const pts = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    // quantise radius to rings
+    const ringIdx = Math.floor(Math.random() * rings);
+    const r = ((ringIdx + 0.5 + (Math.random()-0.5)*0.3) / rings) * scale;
+    // angular modulation: petals
+    const petals = 2 + ringIdx;
+    const mod = 1 + 0.18 * Math.sin(petals * angle);
+    const outR = r * mod;
+    pts[i*3]   = Math.cos(angle) * outR;
+    pts[i*3+1] = Math.sin(angle) * outR;
+    pts[i*3+2] = (Math.random()-0.5)*0.08 + 0.04*Math.sin(petals*angle*2);
+  }
+  return pts;
+}
+
+function lissajousField(a, b, delta, count, scale = 2.3) {
+  const pts = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    // sample t + noise for thickness
+    const t = (i / count) * Math.PI * 2;
+    const noise = (Math.random()-0.5) * 0.13;
+    const nt    = t + noise;
+    pts[i*3]   = Math.sin(a*nt + delta) * scale;
+    pts[i*3+1] = Math.sin(b*nt)         * scale;
+    pts[i*3+2] = (Math.random()-0.5)*0.14 + 0.05*Math.sin(nt*3);
+  }
+  return pts;
+}
+
+function standingWaveGrid(count, scale = 2.3) {
+  // 2D standing wave: cos(kx)*cos(ky) = 0  => nodes
+  const pts = new Float32Array(count * 3);
+  let filled = 0;
+  const k = 3.5;
+  const attempts = count * 60;
+  for (let a = 0; a < attempts && filled < count; a++) {
+    const x = (Math.random()-0.5)*2;
+    const y = (Math.random()-0.5)*2;
+    const v = Math.cos(k*Math.PI*x) * Math.cos(k*Math.PI*y);
+    if (Math.abs(v) < 0.11 + Math.random()*0.04) {
+      pts[filled*3]   = x*scale;
+      pts[filled*3+1] = y*scale;
+      pts[filled*3+2] = (Math.random()-0.5)*0.1;
+      filled++;
+    }
+  }
+  while (filled < count) {
+    pts[filled*3]   = (Math.random()-0.5)*scale*2.2;
+    pts[filled*3+1] = (Math.random()-0.5)*scale*2.2;
+    pts[filled*3+2] = (Math.random()-0.5)*0.35;
+    filled++;
+  }
+  return pts;
+}
+
+function spirographField(count, scale = 2.2) {
+  // Epitrochoid / spirograph
+  const R = 3, r = 1.2, d = 2.1;
+  const pts = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const t = (i/count) * Math.PI * 2 * 5;
+    const noise = (Math.random()-0.5)*0.15;
+    const nt = t + noise;
+    const x = (R-r)*Math.cos(nt) + d*Math.cos((R-r)/r*nt);
+    const y = (R-r)*Math.sin(nt) - d*Math.sin((R-r)/r*nt);
+    const len = Math.sqrt(x*x+y*y) || 1;
+    const s = scale / (Math.max(Math.abs(x), Math.abs(y)) * 0.55 + 0.01);
+    pts[i*3]   = x * s * 0.28;
+    pts[i*3+1] = y * s * 0.28;
+    pts[i*3+2] = (Math.random()-0.5)*0.12;
+  }
+  return pts;
+}
+
+function chaosField(count) {
+  const pts = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const r = Math.pow(Math.random(), 0.5) * 3.2;
+    const a = Math.random() * Math.PI * 2;
+    pts[i*3]   = Math.cos(a)*r;
+    pts[i*3+1] = Math.sin(a)*r;
+    pts[i*3+2] = (Math.random()-0.5)*1.8;
+  }
+  return pts;
+}
+
+// ─── Build shape library ──────────────────────────────────────────────────────
+const shapes = {
+  chaos:      chaosField(COUNT),
+  chladni1:   chladniPoints(2, 3, COUNT),   // classic 4-lobe
+  faraday:    faradayRipple(6, COUNT),       // ripple rings
+  lissajous:  lissajousField(3, 2, Math.PI/4, COUNT),
+  wave:       standingWaveGrid(COUNT),
+  spirograph: spirographField(COUNT),
+};
+
+// ─── Geometry & attributes ────────────────────────────────────────────────────
+const geo = new THREE.BufferGeometry();
+const basePos = new Float32Array(COUNT * 3);
+const seeds   = new Float32Array(COUNT);
+
+for (let i = 0; i < COUNT; i++) {
+  basePos[i*3]   = shapes.chaos[i*3];
+  basePos[i*3+1] = shapes.chaos[i*3+1];
+  basePos[i*3+2] = shapes.chaos[i*3+2];
+  seeds[i] = Math.random();
+}
+
+geo.setAttribute('position', new THREE.BufferAttribute(basePos.slice(), 3));
+geo.setAttribute('aSeed',    new THREE.BufferAttribute(seeds,   1));
+geo.setAttribute('aTargetA', new THREE.BufferAttribute(new Float32Array(COUNT*3), 3));
+geo.setAttribute('aTargetB', new THREE.BufferAttribute(new Float32Array(COUNT*3), 3));
+
+// ─── Shader material ──────────────────────────────────────────────────────────
+const mat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite:  false,
+  depthTest:   false,
+  blending:    THREE.AdditiveBlending,
+
+  uniforms: {
+    uTime:     { value: 0 },
+    uProgress: { value: 0 },
+    uChaos:    { value: 1 },
+    uBrightness: { value: 0 },
+  },
+
+  vertexShader: `
+    uniform float uTime;
+    uniform float uProgress;
+    uniform float uChaos;
+
+    attribute float aSeed;
+    attribute vec3  aTargetA;
+    attribute vec3  aTargetB;
+
+    varying float vAlpha;
+    varying float vSeed;
+    varying float vDist;
+
+    // Simplex-style hash
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    vec3 hash3(float n){
+      return vec3(hash(n), hash(n+1.1), hash(n+2.3));
+    }
+
+    void main(){
+      // Morphing
+      vec3 pos = mix(aTargetA, aTargetB, uProgress);
+
+      // Cymatic micro-oscillation — physically motivated
+      float freq1 = 2.0 + aSeed * 3.0;
+      float freq2 = 1.5 + aSeed * 2.5;
+      float phase = aSeed * 6.2831;
+
+      float wave = sin(pos.x * freq1 + uTime * 1.8 + phase)
+                 * cos(pos.y * freq2 - uTime * 1.4);
+      pos.z += wave * 0.07 * uChaos;
+
+      // Outlier dispersal — realistic nodal scattering
+      float outlierFactor = step(0.92, aSeed);
+      vec3 scatter = hash3(aSeed * 91.7 + uTime * 0.05) - 0.5;
+      pos += scatter * outlierFactor * uChaos * 0.6;
+
+      // Grain drift (Brownian-ish micro-motion)
+      vec3 drift = vec3(
+        sin(uTime * 3.1 + aSeed * 73.1),
+        cos(uTime * 2.7 + aSeed * 51.3),
+        sin(uTime * 4.3 + aSeed * 29.7)
+      ) * (0.003 + 0.012 * uChaos);
+      pos += drift;
+
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float depth = 1.0 / (-mv.z + 0.001);
+
+      // Physically-inspired size: larger at nodes, smaller outliers
+      float sizeMod = mix(1.0, 0.4, outlierFactor);
+      float baseSize = 8.0 * depth * sizeMod;
+      float jitter = 0.6 + aSeed * 0.9;
+      gl_PointSize = max(0.5, baseSize * jitter);
+
+      gl_Position = projectionMatrix * mv;
+
+      vDist  = length(pos.xy);
+      vAlpha = mix(0.7, 0.95, hash(aSeed * 7.3));
+      vSeed  = aSeed;
+    }
+  `,
+
+  fragmentShader: `
+    uniform float uTime;
+    uniform float uBrightness;
+    varying float vAlpha;
+    varying float vSeed;
+    varying float vDist;
+
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      if(d > 0.5) discard;
+
+      // Soft gaussian core
+      float core = exp(-d * d * 14.0);
+      // Hard crystalline grain
+      float grain = step(0.38, fract(hash(vSeed * 391.1 + d * 61.3) * 17.0));
+
+      // Apple-native monochrome palette — warm white, slight silver
+      float warmth = 0.96 + 0.04 * hash(vSeed * 13.7);
+      vec3 base = vec3(warmth, warmth, warmth * 0.97);
+
+      float alpha = vAlpha * mix(core, core*0.65+grain*0.35, 0.4);
+      alpha *= (0.4 + uBrightness * 0.6);
+
+      // Edge glow ring
+      float ring = smoothstep(0.5, 0.38, d) * smoothstep(0.22, 0.35, d) * 0.35;
+      alpha += ring * uBrightness;
+
+      gl_FragColor = vec4(base, alpha);
+    }
+  `
+});
+
+const points = new THREE.Points(geo, mat);
+scene.add(points);
+
+// ─── Timeline ─────────────────────────────────────────────────────────────────
+const timeline = [
+  { from: 'chaos',      to: 'chladni1',  dur: 3.8, label: 'Resonance'  },
+  { from: 'chladni1',   to: 'faraday',   dur: 3.5, label: 'Wave'       },
+  { from: 'faraday',    to: 'lissajous', dur: 3.5, label: 'Harmony'    },
+  { from: 'lissajous',  to: 'wave',      dur: 3.5, label: 'Field'      },
+  { from: 'wave',       to: 'spirograph',dur: 3.5, label: 'Pattern'    },
+  { from: 'spirograph', to: 'chaos',     dur: 3.8, label: 'Entropy'    },
+];
+
+let stage     = 0;
+let stageT    = 0;
+let running   = false;
+
+const labelEl = document.getElementById('label');
+const titleEl = document.getElementById('title');
+const dotEl   = document.getElementById('dot');
+
+// Show UI after a moment
+setTimeout(() => {
+  labelEl.classList.add('visible');
+  titleEl.classList.add('visible');
+  dotEl.classList.add('visible');
+}, 600);
+
+function setStage(i) {
+  const s = timeline[i];
+  const A = shapes[s.from];
+  const B = shapes[s.to];
+  geo.attributes.aTargetA.array.set(A);
+  geo.attributes.aTargetB.array.set(B);
+  geo.attributes.aTargetA.needsUpdate = true;
+  geo.attributes.aTargetB.needsUpdate = true;
+}
+
+// Apple-style spring ease
+function easeApple(t) {
+  // Smooth quartic ease-in-out, feels like iOS spring
+  if (t < 0.5) return 8*t*t*t*t;
+  const f = t - 1;
+  return 1 - 8*f*f*f*f;
+}
+
+// ─── Clock & animation ────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let   lastT = 0;
+
+function init() {
+  setStage(0);
+  running = true;
+  stageT  = clock.getElapsedTime();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const t  = clock.getElapsedTime();
+  const dt = t - lastT;
+  lastT = t;
+
+  mat.uniforms.uTime.value = t;
+
+  // Gentle camera breath
+  camera.position.x = Math.sin(t * 0.07) * 0.12;
+  camera.position.y = Math.cos(t * 0.05) * 0.08;
+  camera.lookAt(0, 0, 0);
+
+  if (!running) {
+    // intro warmup chaos
+    mat.uniforms.uProgress.value = 0;
+    mat.uniforms.uChaos.value    = 1.0;
+    mat.uniforms.uBrightness.value = Math.min(1, t * 0.4);
+
+    // Set up initial targets
+    geo.attributes.aTargetA.array.set(shapes.chaos);
+    geo.attributes.aTargetB.array.set(shapes.chaos);
+    geo.attributes.aTargetA.needsUpdate = true;
+    geo.attributes.aTargetB.needsUpdate = true;
+
+    if (t > 1.2) init();
+    renderer.render(scene, camera);
+    return;
+  }
+
+  const s       = timeline[stage];
+  const elapsed = t - stageT;
+  let   raw     = Math.min(elapsed / s.dur, 1);
+  const progress = easeApple(raw);
+
+  mat.uniforms.uProgress.value   = progress;
+  mat.uniforms.uChaos.value      = 1.0 - progress * 0.88;
+  mat.uniforms.uBrightness.value = 0.65 + 0.35 * Math.sin(progress * Math.PI);
+
+  if (raw >= 1) {
+    stage  = (stage + 1) % timeline.length;
+    stageT = t;
+    setStage(stage);
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+animate();
+</script>
+</body>
+</html>

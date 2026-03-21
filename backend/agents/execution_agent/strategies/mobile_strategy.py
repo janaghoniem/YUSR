@@ -894,26 +894,55 @@ class MobileReActStrategy:
     
     def _get_content_from_task_params(self, task: 'MobileTaskRequest') -> str:
         """
-        Get any parameters passed from coordinator via extra_params
-        
-        This allows coordinator to pass ANY field values (text, numbers, etc.)
-        without hardcoding email-specific logic here
+        Get any parameters passed from coordinator via extra_params.
+
+        Handles two cases:
+          1. input_content is a JSON string (e.g. email composition output from
+             Reasoning Agent: {"SUBJECT": "...", "BODY": "...", "CC": "..."})
+             → each key is rendered as its own labelled line so the ReAct LLM
+               knows which exact text to type into each UI field.
+          2. Any other key-value pair is rendered generically.
+
+        Internal params (device_id, input_from, app_name, file_path, url,
+        max_steps, timeout_seconds) are always skipped.
         """
+        import json as _json
+
+        INTERNAL_KEYS = {
+            'input_from', 'device_id', 'app_name', 'file_path', 'url',
+            'max_steps', 'timeout_seconds', 'language',
+        }
+
         context_parts = []
-        
-        # Check extra_params (from coordinator)
-        if hasattr(task, 'extra_params') and task.extra_params:
-            for key, value in task.extra_params.items():
-                # Skip internal params like input_from, device_id, etc.
-                if key in ['input_from', 'device_id', 'app_name', 'file_path', 'url']:
-                    continue
-                
-                # Add any user-facing parameter
-                context_parts.append(f"📝 {key.upper()}: \"{value}\" (from coordinator)")
-        
+
+        if not (hasattr(task, 'extra_params') and task.extra_params):
+            return ""
+
+        for key, value in task.extra_params.items():
+            if key in INTERNAL_KEYS:
+                continue
+
+            # ── Special handling: input_content may be JSON from reasoning agent ──
+            if key == 'input_content' and isinstance(value, str) and value.strip().startswith('{'):
+                try:
+                    parsed = _json.loads(value)
+                    if isinstance(parsed, dict):
+                        context_parts.append("📋 GENERATED CONTENT FROM REASONING:")
+                        for field, field_val in parsed.items():
+                            if field_val:  # skip empty/null fields
+                                context_parts.append(f"   {field}: {field_val!r}")
+                        continue
+                except (_json.JSONDecodeError, Exception):
+                    pass  # fall through to generic rendering below
+
+            # ── Generic rendering for all other params ──
+            context_parts.append(f"📝 {key.upper()}: {value!r}")
+
         if context_parts:
-            return "\n" + "\n".join(context_parts) + "\n⚠️ USE THESE EXACT VALUES - DO NOT IMPROVISE!"
-        
+            return (
+                "\n" + "\n".join(context_parts) +
+                "\n⚠️ USE THESE EXACT VALUES — DO NOT IMPROVISE OR PARAPHRASE!"
+            )
         return ""
     
     def _extract_target_app(self, goal: str) -> Optional[str]:

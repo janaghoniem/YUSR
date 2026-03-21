@@ -517,6 +517,27 @@ CORE BEHAVIOR RULES
 
 1. NEVER generate conversational, acknowledgment, confirmation, planning, preparation, or meta tasks.
 
+# EMAIL TASK RULES (CRITICAL)
+When the user asks to compose, send, or draft an email:
+a) ALWAYS use the USER PREFERENCES section above to pick the concrete email app.
+   - If preferences mention Gmail → use Gmail.
+   - If preferences mention Outlook → use Outlook.
+   - If preferences mention any mail app → use that app.
+   - Only if preferences are completely silent about email → use "open default email app" (local).
+   NEVER output a vague "open email client" task when memory has a preference.
+
+b) ALWAYS generate a reasoning task FIRST that produces the email content fields.
+   The TO and FROM fields are filled by separate action tasks — do NOT ask the
+   reasoning agent to generate them.
+   The reasoning task ai_prompt must say:
+   "Compose a complete email for this request: <user intent>.
+    Return a JSON object with keys SUBJECT and BODY."
+   The reasoning task output will be a JSON object injected as input_content, e.g.:
+   {"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}
+
+c) The action tasks that fill Subject and Body MUST depend on the reasoning task and
+   will receive the generated JSON in extra_params["input_content"].
+
 ❌ INVALID tasks include:
 - "Confirm receipt of the request"
 - "Prepare to execute the task"
@@ -617,7 +638,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: null
 
 - task_id: task_2
-  ai_prompt: Fill email field with user@example.com
+  ai_prompt: Fill the email or username field with user@example.com
   device: desktop
   context: web
   target_agent: action
@@ -627,7 +648,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: task_1
 
 - task_id: task_3
-  ai_prompt: Fill password field with mypass123
+  ai_prompt: Fill the password field with mypass123
   device: desktop
   context: web
   target_agent: action
@@ -637,7 +658,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: task_2
 
 - task_id: task_4
-  ai_prompt: Click login button
+  ai_prompt: Click the Sign In or Login submit button
   device: desktop
   context: web
   target_agent: action
@@ -645,7 +666,74 @@ User: "Login to Gmail with user@example.com and password mypass123"
     action: click
   depends_on: task_3
 
-EXPLANATION: ai_prompt drives RAG to resolve URLs and selectors automatically.
+## Example 5: Email Composition Task
+
+User: "Compose an email to rescheduling tomorrow's meeting with Sara"
+(Assume USER PREFERENCES mention Gmail)
+
+- task_id: task_1
+  ai_prompt: 
+    Compose a complete email for this request:
+    "Reschedule tomorrow's meeting with Sara".
+    Return a JSON object with keys SUBJECT and BODY.
+  device: desktop
+  context: web
+  target_agent: reasoning
+  extra_params: {{}}
+  web_params: {{}}
+  depends_on: null
+
+- task_id: task_2
+  ai_prompt: Navigate to Gmail compose window
+  device: desktop
+  context: web
+  target_agent: action
+  web_params:
+    action: navigate
+  depends_on: null
+
+- task_id: task_3
+  ai_prompt: Fill the To field with Sara's email address
+  device: desktop
+  context: web
+  target_agent: action
+  web_params:
+    action: fill
+    text: sara@example.com
+  depends_on: task_2
+
+- task_id: task_4
+  ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
+  device: desktop
+  context: web
+  target_agent: action
+  web_params:
+    action: fill
+  depends_on: task_1,task_3
+
+- task_id: task_5
+  ai_prompt: Fill the email body with the BODY value from the composed email
+  device: desktop
+  context: web
+  target_agent: action
+  web_params:
+    action: fill
+  depends_on: task_4
+
+- task_id: task_6
+  ai_prompt: Click the Send button to send the email
+  device: desktop
+  context: web
+  target_agent: action
+  web_params:
+    action: click
+  depends_on: task_5
+
+EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
+task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
+the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
+so the action layer can parse SUBJECT and BODY individually.
+The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
 
 ## Example 3: Mobile Configuration Task
 
@@ -719,9 +807,14 @@ Examples of REASONING tasks:
 - "Write a scary story" → reasoning
 - "Summarize this article" → reasoning
 - "Translate this to Arabic" → reasoning
-- "Draft an email to my boss" → reasoning
+- "Draft an email to my boss" → reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
 - "Explain quantum computing" → reasoning
 - "Generate a Python script" → reasoning
+
+EMAIL COMPOSITION RULE: A single reasoning task must always generate ALL email
+fields together (Subject, Body) in one structured output. Never split these
+into separate reasoning tasks. The action layer will parse the output and fill
+each field individually.
 
 Examples of ACTION tasks:
 - "Open Notepad" → action
@@ -1048,6 +1141,24 @@ def create_coordinator_graph():
                     current_task.extra_params["input_content"] = raw_dep_output
                     logger.info(f"📎 Auto-injected output from {dep_id} into {current_task.task_id}")
             
+            # ── Per-task debug block — shows full task before execution ──────
+            # This makes it easy to verify: routing, injected content, params.
+            _task_dump = current_task.model_dump()
+            _ic = _task_dump.get("extra_params", {}).get("input_content", "")
+            logger.info(
+                f"\n{'='*70}\n"
+                f"▶ TASK DISPATCHING: {current_task.task_id}\n"
+                f"   ai_prompt    : {current_task.ai_prompt}\n"
+                f"   device       : {current_task.device}\n"
+                f"   context      : {current_task.context}\n"
+                f"   target_agent : {current_task.target_agent}\n"
+                f"   depends_on   : {current_task.depends_on}\n"
+                f"   extra_params : {json.dumps({k: v for k, v in _task_dump.get('extra_params', {}).items() if k != 'input_content'}, ensure_ascii=False)}\n"
+                f"   web_params   : {json.dumps(_task_dump.get('web_params', {}), ensure_ascii=False)}\n"
+                f"   input_content: {'('+str(len(_ic))+' chars) ' + _ic[:120] + ('...' if len(_ic) > 120 else '') if _ic else '(none)'}\n"
+                f"{'='*70}"
+            )
+
             # Execute task
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
             result = await execute_single_task(

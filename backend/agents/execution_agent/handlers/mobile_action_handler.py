@@ -66,6 +66,12 @@ class MobileActionHandler:
 
         logger.info(f"📱 Handling mobile task: {task_id}")
         logger.info(f"   Prompt: {actual_task.get('ai_prompt')}")
+        # Log input_content so the reasoning→mobile data flow is visible in debug
+        _ic = (actual_task.get("extra_params") or {}).get("input_content", "")
+        if _ic:
+            logger.info(f"   input_content ({len(_ic)} chars): {_ic[:200]}{'...' if len(_ic) > 200 else ''}")
+        else:
+            logger.info("   input_content: (none — standalone action task)")
         
         try:
             # Validate task

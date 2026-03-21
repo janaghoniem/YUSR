@@ -25,6 +25,18 @@
     z-index: 10;
   }
 
+  #caption {
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.30em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.18);
+    opacity: 0;
+    transition: opacity 0.6s cubic-bezier(0.25,0,0,1);
+    margin-bottom: 20px;
+    height: 14px;
+  }
+
   #label {
     font-size: 11px;
     font-weight: 500;
@@ -63,6 +75,7 @@
 <body>
 
 <div id="ui">
+  <div id="caption"></div>
   <div id="label">Adaptive Universal Response Agent</div>
   <div id="title">A U R A</div>
   <div id="dot"></div>
@@ -86,137 +99,219 @@ const scene  = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, W/H, 0.01, 200);
 camera.position.set(0, 0, 6.5);
 
-// ─── Cymatics / shape generators ─────────────────────────────────────────────
-// All return Float32Array of length COUNT*3
-// Each is a genuine physical / mathematical pattern
+// ─── Shape generators — each maps to an AURA agent or system concept ──────────
+// All return Float32Array of length count*3.
+// Outlier particles (5–8 %) are always added for cymatic realism.
 
-function chladniPoints(m, n, count, scale = 2.2) {
-  // Chladni figure: sin(m*PI*x)*cos(n*PI*y) - cos(m*PI*x)*sin(n*PI*y) ≈ 0
-  const pts = new Float32Array(count * 3);
-  let filled = 0;
-  const attempts = count * 80;
-  for (let a = 0; a < attempts && filled < count; a++) {
-    const x = (Math.random() - 0.5) * 2;
-    const y = (Math.random() - 0.5) * 2;
-    const v = Math.sin(m * Math.PI * x) * Math.cos(n * Math.PI * y)
-            - Math.cos(m * Math.PI * x) * Math.sin(n * Math.PI * y);
-    if (Math.abs(v) < 0.10 + Math.random() * 0.04) {
-      pts[filled*3]   = x * scale;
-      pts[filled*3+1] = y * scale;
-      pts[filled*3+2] = (Math.random()-0.5)*0.12;
-      filled++;
-    }
-  }
-  // fill remaining with outliers for realism
+function hash1(n) { return ((Math.sin(n) * 43758.5453) % 1 + 1) % 1; }
+
+function addOutliers(pts, filled, count, spreadScale) {
   while (filled < count) {
-    const x = (Math.random()-0.5)*2;
-    const y = (Math.random()-0.5)*2;
-    pts[filled*3]   = x * scale * (1 + Math.random()*0.35);
-    pts[filled*3+1] = y * scale * (1 + Math.random()*0.35);
-    pts[filled*3+2] = (Math.random()-0.5)*0.4;
+    const r = spreadScale * (1 + Math.random() * 0.5);
+    const a = Math.random() * Math.PI * 2;
+    pts[filled*3]   = Math.cos(a) * r;
+    pts[filled*3+1] = Math.sin(a) * r;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.55;
     filled++;
   }
-  return pts;
 }
 
-function faradayRipple(rings, count, scale = 2.4) {
-  // Faraday standing wave: concentric interference rings
-  const pts = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    // quantise radius to rings
-    const ringIdx = Math.floor(Math.random() * rings);
-    const r = ((ringIdx + 0.5 + (Math.random()-0.5)*0.3) / rings) * scale;
-    // angular modulation: petals
-    const petals = 2 + ringIdx;
-    const mod = 1 + 0.18 * Math.sin(petals * angle);
-    const outR = r * mod;
-    pts[i*3]   = Math.cos(angle) * outR;
-    pts[i*3+1] = Math.sin(angle) * outR;
-    pts[i*3+2] = (Math.random()-0.5)*0.08 + 0.04*Math.sin(petals*angle*2);
-  }
-  return pts;
-}
-
-function lissajousField(a, b, delta, count, scale = 2.3) {
-  const pts = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    // sample t + noise for thickness
-    const t = (i / count) * Math.PI * 2;
-    const noise = (Math.random()-0.5) * 0.13;
-    const nt    = t + noise;
-    pts[i*3]   = Math.sin(a*nt + delta) * scale;
-    pts[i*3+1] = Math.sin(b*nt)         * scale;
-    pts[i*3+2] = (Math.random()-0.5)*0.14 + 0.05*Math.sin(nt*3);
-  }
-  return pts;
-}
-
-function standingWaveGrid(count, scale = 2.3) {
-  // 2D standing wave: cos(kx)*cos(ky) = 0  => nodes
-  const pts = new Float32Array(count * 3);
-  let filled = 0;
-  const k = 3.5;
-  const attempts = count * 60;
-  for (let a = 0; a < attempts && filled < count; a++) {
-    const x = (Math.random()-0.5)*2;
-    const y = (Math.random()-0.5)*2;
-    const v = Math.cos(k*Math.PI*x) * Math.cos(k*Math.PI*y);
-    if (Math.abs(v) < 0.11 + Math.random()*0.04) {
-      pts[filled*3]   = x*scale;
-      pts[filled*3+1] = y*scale;
-      pts[filled*3+2] = (Math.random()-0.5)*0.1;
-      filled++;
-    }
-  }
-  while (filled < count) {
-    pts[filled*3]   = (Math.random()-0.5)*scale*2.2;
-    pts[filled*3+1] = (Math.random()-0.5)*scale*2.2;
-    pts[filled*3+2] = (Math.random()-0.5)*0.35;
-    filled++;
-  }
-  return pts;
-}
-
-function spirographField(count, scale = 2.2) {
-  // Epitrochoid / spirograph
-  const R = 3, r = 1.2, d = 2.1;
-  const pts = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const t = (i/count) * Math.PI * 2 * 5;
-    const noise = (Math.random()-0.5)*0.15;
-    const nt = t + noise;
-    const x = (R-r)*Math.cos(nt) + d*Math.cos((R-r)/r*nt);
-    const y = (R-r)*Math.sin(nt) - d*Math.sin((R-r)/r*nt);
-    const len = Math.sqrt(x*x+y*y) || 1;
-    const s = scale / (Math.max(Math.abs(x), Math.abs(y)) * 0.55 + 0.01);
-    pts[i*3]   = x * s * 0.28;
-    pts[i*3+1] = y * s * 0.28;
-    pts[i*3+2] = (Math.random()-0.5)*0.12;
-  }
-  return pts;
-}
-
+// 0 · CHAOS — raw unstructured input, the world before AURA
 function chaosField(count) {
   const pts = new Float32Array(count * 3);
   for (let i = 0; i < count; i++) {
-    const r = Math.pow(Math.random(), 0.5) * 3.2;
+    const r = Math.pow(Math.random(), 0.45) * 3.4;
     const a = Math.random() * Math.PI * 2;
-    pts[i*3]   = Math.cos(a)*r;
-    pts[i*3+1] = Math.sin(a)*r;
-    pts[i*3+2] = (Math.random()-0.5)*1.8;
+    pts[i*3]   = Math.cos(a) * r;
+    pts[i*3+1] = Math.sin(a) * r;
+    pts[i*3+2] = (Math.random()-0.5) * 2.0;
   }
+  return pts;
+}
+
+// 1 · LANGUAGE AGENT — voice, breath, listening
+//   A single soft pulse ring with harmonic overtones: sound-wave cross-section.
+//   Cymatic basis: radially-symmetric standing pressure wave (drum membrane mode 01).
+function voicePulse(count, scale = 2.3) {
+  const pts  = new Float32Array(count * 3);
+  // Three harmonic rings at radii proportional to Bessel zeros: 1.0, 1.64, 2.23
+  const rings = [
+    { r: 0.38, w: 0.055, weight: 0.55 },
+    { r: 0.68, w: 0.045, weight: 0.30 },
+    { r: 1.00, w: 0.035, weight: 0.15 },
+  ];
+  let filled = 0;
+  const inner = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    // pick ring by weight
+    const rnd = Math.random();
+    let ring = rings[0];
+    let acc = 0;
+    for (const rg of rings) { acc += rg.weight; if (rnd < acc) { ring = rg; break; } }
+
+    const angle    = Math.random() * Math.PI * 2;
+    const radNoise = (Math.random()-0.5) * ring.w * 2;
+    const r        = (ring.r + radNoise) * scale;
+
+    // Subtle angular modulation — voice is never a perfect circle
+    const mod = 1 + 0.06 * Math.sin(6 * angle) + 0.03 * Math.cos(11 * angle);
+    pts[filled*3]   = Math.cos(angle) * r * mod;
+    pts[filled*3+1] = Math.sin(angle) * r * mod;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.07;
+    filled++;
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+// 2 · REASONING AGENT — thought, pattern recognition, inference
+//   A sparse neural web: N hub-nodes + arcs sampled densely along edges between them.
+//   Evokes synaptic graphs and graph-of-thought architectures.
+function neuralWeb(count, scale = 2.2) {
+  const pts  = new Float32Array(count * 3);
+  const HUBS = 9;
+  // Place hubs on a perturbed circle
+  const hx = [], hy = [];
+  for (let h = 0; h < HUBS; h++) {
+    const a = (h / HUBS) * Math.PI * 2 + hash1(h * 7.3) * 0.4;
+    const r = scale * (0.55 + hash1(h * 13.7) * 0.45);
+    hx.push(Math.cos(a) * r);
+    hy.push(Math.sin(a) * r);
+  }
+  // Dense particles at hub centres
+  const perHub  = Math.floor(count * 0.18 / HUBS);
+  let filled = 0;
+  for (let h = 0; h < HUBS && filled < count * 0.18; h++) {
+    for (let p = 0; p < perHub && filled < count; p++) {
+      const off = 0.07;
+      pts[filled*3]   = hx[h] + (Math.random()-0.5)*off;
+      pts[filled*3+1] = hy[h] + (Math.random()-0.5)*off;
+      pts[filled*3+2] = (Math.random()-0.5)*0.06;
+      filled++;
+    }
+  }
+  // Sparse arcs along edges (not every hub pair — selective for elegance)
+  const edges = [];
+  for (let a = 0; a < HUBS; a++) {
+    for (let b = a+1; b < HUBS; b++) {
+      if (hash1(a * 17 + b * 31) < 0.55) edges.push([a, b]);
+    }
+  }
+  const perEdge = Math.floor((count * 0.75) / Math.max(edges.length, 1));
+  for (const [a, b] of edges) {
+    for (let p = 0; p < perEdge && filled < count; p++) {
+      const t     = Math.random();
+      const noise = (Math.random()-0.5) * 0.04;
+      pts[filled*3]   = hx[a] + (hx[b]-hx[a]) * t + noise;
+      pts[filled*3+1] = hy[a] + (hy[b]-hy[a]) * t + noise;
+      pts[filled*3+2] = (Math.random()-0.5) * 0.05;
+      filled++;
+    }
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+// 3 · COORDINATOR AGENT — orchestration, command, pure structure
+//   Four concentric authority rings + a tight central nucleus.
+//   The outermost ring is broken into arc segments — tasks in flight.
+//   Cymatic basis: drumhead modes with discrete azimuthal symmetry.
+function coordinatorRings(count, scale = 2.3) {
+  const pts   = new Float32Array(count * 3);
+  const radii = [0.13, 0.38, 0.65, 0.88, 1.00];
+  const weights = [0.08, 0.16, 0.22, 0.26, 0.28];
+  let filled = 0;
+  const inner = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    const rnd = Math.random();
+    let ri = 0, acc = 0;
+    for (let k = 0; k < weights.length; k++) { acc += weights[k]; if (rnd < acc) { ri = k; break; } }
+
+    const angle  = Math.random() * Math.PI * 2;
+    const rNoise = (Math.random()-0.5) * 0.022;
+    const r      = (radii[ri] + rNoise) * scale;
+
+    // Outermost ring: broken into 6 arc segments (tasks dispatched)
+    if (ri === 4) {
+      const seg    = Math.floor(angle / (Math.PI * 2) * 6);
+      const gapFrac = hash1(seg * 19.3);
+      if (gapFrac < 0.22) { continue; } // gap → skip
+    }
+
+    pts[filled*3]   = Math.cos(angle) * r;
+    pts[filled*3+1] = Math.sin(angle) * r;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.05;
+    filled++;
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+// 4 · EXECUTION AGENT — action, flow, directed force
+//   Parallel stream-lines converging radially inward to an action point.
+//   Like force-field lines or velocity streamlines — motion with intent.
+function executionFlow(count, scale = 2.35) {
+  const pts   = new Float32Array(count * 3);
+  const STREAMS = 14;
+  const inner   = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    // pick a stream
+    const s     = Math.floor(Math.random() * STREAMS);
+    const baseA = (s / STREAMS) * Math.PI * 2;
+
+    // t: 0 = outer origin, 1 = convergence point
+    const t = Math.pow(Math.random(), 0.7); // bias toward outer start
+    const r = scale * (1.0 - t * 0.92);
+
+    // Streams curve slightly — logarithmic spiral tendency
+    const curl  = 0.38 * t;
+    const angle = baseA + curl + (Math.random()-0.5)*0.07;
+
+    pts[i*3]   = Math.cos(angle) * r;
+    pts[i*3+1] = Math.sin(angle) * r;
+    pts[i*3+2] = (Math.random()-0.5) * 0.06 * (1-t);
+  }
+  addOutliers(pts, inner, count, scale);
+  return pts;
+}
+
+// 5 · AURA UNIFIED — all agents resolved into one coherent form
+//   A cymatic mandala: 6-fold Chladni symmetry, the system at rest and complete.
+//   Mathematical basis: Chladni mode (3,2) overlaid with radial Bessel envelope.
+function auraConvergence(count, scale = 2.25) {
+  const pts  = new Float32Array(count * 3);
+  let filled = 0;
+  const inner   = Math.floor(count * 0.93);
+  const attempts = inner * 90;
+  for (let a = 0; a < attempts && filled < inner; a++) {
+    const x = (Math.random()-0.5) * 2;
+    const y = (Math.random()-0.5) * 2;
+    // 6-fold Chladni: sin(3πx)cos(2πy) - cos(3πx)sin(2πy) ≈ 0
+    const v = Math.sin(3*Math.PI*x)*Math.cos(2*Math.PI*y)
+            - Math.cos(3*Math.PI*x)*Math.sin(2*Math.PI*y);
+    // Radial Bessel-like envelope: bias particles toward middle radii
+    const r   = Math.sqrt(x*x+y*y);
+    const env = Math.exp(-r*r*0.55) * (0.3 + 0.7*Math.abs(Math.sin(r*3.8)));
+    const thr = 0.09 + Math.random() * 0.05;
+    if (Math.abs(v) < thr && Math.random() < env + 0.15) {
+      pts[filled*3]   = x * scale;
+      pts[filled*3+1] = y * scale;
+      pts[filled*3+2] = (Math.random()-0.5) * 0.08;
+      filled++;
+    }
+  }
+  addOutliers(pts, filled, count, scale);
   return pts;
 }
 
 // ─── Build shape library ──────────────────────────────────────────────────────
 const shapes = {
-  chaos:      chaosField(COUNT),
-  chladni1:   chladniPoints(2, 3, COUNT),   // classic 4-lobe
-  faraday:    faradayRipple(6, COUNT),       // ripple rings
-  lissajous:  lissajousField(3, 2, Math.PI/4, COUNT),
-  wave:       standingWaveGrid(COUNT),
-  spirograph: spirographField(COUNT),
+  chaos:       chaosField(COUNT),
+  voice:       voicePulse(COUNT),        // Language Agent
+  neural:      neuralWeb(COUNT),         // Reasoning Agent
+  coordinator: coordinatorRings(COUNT),  // Coordinator Agent
+  execution:   executionFlow(COUNT),     // Execution Agent
+  aura:        auraConvergence(COUNT),   // Unified system
 };
 
 // ─── Geometry & attributes ────────────────────────────────────────────────────
@@ -350,23 +445,34 @@ const mat = new THREE.ShaderMaterial({
 const points = new THREE.Points(geo, mat);
 scene.add(points);
 
-// ─── Timeline ─────────────────────────────────────────────────────────────────
+// ─── Timeline — each stage maps to an AURA agent ──────────────────────────────
 const timeline = [
-  { from: 'chaos',      to: 'chladni1',  dur: 3.8, label: 'Resonance'  },
-  { from: 'chladni1',   to: 'faraday',   dur: 3.5, label: 'Wave'       },
-  { from: 'faraday',    to: 'lissajous', dur: 3.5, label: 'Harmony'    },
-  { from: 'lissajous',  to: 'wave',      dur: 3.5, label: 'Field'      },
-  { from: 'wave',       to: 'spirograph',dur: 3.5, label: 'Pattern'    },
-  { from: 'spirograph', to: 'chaos',     dur: 3.8, label: 'Entropy'    },
+  { from: 'chaos',       to: 'voice',       dur: 4.0, caption: 'Language'    },
+  { from: 'voice',       to: 'neural',      dur: 3.8, caption: 'Reasoning'   },
+  { from: 'neural',      to: 'coordinator', dur: 3.8, caption: 'Coordinator' },
+  { from: 'coordinator', to: 'execution',   dur: 3.8, caption: 'Execution'   },
+  { from: 'execution',   to: 'aura',        dur: 4.2, caption: 'AURA'        },
+  { from: 'aura',        to: 'chaos',       dur: 3.6, caption: ''            },
 ];
 
 let stage     = 0;
 let stageT    = 0;
 let running   = false;
 
-const labelEl = document.getElementById('label');
-const titleEl = document.getElementById('title');
-const dotEl   = document.getElementById('dot');
+const labelEl   = document.getElementById('label');
+const titleEl   = document.getElementById('title');
+const dotEl     = document.getElementById('dot');
+const captionEl = document.getElementById('caption');
+
+// Fade caption in/out on each stage change
+let captionTimer = null;
+function showCaption(text) {
+  if (!text) { captionEl.style.opacity = '0'; return; }
+  captionEl.textContent = text;
+  captionEl.style.opacity = '1';
+  clearTimeout(captionTimer);
+  captionTimer = setTimeout(() => { captionEl.style.opacity = '0'; }, 2200);
+}
 
 // Show UI after a moment
 setTimeout(() => {
@@ -401,6 +507,7 @@ function init() {
   setStage(0);
   running = true;
   stageT  = clock.getElapsedTime();
+  showCaption(timeline[0].caption);
 }
 
 function animate() {
@@ -446,6 +553,7 @@ function animate() {
     stage  = (stage + 1) % timeline.length;
     stageT = t;
     setStage(stage);
+    showCaption(timeline[stage].caption);
   }
 
   renderer.render(scene, camera);

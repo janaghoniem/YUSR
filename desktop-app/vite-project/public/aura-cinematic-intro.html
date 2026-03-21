@@ -445,118 +445,167 @@ const mat = new THREE.ShaderMaterial({
 const points = new THREE.Points(geo, mat);
 scene.add(points);
 
-// ─── Timeline — each stage maps to an AURA agent ──────────────────────────────
+// ─── Timeline ─────────────────────────────────────────────────────────────────
+// Each entry describes a morph FROM one shape TO another.
+// `caption` is the name of the DESTINATION — shown only once arrival is complete.
+// `dur`     is morph duration in seconds.
+// `hold`    is how long to linger on the arrived shape before the next morph.
 const timeline = [
-  { from: 'chaos',       to: 'voice',       dur: 4.0, caption: 'Language'    },
-  { from: 'voice',       to: 'neural',      dur: 3.8, caption: 'Reasoning'   },
-  { from: 'neural',      to: 'coordinator', dur: 3.8, caption: 'Coordinator' },
-  { from: 'coordinator', to: 'execution',   dur: 3.8, caption: 'Execution'   },
-  { from: 'execution',   to: 'aura',        dur: 4.2, caption: 'AURA'        },
-  { from: 'aura',        to: 'chaos',       dur: 3.6, caption: ''            },
+  { from: 'chaos',       to: 'voice',       dur: 4.2, hold: 1.6, caption: 'Language'    },
+  { from: 'voice',       to: 'neural',      dur: 4.0, hold: 1.4, caption: 'Reasoning'   },
+  { from: 'neural',      to: 'coordinator', dur: 4.0, hold: 1.4, caption: 'Coordinator' },
+  { from: 'coordinator', to: 'execution',   dur: 4.0, hold: 1.4, caption: 'Execution'   },
+  { from: 'execution',   to: 'aura',        dur: 4.5, hold: 2.2, caption: 'AURA'        },
+  { from: 'aura',        to: 'chaos',       dur: 3.8, hold: 0.8, caption: ''            },
 ];
 
-let stage     = 0;
-let stageT    = 0;
-let running   = false;
+// State machine: 'morph' → 'hold' → advance → 'morph' → ...
+let stage    = 0;
+let phase    = 'warmup'; // 'warmup' | 'morph' | 'hold'
+let phaseT   = 0;        // clock time when current phase started
+let captionShown = false;
 
 const labelEl   = document.getElementById('label');
 const titleEl   = document.getElementById('title');
 const dotEl     = document.getElementById('dot');
 const captionEl = document.getElementById('caption');
 
-// Fade caption in/out on each stage change
 let captionTimer = null;
 function showCaption(text) {
+  clearTimeout(captionTimer);
   if (!text) { captionEl.style.opacity = '0'; return; }
   captionEl.textContent = text;
   captionEl.style.opacity = '1';
+  captionTimer = setTimeout(() => { captionEl.style.opacity = '0'; }, 2400);
+}
+function hideCaption() {
   clearTimeout(captionTimer);
-  captionTimer = setTimeout(() => { captionEl.style.opacity = '0'; }, 2200);
+  captionEl.style.opacity = '0';
 }
 
-// Show UI after a moment
 setTimeout(() => {
   labelEl.classList.add('visible');
   titleEl.classList.add('visible');
   dotEl.classList.add('visible');
-}, 600);
+}, 700);
 
-function setStage(i) {
+// Write GPU attributes for the current stage — called BEFORE progress resets
+function loadStage(i) {
   const s = timeline[i];
-  const A = shapes[s.from];
-  const B = shapes[s.to];
-  geo.attributes.aTargetA.array.set(A);
-  geo.attributes.aTargetB.array.set(B);
+  geo.attributes.aTargetA.array.set(shapes[s.from]);
+  geo.attributes.aTargetB.array.set(shapes[s.to]);
   geo.attributes.aTargetA.needsUpdate = true;
   geo.attributes.aTargetB.needsUpdate = true;
 }
 
-// Apple-style spring ease
+// Quartic ease-in-out — iOS spring feel
 function easeApple(t) {
-  // Smooth quartic ease-in-out, feels like iOS spring
   if (t < 0.5) return 8*t*t*t*t;
   const f = t - 1;
   return 1 - 8*f*f*f*f;
 }
 
-// ─── Clock & animation ────────────────────────────────────────────────────────
+// ─── Clock & render loop ──────────────────────────────────────────────────────
 const clock = new THREE.Clock();
-let   lastT = 0;
-
-function init() {
-  setStage(0);
-  running = true;
-  stageT  = clock.getElapsedTime();
-  showCaption(timeline[0].caption);
-}
 
 function animate() {
   requestAnimationFrame(animate);
-  const t  = clock.getElapsedTime();
-  const dt = t - lastT;
-  lastT = t;
+  const t = clock.getElapsedTime();
 
   mat.uniforms.uTime.value = t;
 
-  // Gentle camera breath
-  camera.position.x = Math.sin(t * 0.07) * 0.12;
-  camera.position.y = Math.cos(t * 0.05) * 0.08;
+  // Subtle camera breath — never distracting
+  camera.position.x = Math.sin(t * 0.07) * 0.10;
+  camera.position.y = Math.cos(t * 0.05) * 0.07;
   camera.lookAt(0, 0, 0);
 
-  if (!running) {
-    // intro warmup chaos
-    mat.uniforms.uProgress.value = 0;
-    mat.uniforms.uChaos.value    = 1.0;
-    mat.uniforms.uBrightness.value = Math.min(1, t * 0.4);
-
-    // Set up initial targets
+  // ── WARMUP: show chaos, fade in, then begin ──────────────────────────────
+  if (phase === 'warmup') {
+    // Both targets = chaos so progress value is irrelevant — render pure chaos
     geo.attributes.aTargetA.array.set(shapes.chaos);
     geo.attributes.aTargetB.array.set(shapes.chaos);
     geo.attributes.aTargetA.needsUpdate = true;
     geo.attributes.aTargetB.needsUpdate = true;
 
-    if (t > 1.2) init();
+    mat.uniforms.uProgress.value   = 0;
+    mat.uniforms.uChaos.value      = 1.0;
+    mat.uniforms.uBrightness.value = Math.min(1, t * 0.5);
+
+    if (t > 1.4) {
+      // Transition: load stage 0, reset progress to exactly 0 first
+      mat.uniforms.uProgress.value = 0;
+      loadStage(0);
+      stage    = 0;
+      phase    = 'morph';
+      phaseT   = t;
+      captionShown = false;
+      hideCaption();
+    }
     renderer.render(scene, camera);
     return;
   }
 
-  const s       = timeline[stage];
-  const elapsed = t - stageT;
-  let   raw     = Math.min(elapsed / s.dur, 1);
-  const progress = easeApple(raw);
+  const s = timeline[stage];
 
-  mat.uniforms.uProgress.value   = progress;
-  mat.uniforms.uChaos.value      = 1.0 - progress * 0.88;
-  mat.uniforms.uBrightness.value = 0.65 + 0.35 * Math.sin(progress * Math.PI);
+  // ── MORPH phase ──────────────────────────────────────────────────────────
+  if (phase === 'morph') {
+    const elapsed  = t - phaseT;
+    const raw      = Math.min(elapsed / s.dur, 1.0);
+    const progress = easeApple(raw);
 
-  if (raw >= 1) {
-    stage  = (stage + 1) % timeline.length;
-    stageT = t;
-    setStage(stage);
-    showCaption(timeline[stage].caption);
+    // Write uniforms every frame — never skip
+    mat.uniforms.uProgress.value   = progress;
+    mat.uniforms.uChaos.value      = 1.0 - progress * 0.88;
+    mat.uniforms.uBrightness.value = 0.55 + 0.45 * Math.sin(progress * Math.PI);
+
+    // At ~85 % through the morph, shape is clearly legible — show caption
+    if (!captionShown && raw > 0.85) {
+      showCaption(s.caption);
+      captionShown = true;
+    }
+
+    if (raw >= 1.0) {
+      // Morph complete — clamp progress firmly to 1 for this frame
+      mat.uniforms.uProgress.value = 1.0;
+      renderer.render(scene, camera);
+
+      // Switch to hold phase
+      phase  = 'hold';
+      phaseT = t;
+      renderer.render(scene, camera);
+      return;
+    }
+
+    renderer.render(scene, camera);
+    return;
   }
 
-  renderer.render(scene, camera);
+  // ── HOLD phase — shape fully arrived, settling ───────────────────────────
+  if (phase === 'hold') {
+    const elapsed = t - phaseT;
+
+    // Keep progress pinned at 1 — display the fully arrived "to" shape
+    mat.uniforms.uProgress.value   = 1.0;
+    mat.uniforms.uChaos.value      = 0.12;
+    mat.uniforms.uBrightness.value = 0.85 + 0.10 * Math.sin(elapsed * 1.2);
+
+    if (elapsed >= s.hold) {
+      // Advance to next stage — reset progress BEFORE loadStage so the
+      // GPU never sees (newTargets, progress=1) in the same frame.
+      mat.uniforms.uProgress.value = 0;
+
+      stage = (stage + 1) % timeline.length;
+      loadStage(stage);
+
+      phase  = 'morph';
+      phaseT = t;
+      captionShown = false;
+      hideCaption();
+    }
+
+    renderer.render(scene, camera);
+    return;
+  }
 }
 
 // ─── Resize ───────────────────────────────────────────────────────────────────

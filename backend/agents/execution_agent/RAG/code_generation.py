@@ -65,7 +65,7 @@ class RAGConfig:
 
     similarity_threshold: float = 0.3  # Minimum similarity score
     similarity_threshold: float = 0.3  # Minimum similarity scor
-    retrieval_mode: str = "local"
+    retrieval_mode: str = "API"
     
     
     
@@ -104,7 +104,7 @@ from  agents.execution_agent.RAG.module_selector import ModuleSelector
 class VectorDBInterface:
     """Interface to interact with the vector database"""
     
-    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.LOCAL):
+    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.API):
         self.config = config
         self.mode = mode  # ← ADD THIS
         self.client = None
@@ -386,23 +386,41 @@ class LLMInterface:
 
 class RAGSystem:
     """Complete RAG system for code generation"""
-    
-    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.LOCAL):
+
+    def __init__(self, config: RAGConfig, mode: RetrievalMode = None):
         self.config = config
         self.vectordb = None
-        self.mode = mode  # ← ADD THIS LINE
+
+        # Read mode from config if not explicitly provided
+        if mode is None:
+            # Convert config string to enum
+            if config.retrieval_mode == "local":
+                self.mode = RetrievalMode.LOCAL
+            elif config.retrieval_mode == "api":
+                self.mode = RetrievalMode.API
+            else:
+                # Default to API for team compatibility
+                self.mode = RetrievalMode.API
+        else:
+            self.mode = mode
+
         self.llm = LLMInterface(config)
         self.module_selector = ModuleSelector()  # ← ADD THIS LINE
         self.conversation_history = []
-        
+
     def initialize(self):
         """Initialize RAG system"""
+        # Skip initialization if RAG is disabled
+        if not self.config.use_rag:
+            print("RAG disabled - skipping vector database initialization")
+            print("RAG System ready! (API mode)")
+            return
+
         print("Initializing RAG System...")
-                # ✅ Step 2: Initialize Vector Database Interface
+        # ✅ Step 2: Initialize Vector Database Interface
         # YOU ALREADY HAVE VectorDBInterface - just use it!
-        self.vectordb = VectorDBInterface(self.config,mode=self.mode)
-        if self.mode == RetrievalMode.LOCAL:  # ← ADD THIS CHECK
-            self.vectordb._initialize_local()
+        self.vectordb = VectorDBInterface(self.config, mode=self.mode)
+        # Remove duplicate initialization - VectorDBInterface already handles this in __init__
         print("RAG System ready!")
 
     def generate_code(self, user_query: str, cache_key: str = None,
@@ -512,7 +530,13 @@ class RAGSystem:
         # STEP 2.5: ENRICH PROMPT WITH MODULE SELECTOR
         # ============================================================================
         print(f"\n[ENRICH] 🎯 Applying module selector guidance...")
-        enriched_prompt = self.module_selector.enrich_prompt(prompt)
+        # FIXED: Use user_query for module selection, not the full prompt
+        module_guidance = self.module_selector.select_module(user_query)
+
+        if module_guidance:
+            enriched_prompt = self.module_selector.inject_override(prompt, module_guidance)
+        else:
+            enriched_prompt = prompt
 
         if enriched_prompt != prompt:
             print(f"       ✅ Module override injected")

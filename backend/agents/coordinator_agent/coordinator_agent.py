@@ -533,8 +533,8 @@ b) ALWAYS generate a reasoning task FIRST that produces the email content fields
    The reasoning task ai_prompt must say:
    "Compose a complete email for this request: <user intent>.
     Return a JSON object with keys SUBJECT and BODY."
-   The reasoning task output will be a JSON object injected as input_content, e.g.:
-   {"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}
+    The reasoning task output will be a JSON object injected as input_content, e.g.:
+    {{"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}}
 
 c) The action tasks that fill Subject and Body MUST depend on the reasoning task and
    will receive the generated JSON in extra_params["input_content"].

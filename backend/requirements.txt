@@ -83,3 +83,7 @@ gtts
 pyautogui
 docker
 playwright
+# Anthropic
+anthropic
+
+# devDependencies

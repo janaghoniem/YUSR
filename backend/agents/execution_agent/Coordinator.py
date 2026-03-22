@@ -80,15 +80,26 @@ def execute_workflow(agent, workflow_file: str, **kwargs):
         # Check dependencies
         depends_on = task_dict.get("depends_on")
         if depends_on:
-            # Find the result of the dependency
-            dep_result = next((r for r in results if r.get("task_id") == depends_on), None)
-            if not dep_result or dep_result.get("status") != "success":
-                print(f"Skipping task {i} ({task_id}): Dependency '{depends_on}' failed or not found")
-                results.append({
-                    "task_id": task_id,
-                    "status": "skipped",
-                    "reason": f"Dependency '{depends_on}' not met"
-                })
+            # depends_on could be a list or a string
+            if isinstance(depends_on, str):
+                depends_list = [depends_on]
+            else:
+                depends_list = depends_on
+                
+            dependencies_met = True
+            for dep_id in depends_list:
+                dep_result = next((r for r in results if r.get("task_id") == dep_id), None)
+                if not dep_result or dep_result.get("status") != "success":
+                    print(f"Skipping task {i} ({task_id}): Dependency '{dep_id}' failed or not found")
+                    results.append({
+                        "task_id": task_id,
+                        "status": "skipped",
+                        "reason": f"Dependency '{dep_id}' not met"
+                    })
+                    dependencies_met = False
+                    break
+                    
+            if not dependencies_met:
                 continue
         
         print(f"{'='*70}")

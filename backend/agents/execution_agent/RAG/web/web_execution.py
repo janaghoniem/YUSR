@@ -1426,7 +1426,7 @@ class ActionTask:
         target_agent: str,
         web_params: Optional[Dict[str, Any]] = None,
         extra_params: Optional[Dict[str, Any]] = None,
-        depends_on: Optional[str] = None
+        depends_on: Optional[List[str]] = None
     ):
         self.task_id = task_id
         self.ai_prompt = ai_prompt

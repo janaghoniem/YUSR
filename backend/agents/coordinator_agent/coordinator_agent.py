@@ -31,7 +31,7 @@ llm = ChatGroq(
     temperature=0.1,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
-)
+) 
 
 # Initialize MongoDB checkpointer
 try:
@@ -201,6 +201,7 @@ def extract_credentials_from_request(user_request: Dict) -> Dict[str, Optional[s
 class ActionTask(BaseModel):
     """Task format for RAG-based action layer - URLs resolved by execution layer"""
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    goal: str  # Shared high-level objective for the whole task plan
     ai_prompt: str  # Natural language prompt for RAG LLM - this drives URL resolution
     device: Literal["desktop", "mobile"]
     context: Literal["local", "web"]
@@ -214,7 +215,7 @@ class ActionTask(BaseModel):
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
     target_agent: Literal["action", "reasoning"] = "action"
-    depends_on: Optional[str] = None
+    depends_on: Optional[List[str]] = None
     
     class Config:
         use_enum_values = True
@@ -517,6 +518,27 @@ CORE BEHAVIOR RULES
 
 1. NEVER generate conversational, acknowledgment, confirmation, planning, preparation, or meta tasks.
 
+# EMAIL TASK RULES (CRITICAL)
+When the user asks to compose, send, or draft an email:
+a) ALWAYS use the USER PREFERENCES section above to pick the concrete email app.
+   - If preferences mention Gmail → use Gmail.
+   - If preferences mention Outlook → use Outlook.
+   - If preferences mention any mail app → use that app.
+   - Only if preferences are completely silent about email → use "open default email app" (local).
+   NEVER output a vague "open email client" task when memory has a preference.
+
+b) ALWAYS generate a reasoning task FIRST that produces the email content fields IF user doesnt give email subject and content, only a description.
+    e.g. user request: "Reschedule tomorrow's meeting with Sara" -- this implies an email but doesn't give subject or body. role of reasoning task: "Compose a complete email for this request: 'Reschedule tomorrow's meeting with Sara'. Return a JSON object with keys SUBJECT and BODY.",
+    user request: "Send an email to Sara about rescheduling tomorrow's meeting. Subject should be 'Meeting Rescheduled' and body should say 'Hi Sara, ...'" -- reasoning task is NOT needed here because subject and body are explicitly provided by user.
+   The reasoning task ai_prompt must say:
+   "Compose a complete email for this request: <user intent>.
+    Return a JSON object with keys SUBJECT and BODY."
+    The reasoning task output will be a JSON object injected as input_content, e.g.:
+    {{"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}}
+
+c) The action tasks that fill Subject and Body MUST depend on the reasoning task, if present, and
+   will receive the generated JSON in extra_params["input_content"].
+
 ❌ INVALID tasks include:
 - "Confirm receipt of the request"
 - "Prepare to execute the task"
@@ -546,7 +568,7 @@ A COMPOSITE request:
 # DEVICE & CONTEXT
 
 - **device**: "desktop" or "mobile"
-- **context**: "local" (desktop apps) or "web" (browser automation)
+- **context**: "local" (native OS/apps) or "web" (browser automation)
 
 # TARGET AGENTS
 
@@ -557,6 +579,7 @@ A COMPOSITE request:
 
 Each task must have:
 - **ai_prompt**: Natural language instruction (CRITICAL: this is used by RAG to determine URLs and selectors)
+- **goal**: The SAME high-level goal string for the entire task plan (must be identical in all tasks)
 - **device**: "desktop" or "mobile"
 - **context**: "local" or "web"
 - **target_agent**: "action" or "reasoning"
@@ -594,6 +617,7 @@ EXAMPLES (YAML format for brevity, output must be JSON)
 User: "Open Notepad"
 
 - task_id: task_1
+  goal: Open Notepad
   ai_prompt: Open Notepad application
   device: desktop
   context: local
@@ -608,6 +632,7 @@ User: "Open Notepad"
 User: "Login to Gmail with user@example.com and password mypass123"
 
 - task_id: task_1
+  goal: Log in to Gmail with the provided credentials
   ai_prompt: Navigate to Gmail login page
   device: desktop
   context: web
@@ -617,41 +642,114 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: null
 
 - task_id: task_2
-  ai_prompt: Fill email field with user@example.com
+  goal: Log in to Gmail with the provided credentials
+  ai_prompt: Fill the email or username field with user@example.com
   device: desktop
   context: web
   target_agent: action
   web_params:
     action: fill
     text: user@example.com
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
-  ai_prompt: Fill password field with mypass123
+  goal: Log in to Gmail with the provided credentials
+  ai_prompt: Fill the password field with mypass123
   device: desktop
   context: web
   target_agent: action
   web_params:
     action: fill
     text: mypass123
-  depends_on: task_2
+  depends_on: ["task_2"]
 
 - task_id: task_4
-  ai_prompt: Click login button
+  goal: Log in to Gmail with the provided credentials
+  ai_prompt: Click the Sign In or Login submit button
   device: desktop
   context: web
   target_agent: action
   web_params:
     action: click
-  depends_on: task_3
+  depends_on: ["task_3"]
 
-EXPLANATION: ai_prompt drives RAG to resolve URLs and selectors automatically.
+## Example 3: Email Composition Task
 
-## Example 3: Mobile Configuration Task
+User: "Compose an email to rescheduling tomorrow's meeting with Sara"
+(Note: user does NOT provide subject or body, so reasoning task is needed to generate them. Assume user preferences indicate Gmail as email app.)
+
+- task_id: task_1
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: 
+    Compose a complete email for this request:
+    "Reschedule tomorrow's meeting with Sara".
+    Return a JSON object with keys SUBJECT and BODY.
+  device: mobile
+  context: local
+  target_agent: reasoning
+  extra_params: {{}}
+  web_params: {{}}
+  depends_on: null
+
+- task_id: task_2
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Navigate to Gmail 
+  device: mobile
+  context: local
+  target_agent: action
+  extra_params:
+    app_name: gmail
+  depends_on: null
+
+- task_id: task_3
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Fill the To field with Sara's email address
+  device: mobile
+  context: local
+  target_agent: action
+  extra_params:
+    text: sara@example.com
+  depends_on: ["task_2"]
+
+- task_id: task_4
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
+  device: mobile
+  context: local
+  target_agent: action
+  extra_params: {{}}
+  depends_on: ["task_1", "task_3"]
+
+- task_id: task_5
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Fill the email body with the BODY value from the composed email
+  device: mobile
+  context: local
+  target_agent: action
+  extra_params: {{}}
+  depends_on: ["task_4"]
+
+- task_id: task_6
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Click the Send button to send the email
+  device: mobile
+  context: local
+  target_agent: action
+  extra_params: {{}}
+  depends_on: ["task_5"]
+
+EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
+task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
+the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
+so the action layer can parse SUBJECT and BODY individually.
+The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
+
+## Example 4: Mobile Configuration Task
 
 User: "Set the alarm for 7 am"
 
 - task_id: task_1
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Open the Clock app on mobile device
   device: mobile
   context: local
@@ -661,26 +759,29 @@ User: "Set the alarm for 7 am"
   depends_on: null
 
 - task_id: task_2
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Set the alarm time to 7:00 AM
   device: mobile
   context: local
   target_agent: action
   extra_params:
     time: "7:00"
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Press OK or Save to confirm the alarm setting
   device: mobile
   context: local
   target_agent: action
-  depends_on: task_2
+  depends_on: ["task_2"]
 
-## Example 4: Mixed Action + Reasoning (Content Generation)
+## Example 5: Mixed Action + Reasoning (Content Generation)
 
 User: "Open Notepad and write me a scary story"
 
 - task_id: task_1
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Open Notepad application
   device: desktop
   context: local
@@ -691,22 +792,24 @@ User: "Open Notepad and write me a scary story"
   depends_on: null
 
 - task_id: task_2
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Write a very scary story
   device: desktop
   context: local
   target_agent: reasoning
   extra_params: {{}}
   web_params: {{}}
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Type the generated story text into the active Notepad window
   device: desktop
   context: local
   target_agent: action
   extra_params: {{}}
   web_params: {{}}
-  depends_on: task_2
+  depends_on: ["task_2"]
 
 EXPLANATION: Task 2 uses "reasoning" because writing a story is content generation. Task 3 uses "action" to type the result into Notepad.
 
@@ -719,9 +822,14 @@ Examples of REASONING tasks:
 - "Write a scary story" → reasoning
 - "Summarize this article" → reasoning
 - "Translate this to Arabic" → reasoning
-- "Draft an email to my boss" → reasoning
+- "Draft an email to my boss" → reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
 - "Explain quantum computing" → reasoning
 - "Generate a Python script" → reasoning
+
+EMAIL COMPOSITION RULE: When needed (i.e., ai_prompt requests SUBJECT and BODY), a single reasoning task must always generate ALL email
+fields together (Subject, Body) in one structured output. Never split these
+into separate reasoning tasks. The action layer will parse the output and fill
+each field individually.
 
 Examples of ACTION tasks:
 - "Open Notepad" → action
@@ -735,12 +843,13 @@ Examples of ACTION tasks:
 2. **Explicit dependencies** - if task B needs task A's output, set "depends_on"
 3. **Descriptive prompts** - ai_prompt should be detailed enough for RAG to understand
 4. **Correct context** - web tasks get context: "web", desktop tasks get "local"
-5. **Minimal web_params** - ONLY include action type and text (for fill), nothing else
+5. **Minimal extra_params** - ONLY include action type and text (for fill), nothing else
 6. **NO URLs** - NEVER hardcode URLs, let RAG resolve them from ai_prompt
 7. **NO selectors** - NEVER hardcode selectors, let RAG find them from ai_prompt
 8. **Empty web_params** - For local tasks, set web_params: {{}}
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
+11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
 
 ============================
 OUTPUT RULES
@@ -750,13 +859,14 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
 [
   {{
     "task_id": <string>,
+    "goal": <string, identical across all tasks>,
     "ai_prompt": <string>,
     "device": <"desktop" | "mobile">,
     "context": <"local" | "web">,
     "target_agent": <"action" | "reasoning">,
     "extra_params": <object>,
     "web_params": <object>,
-    "depends_on": <string | null>
+    "depends_on": <array of strings | null>
   }},
   ...
 ]
@@ -851,6 +961,22 @@ Generate the task decomposition now:"""
         task_dicts = [t for t in parsed if isinstance(t, dict)]
         if not task_dicts:
             raise ValueError("JSON array contained no task objects")
+
+        # Step F: normalize/validate shared goal across all tasks.
+        # If missing, derive from first prompt to keep downstream execution safe.
+        shared_goal = next(
+            (
+                str(t.get("goal", "")).strip()
+                for t in task_dicts
+                if isinstance(t.get("goal"), str) and str(t.get("goal", "")).strip()
+            ),
+            ""
+        )
+        if not shared_goal:
+            shared_goal = str(user_request.get("original_input") or user_request.get("confirmation") or user_request.get("action") or "Complete the requested task").strip()
+
+        for t in task_dicts:
+            t["goal"] = shared_goal
 
         action_tasks = [ActionTask(**task) for task in task_dicts]
 
@@ -995,7 +1121,7 @@ def create_coordinator_graph():
             
             # Check dependencies
             if current_task.depends_on:
-                dep_ids = current_task.depends_on.split(",")
+                dep_ids = current_task.depends_on
                 dependencies_met = all(
                    results.get(dep_id.strip()) 
                    and results.get(dep_id.strip()).status == "success"
@@ -1023,7 +1149,7 @@ def create_coordinator_graph():
             # a "charmap codec can't encode" error on Windows when the subprocess writes
             # the .py file, because the system codepage (cp1252) can't handle Arabic/Unicode.
             if current_task.depends_on:
-                dep_id = current_task.depends_on.strip().split(",")[0].strip()
+                dep_id = current_task.depends_on[0].strip()
                 if dep_id in task_outputs and "input_content" not in current_task.extra_params:
                     raw_dep_output = task_outputs[dep_id]
                     # Strip any remaining markdown fences (defensive — reasoning agent
@@ -1048,6 +1174,24 @@ def create_coordinator_graph():
                     current_task.extra_params["input_content"] = raw_dep_output
                     logger.info(f"📎 Auto-injected output from {dep_id} into {current_task.task_id}")
             
+            # ── Per-task debug block — shows full task before execution ──────
+            # This makes it easy to verify: routing, injected content, params.
+            _task_dump = current_task.model_dump()
+            _ic = _task_dump.get("extra_params", {}).get("input_content", "")
+            logger.info(
+                f"\n{'='*70}\n"
+                f"▶ TASK DISPATCHING: {current_task.task_id}\n"
+                f"   ai_prompt    : {current_task.ai_prompt}\n"
+                f"   device       : {current_task.device}\n"
+                f"   context      : {current_task.context}\n"
+                f"   target_agent : {current_task.target_agent}\n"
+                f"   depends_on   : {current_task.depends_on}\n"
+                f"   extra_params : {json.dumps({k: v for k, v in _task_dump.get('extra_params', {}).items() if k != 'input_content'}, ensure_ascii=False)}\n"
+                f"   web_params   : {json.dumps(_task_dump.get('web_params', {}), ensure_ascii=False)}\n"
+                f"   input_content: {'('+str(len(_ic))+' chars) ' + _ic[:120] + ('...' if len(_ic) > 120 else '') if _ic else '(none)'}\n"
+                f"{'='*70}"
+            )
+
             # Execute task
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
             result = await execute_single_task(
@@ -1084,13 +1228,14 @@ def create_coordinator_graph():
                     if action_prompt:
                         resolve_task = ActionTask(
                             task_id=f"{current_task.task_id}_resolve",
+                            goal=current_task.goal,
                             ai_prompt=action_prompt,
                             device=current_task.device,
                             context=current_task.context,
                             extra_params=current_task.extra_params or {},
                             web_params=current_task.web_params or {},
                             target_agent="action",
-                            depends_on=current_task.task_id,
+                            depends_on=[current_task.task_id],
                         )
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
                         resolve_result = await execute_single_task(

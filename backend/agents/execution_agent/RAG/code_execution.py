@@ -21,7 +21,7 @@ OMNIPARSER_TEST_KEYWORDS = []  # Only force on these tasks
 class ActionTask:
     def __init__(self, task_id: str, ai_prompt: str, device: str, context: str, 
                  target_agent: str, extra_params: Optional[Dict[str, Any]] = None,
-                 web_params: Optional[Dict[str, Any]] = None, depends_on: Optional[str] = None):
+                 web_params: Optional[Dict[str, Any]] = None, depends_on: Optional[List[str]] = None):
         self.task_id = task_id
         self.ai_prompt = ai_prompt
         self.device = device

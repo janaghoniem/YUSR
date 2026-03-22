@@ -31,7 +31,7 @@ llm = ChatGroq(
     temperature=0.1,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
-)
+) 
 
 # Initialize MongoDB checkpointer
 try:
@@ -215,7 +215,7 @@ class ActionTask(BaseModel):
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
     target_agent: Literal["action", "reasoning"] = "action"
-    depends_on: Optional[str] = None
+    depends_on: Optional[List[str]] = None
     
     class Config:
         use_enum_values = True
@@ -527,16 +527,16 @@ a) ALWAYS use the USER PREFERENCES section above to pick the concrete email app.
    - Only if preferences are completely silent about email → use "open default email app" (local).
    NEVER output a vague "open email client" task when memory has a preference.
 
-b) ALWAYS generate a reasoning task FIRST that produces the email content fields.
-   The TO and FROM fields are filled by separate action tasks — do NOT ask the
-   reasoning agent to generate them.
+b) ALWAYS generate a reasoning task FIRST that produces the email content fields IF user doesnt give email subject and content, only a description.
+    e.g. user request: "Reschedule tomorrow's meeting with Sara" -- this implies an email but doesn't give subject or body. role of reasoning task: "Compose a complete email for this request: 'Reschedule tomorrow's meeting with Sara'. Return a JSON object with keys SUBJECT and BODY.",
+    user request: "Send an email to Sara about rescheduling tomorrow's meeting. Subject should be 'Meeting Rescheduled' and body should say 'Hi Sara, ...'" -- reasoning task is NOT needed here because subject and body are explicitly provided by user.
    The reasoning task ai_prompt must say:
    "Compose a complete email for this request: <user intent>.
     Return a JSON object with keys SUBJECT and BODY."
     The reasoning task output will be a JSON object injected as input_content, e.g.:
     {{"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}}
 
-c) The action tasks that fill Subject and Body MUST depend on the reasoning task and
+c) The action tasks that fill Subject and Body MUST depend on the reasoning task, if present, and
    will receive the generated JSON in extra_params["input_content"].
 
 ❌ INVALID tasks include:
@@ -568,7 +568,7 @@ A COMPOSITE request:
 # DEVICE & CONTEXT
 
 - **device**: "desktop" or "mobile"
-- **context**: "local" (desktop apps) or "web" (browser automation)
+- **context**: "local" (native OS/apps) or "web" (browser automation)
 
 # TARGET AGENTS
 
@@ -650,7 +650,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   web_params:
     action: fill
     text: user@example.com
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
   goal: Log in to Gmail with the provided credentials
@@ -661,7 +661,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   web_params:
     action: fill
     text: mypass123
-  depends_on: task_2
+  depends_on: ["task_2"]
 
 - task_id: task_4
   goal: Log in to Gmail with the provided credentials
@@ -671,12 +671,12 @@ User: "Login to Gmail with user@example.com and password mypass123"
   target_agent: action
   web_params:
     action: click
-  depends_on: task_3
+  depends_on: ["task_3"]
 
-## Example 5: Email Composition Task
+## Example 3: Email Composition Task
 
 User: "Compose an email to rescheduling tomorrow's meeting with Sara"
-(Assume USER PREFERENCES mention Gmail)
+(Note: user does NOT provide subject or body, so reasoning task is needed to generate them. Assume user preferences indicate Gmail as email app.)
 
 - task_id: task_1
   goal: Compose and send a meeting reschedule email to Sara
@@ -684,8 +684,8 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
     Compose a complete email for this request:
     "Reschedule tomorrow's meeting with Sara".
     Return a JSON object with keys SUBJECT and BODY.
-  device: desktop
-  context: web
+  device: mobile
+  context: local
   target_agent: reasoning
   extra_params: {{}}
   web_params: {{}}
@@ -693,54 +693,50 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
 
 - task_id: task_2
   goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Navigate to Gmail compose window
-  device: desktop
-  context: web
+  ai_prompt: Navigate to Gmail 
+  device: mobile
+  context: local
   target_agent: action
-  web_params:
-    action: navigate
+  extra_params:
+    app_name: gmail
   depends_on: null
 
 - task_id: task_3
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the To field with Sara's email address
-  device: desktop
-  context: web
+  device: mobile
+  context: local
   target_agent: action
-  web_params:
-    action: fill
+  extra_params:
     text: sara@example.com
-  depends_on: task_2
+  depends_on: ["task_2"]
 
 - task_id: task_4
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
-  device: desktop
-  context: web
+  device: mobile
+  context: local
   target_agent: action
-  web_params:
-    action: fill
-  depends_on: task_1,task_3
+  extra_params: {{}}
+  depends_on: ["task_1", "task_3"]
 
 - task_id: task_5
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the email body with the BODY value from the composed email
-  device: desktop
-  context: web
+  device: mobile
+  context: local
   target_agent: action
-  web_params:
-    action: fill
-  depends_on: task_4
+  extra_params: {{}}
+  depends_on: ["task_4"]
 
 - task_id: task_6
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Click the Send button to send the email
-  device: desktop
-  context: web
+  device: mobile
+  context: local
   target_agent: action
-  web_params:
-    action: click
-  depends_on: task_5
+  extra_params: {{}}
+  depends_on: ["task_5"]
 
 EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
 task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
@@ -748,7 +744,7 @@ the user request). tasks 4-5 depend on task_1 and receive the JSON as input_cont
 so the action layer can parse SUBJECT and BODY individually.
 The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
 
-## Example 3: Mobile Configuration Task
+## Example 4: Mobile Configuration Task
 
 User: "Set the alarm for 7 am"
 
@@ -770,7 +766,7 @@ User: "Set the alarm for 7 am"
   target_agent: action
   extra_params:
     time: "7:00"
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
   goal: Set an alarm for 7:00 AM
@@ -778,9 +774,9 @@ User: "Set the alarm for 7 am"
   device: mobile
   context: local
   target_agent: action
-  depends_on: task_2
+  depends_on: ["task_2"]
 
-## Example 4: Mixed Action + Reasoning (Content Generation)
+## Example 5: Mixed Action + Reasoning (Content Generation)
 
 User: "Open Notepad and write me a scary story"
 
@@ -803,7 +799,7 @@ User: "Open Notepad and write me a scary story"
   target_agent: reasoning
   extra_params: {{}}
   web_params: {{}}
-  depends_on: task_1
+  depends_on: ["task_1"]
 
 - task_id: task_3
   goal: Open Notepad and produce a scary story in it
@@ -813,7 +809,7 @@ User: "Open Notepad and write me a scary story"
   target_agent: action
   extra_params: {{}}
   web_params: {{}}
-  depends_on: task_2
+  depends_on: ["task_2"]
 
 EXPLANATION: Task 2 uses "reasoning" because writing a story is content generation. Task 3 uses "action" to type the result into Notepad.
 
@@ -830,7 +826,7 @@ Examples of REASONING tasks:
 - "Explain quantum computing" → reasoning
 - "Generate a Python script" → reasoning
 
-EMAIL COMPOSITION RULE: A single reasoning task must always generate ALL email
+EMAIL COMPOSITION RULE: When needed (i.e., ai_prompt requests SUBJECT and BODY), a single reasoning task must always generate ALL email
 fields together (Subject, Body) in one structured output. Never split these
 into separate reasoning tasks. The action layer will parse the output and fill
 each field individually.
@@ -847,7 +843,7 @@ Examples of ACTION tasks:
 2. **Explicit dependencies** - if task B needs task A's output, set "depends_on"
 3. **Descriptive prompts** - ai_prompt should be detailed enough for RAG to understand
 4. **Correct context** - web tasks get context: "web", desktop tasks get "local"
-5. **Minimal web_params** - ONLY include action type and text (for fill), nothing else
+5. **Minimal extra_params** - ONLY include action type and text (for fill), nothing else
 6. **NO URLs** - NEVER hardcode URLs, let RAG resolve them from ai_prompt
 7. **NO selectors** - NEVER hardcode selectors, let RAG find them from ai_prompt
 8. **Empty web_params** - For local tasks, set web_params: {{}}
@@ -870,7 +866,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
     "target_agent": <"action" | "reasoning">,
     "extra_params": <object>,
     "web_params": <object>,
-    "depends_on": <string | null>
+    "depends_on": <array of strings | null>
   }},
   ...
 ]
@@ -1125,7 +1121,7 @@ def create_coordinator_graph():
             
             # Check dependencies
             if current_task.depends_on:
-                dep_ids = current_task.depends_on.split(",")
+                dep_ids = current_task.depends_on
                 dependencies_met = all(
                    results.get(dep_id.strip()) 
                    and results.get(dep_id.strip()).status == "success"
@@ -1153,7 +1149,7 @@ def create_coordinator_graph():
             # a "charmap codec can't encode" error on Windows when the subprocess writes
             # the .py file, because the system codepage (cp1252) can't handle Arabic/Unicode.
             if current_task.depends_on:
-                dep_id = current_task.depends_on.strip().split(",")[0].strip()
+                dep_id = current_task.depends_on[0].strip()
                 if dep_id in task_outputs and "input_content" not in current_task.extra_params:
                     raw_dep_output = task_outputs[dep_id]
                     # Strip any remaining markdown fences (defensive — reasoning agent

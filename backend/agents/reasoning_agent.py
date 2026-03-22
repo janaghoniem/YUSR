@@ -109,10 +109,10 @@ CORE RESPONSIBILITIES:
     inside the "result" field containing ONLY the fields the system will type into the UI.
     The TO and FROM fields are handled separately by the action layer — do NOT include them.
     Required format:
-    {
+    {{
       "SUBJECT": "<subject line>",
       "BODY": "<full email body>",
-    }
+    }} 
     Rules:
     - SUBJECT must be concise and specific to the request.
     - BODY must be a complete, professionally written email body (greeting + content + sign-off).

@@ -4,7 +4,7 @@ import asyncio
 import os
 import sys
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 

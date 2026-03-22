@@ -38,11 +38,14 @@ dependencies:
   video_player: ^2.8.6
   
   
-  google_fonts: ^6.1.0
+  google_fonts: ^8.0.2
+  webview_flutter: ^4.4.2
   
   # For system actions (removed move_to_background due to Android namespace issue)
   android_intent_plus: ^6.0.0
 
+  audioplayers: any
+  flutter_tts: ^4.2.5
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -74,6 +77,7 @@ flutter:
     - assets/Background3.mp4
     - assets/Background2.mp4
     - assets/Background.mp4
+    - assets/web/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

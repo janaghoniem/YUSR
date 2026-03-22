@@ -1235,7 +1235,7 @@ def create_coordinator_graph():
                             extra_params=current_task.extra_params or {},
                             web_params=current_task.web_params or {},
                             target_agent="action",
-                            depends_on=current_task.task_id,
+                            depends_on=[current_task.task_id],
                         )
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
                         resolve_result = await execute_single_task(

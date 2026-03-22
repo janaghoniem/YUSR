@@ -1161,6 +1161,9 @@ function App() {
       }
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
 
+      // Enter transparent execution mode during processing — but keep widget mode if already in it
+      setExecutionMode(prev => prev === "widget" ? "widget" : "transparent");
+
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         const msgType = clarificationResponseToId ? "clarification_response" : "user_input";

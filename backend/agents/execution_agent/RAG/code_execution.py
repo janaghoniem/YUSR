@@ -5,6 +5,7 @@ import os
 import sys
 import re
 from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -439,10 +440,12 @@ class CoordinatorRAGBridge:
         # Build enhanced query for RAG
         rag_query = self.adapter.build_rag_query(task)
 
-        # Inject active file context so consecutive tasks work on the same file
-        if self.last_file_path:
+        # Inject active file context ONLY for dependent tasks (not new independent tasks)
+        if self.last_file_path and task.depends_on:
             rag_query = f"[ACTIVE FILE: {self.last_file_path}]\n\n{rag_query}"
             logger.info(f"[FILE CONTEXT] Injecting active file: {self.last_file_path}")
+        elif self.last_file_path and not task.depends_on:
+            logger.info(f"[FILE CONTEXT] Skipping file injection - independent new task")
         
         # ========================================================================
         # STEP 0: CHECK CACHE FIRST (if enabled and available)
@@ -886,7 +889,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             from agents.execution_agent.RAG.code_generation import RAGSystem, RAGConfig
 
             logger.info("🔧 Initializing RAG system...")
-            desktop_rag_config = RAGConfig(library_name="pyautogui",retrieval_mode="local",use_rag=False)
+            desktop_rag_config = RAGConfig(library_name="pyautogui",retrieval_mode="API",use_rag=False)
             desktop_rag = RAGSystem(desktop_rag_config)
             desktop_rag.initialize()
             logger.info("✅ RAG system ready")

@@ -208,9 +208,8 @@ def get_agent_folder(subfolder: str) -> str:
     """
     import os
 
-    # Try multiple common desktop locations - user's preference first
+    # Try multiple common desktop locations - fully dynamic for team compatibility
     possible_paths = [
-        "D:/OneDrive/Desktop/agent",  # User's preferred path - FIRST PRIORITY
         os.path.expanduser("~/OneDrive/Desktop/agent"),
         os.path.expanduser("~/Desktop/agent"),
         os.path.expanduser("~/Documents/agent"),
@@ -268,9 +267,8 @@ import os, glob
 from docx import Document
 from datetime import datetime
 
-# Dynamic folder detection - user's preferred path first
+# Dynamic folder detection - fully dynamic for team compatibility
 possible_paths = [
-    "D:/OneDrive/Desktop/agent/docs",  # User's preferred path - FIRST PRIORITY
     os.path.expanduser("~/OneDrive/Desktop/agent/docs"),
     os.path.expanduser("~/Desktop/agent/docs"),
     os.path.expanduser("~/Documents/agent/docs"),
@@ -311,7 +309,6 @@ TASK TYPE — match ONE, execute ONLY that branch:
             os.path.expanduser('~\\OneDrive\\Desktop'),
             os.path.expanduser('~\\Documents'),
             os.path.expanduser('~\\Downloads'),
-            'D:\\OneDrive\\Desktop',
             folder,
         ]
         found_path = None
@@ -384,9 +381,8 @@ import os, glob
 from openpyxl import Workbook, load_workbook
 from datetime import datetime
 
-# Dynamic folder detection - user's preferred path first
+# Dynamic folder detection - fully dynamic for team compatibility
 possible_paths = [
-    "D:/OneDrive/Desktop/agent/excel",  # User's preferred path - FIRST PRIORITY
     os.path.expanduser("~/OneDrive/Desktop/agent/excel"),
     os.path.expanduser("~/Desktop/agent/excel"),
     os.path.expanduser("~/Documents/agent/excel"),
@@ -427,7 +423,6 @@ TASK TYPE — match ONE, execute ONLY that branch:
             os.path.expanduser('~\\OneDrive\\Desktop'),
             os.path.expanduser('~\\Documents'),
             os.path.expanduser('~\\Downloads'),
-            'D:\\OneDrive\\Desktop',
             folder,
         ]
         found_path = None
@@ -545,7 +540,6 @@ TASK TYPE — match ONE, execute ONLY that branch:
             os.path.expanduser('~\\OneDrive\\Desktop'),
             os.path.expanduser('~\\Documents'),
             os.path.expanduser('~\\Downloads'),
-            'D:\\OneDrive\\Desktop',
             folder,
         ]
         found_path = None

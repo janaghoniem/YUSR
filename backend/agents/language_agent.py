@@ -887,6 +887,39 @@ async def start_language_agent(broker):
         input_text = payload_data.get("input", "")
         device_type = payload_data.get("device_type", "desktop")
 
+
+#       ── Feedback detection ────────────────────────────────────────────────
+        # Check if this message is a reaction to a previous pattern suggestion.
+        # We detect this before any other processing so the signal is captured
+        # before the new task overwrites the agent state.
+        try:
+            from agents.coordinator_agent.memory.feedback_store import (
+                detect_signal, record_feedback
+            )
+            # Agent may not exist yet for first message — safe to skip
+            _existing_agent_key = f"{payload_data.get('user_id', 'test_user')}_{message.session_id if hasattr(message, 'session_id') else 'default'}"
+            _existing_agent = active_agents.get(_existing_agent_key)
+
+            if _existing_agent and hasattr(_existing_agent, '_pending_suggestion'):
+                pending = _existing_agent._pending_suggestion
+                if pending:
+                    signal = detect_signal(input_text)
+                    record_feedback(
+                        user_id=pending["user_id"],
+                        pattern_text=pending["pattern_text"],
+                        pattern_category=pending["category"],
+                        outcome=signal,
+                        session_id=pending["session_id"]
+                    )
+                    logger.info(
+                        f"📊 Feedback captured for pattern "
+                        f"'{pending['pattern_text'][:40]}': {signal}"
+                    )
+                    # Clear so we don't double-record
+                    _existing_agent._pending_suggestion = None
+        except Exception as _fb_err:
+            logger.debug(f"Feedback detection skipped: {_fb_err}")
+
         print(f"📝 User said: {input_text}")
         print(f"📱 Device type: {device_type}")
 
@@ -954,7 +987,8 @@ async def start_language_agent(broker):
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
             pref_mgr = get_preference_manager(user_id)
 
-            all_memories = pref_mgr.get_relevant_preferences(input_text, limit=5)
+            #all_memories = pref_mgr.get_relevant_preferences(input_text, limit=5)
+            all_memories = pref_mgr.get_relevant_preferences(input_text, limit=8, min_score=0.50)
 
             if not all_memories or not isinstance(all_memories, list):
                 all_memories = []
@@ -988,7 +1022,12 @@ async def start_language_agent(broker):
                 else:
                     preferences.append(memory_text)
 
+            #edit done hena
             context_parts = []
+            if profile_snippets:
+                context_parts.append("# USER PROFILE")
+                for snippet in profile_snippets[:2]:
+                    context_parts.append(f"- {snippet}")
             if preferences:
                 context_parts.append("# USER PREFERENCES")
                 for i, pref in enumerate(preferences[:3], 1):
@@ -1000,6 +1039,51 @@ async def start_language_agent(broker):
 
             memory_context = "\n".join(context_parts) if context_parts else "No previous context."
             print(f"🧠 Retrieved Memory Context:\n{memory_context}\n")
+
+
+            # ── Pattern-based suggestion logic ───────────────────────────────
+            # If a high-confidence learned_pattern is relevant to this input,
+            # surface it as a suggestion the user can confirm or reject.
+            # We do this by checking learned_pattern memories retrieved and
+            # attaching a suggestion note to the agent's awaiting_user_response
+            # so the feedback loop can record the outcome.
+            suggestion_made = None
+            for memory in all_memories:
+                if not isinstance(memory, dict):
+                    continue
+                meta = memory.get("metadata", {})
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("category") != "learned_pattern":
+                    continue
+                if meta.get("confidence") != "high":
+                    continue
+
+                pattern_text = memory.get("memory", "")
+                if not pattern_text:
+                    continue
+
+                # Store which pattern we are surfacing so feedback
+                # detection can record the outcome after user responds
+                suggestion_made = {
+                    "pattern_text": pattern_text,
+                    "category": meta.get("category", "learned_pattern"),
+                    "user_id": payload_data.get("user_id", "test_user"),
+                    "session_id": session_id
+                }
+                logger.info(
+                    f"💡 High-confidence pattern available for suggestion: "
+                    f"{pattern_text[:60]}"
+                )
+                # Only surface one suggestion at a time
+                break
+
+            # Attach suggestion info to agent so next message can
+            # detect whether user accepted or rejected it
+            if suggestion_made:
+                agent._pending_suggestion = suggestion_made
+            else:
+                agent._pending_suggestion = None
 
             # Always strip stale context first
             agent.memory = [msg for msg in agent.memory if "Previous Context" not in msg.get("content", "")]

@@ -80,9 +80,6 @@ opencv-python>=4.7.0
 ultralytics>=8.0.0  # For YOLO model
 gtts
 
-pyautogui
-docker
-playwright
 # Anthropic
 anthropic
 

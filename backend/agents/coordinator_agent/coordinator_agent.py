@@ -201,6 +201,7 @@ def extract_credentials_from_request(user_request: Dict) -> Dict[str, Optional[s
 class ActionTask(BaseModel):
     """Task format for RAG-based action layer - URLs resolved by execution layer"""
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    goal: str  # Shared high-level objective for the whole task plan
     ai_prompt: str  # Natural language prompt for RAG LLM - this drives URL resolution
     device: Literal["desktop", "mobile"]
     context: Literal["local", "web"]
@@ -578,6 +579,7 @@ A COMPOSITE request:
 
 Each task must have:
 - **ai_prompt**: Natural language instruction (CRITICAL: this is used by RAG to determine URLs and selectors)
+- **goal**: The SAME high-level goal string for the entire task plan (must be identical in all tasks)
 - **device**: "desktop" or "mobile"
 - **context**: "local" or "web"
 - **target_agent**: "action" or "reasoning"
@@ -615,6 +617,7 @@ EXAMPLES (YAML format for brevity, output must be JSON)
 User: "Open Notepad"
 
 - task_id: task_1
+  goal: Open Notepad
   ai_prompt: Open Notepad application
   device: desktop
   context: local
@@ -629,6 +632,7 @@ User: "Open Notepad"
 User: "Login to Gmail with user@example.com and password mypass123"
 
 - task_id: task_1
+  goal: Log in to Gmail with the provided credentials
   ai_prompt: Navigate to Gmail login page
   device: desktop
   context: web
@@ -638,6 +642,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: null
 
 - task_id: task_2
+  goal: Log in to Gmail with the provided credentials
   ai_prompt: Fill the email or username field with user@example.com
   device: desktop
   context: web
@@ -648,6 +653,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: task_1
 
 - task_id: task_3
+  goal: Log in to Gmail with the provided credentials
   ai_prompt: Fill the password field with mypass123
   device: desktop
   context: web
@@ -658,6 +664,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
   depends_on: task_2
 
 - task_id: task_4
+  goal: Log in to Gmail with the provided credentials
   ai_prompt: Click the Sign In or Login submit button
   device: desktop
   context: web
@@ -672,6 +679,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
 (Assume USER PREFERENCES mention Gmail)
 
 - task_id: task_1
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: 
     Compose a complete email for this request:
     "Reschedule tomorrow's meeting with Sara".
@@ -684,6 +692,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
   depends_on: null
 
 - task_id: task_2
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Navigate to Gmail compose window
   device: desktop
   context: web
@@ -693,6 +702,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
   depends_on: null
 
 - task_id: task_3
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the To field with Sara's email address
   device: desktop
   context: web
@@ -703,6 +713,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
   depends_on: task_2
 
 - task_id: task_4
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
   device: desktop
   context: web
@@ -712,6 +723,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
   depends_on: task_1,task_3
 
 - task_id: task_5
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the email body with the BODY value from the composed email
   device: desktop
   context: web
@@ -721,6 +733,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
   depends_on: task_4
 
 - task_id: task_6
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Click the Send button to send the email
   device: desktop
   context: web
@@ -740,6 +753,7 @@ The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
 User: "Set the alarm for 7 am"
 
 - task_id: task_1
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Open the Clock app on mobile device
   device: mobile
   context: local
@@ -749,6 +763,7 @@ User: "Set the alarm for 7 am"
   depends_on: null
 
 - task_id: task_2
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Set the alarm time to 7:00 AM
   device: mobile
   context: local
@@ -758,6 +773,7 @@ User: "Set the alarm for 7 am"
   depends_on: task_1
 
 - task_id: task_3
+  goal: Set an alarm for 7:00 AM
   ai_prompt: Press OK or Save to confirm the alarm setting
   device: mobile
   context: local
@@ -769,6 +785,7 @@ User: "Set the alarm for 7 am"
 User: "Open Notepad and write me a scary story"
 
 - task_id: task_1
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Open Notepad application
   device: desktop
   context: local
@@ -779,6 +796,7 @@ User: "Open Notepad and write me a scary story"
   depends_on: null
 
 - task_id: task_2
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Write a very scary story
   device: desktop
   context: local
@@ -788,6 +806,7 @@ User: "Open Notepad and write me a scary story"
   depends_on: task_1
 
 - task_id: task_3
+  goal: Open Notepad and produce a scary story in it
   ai_prompt: Type the generated story text into the active Notepad window
   device: desktop
   context: local
@@ -834,6 +853,7 @@ Examples of ACTION tasks:
 8. **Empty web_params** - For local tasks, set web_params: {{}}
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
+11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
 
 ============================
 OUTPUT RULES
@@ -843,6 +863,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
 [
   {{
     "task_id": <string>,
+    "goal": <string, identical across all tasks>,
     "ai_prompt": <string>,
     "device": <"desktop" | "mobile">,
     "context": <"local" | "web">,
@@ -944,6 +965,22 @@ Generate the task decomposition now:"""
         task_dicts = [t for t in parsed if isinstance(t, dict)]
         if not task_dicts:
             raise ValueError("JSON array contained no task objects")
+
+        # Step F: normalize/validate shared goal across all tasks.
+        # If missing, derive from first prompt to keep downstream execution safe.
+        shared_goal = next(
+            (
+                str(t.get("goal", "")).strip()
+                for t in task_dicts
+                if isinstance(t.get("goal"), str) and str(t.get("goal", "")).strip()
+            ),
+            ""
+        )
+        if not shared_goal:
+            shared_goal = str(user_request.get("original_input") or user_request.get("confirmation") or user_request.get("action") or "Complete the requested task").strip()
+
+        for t in task_dicts:
+            t["goal"] = shared_goal
 
         action_tasks = [ActionTask(**task) for task in task_dicts]
 
@@ -1195,6 +1232,7 @@ def create_coordinator_graph():
                     if action_prompt:
                         resolve_task = ActionTask(
                             task_id=f"{current_task.task_id}_resolve",
+                            goal=current_task.goal,
                             ai_prompt=action_prompt,
                             device=current_task.device,
                             context=current_task.context,

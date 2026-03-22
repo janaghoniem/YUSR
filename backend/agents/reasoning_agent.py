@@ -246,7 +246,7 @@ Your goal is correctness, clarity, and usefulness to the system."""
             try:
                 parsed_response = json.loads(clean_response)
                 result_content = parsed_response.get("result", str(parsed_response))
-                logger.info(f"✅ Reasoning complete: {result_content[:200]}...")
+                logger.info(f"✅ Reasoning complete: {str(result_content)[:200]}...")
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",

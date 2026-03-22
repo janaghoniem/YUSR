@@ -191,14 +191,29 @@ const OnboardingPage = ({ userId, onComplete }) => {
   useEffect(() => {
     if (step === 0) {
       // Intro handled by its own render
+      window.speechSynthesis.cancel();
     } else if (STEPS[step]) {
       const cfg = STEPS[step];
       const q = isArabic && cfg.qAr ? cfg.qAr : cfg.q;
       pushAura(q);
+      
+      // Speak the question and choices
+      window.speechSynthesis.cancel();
+      const utteranceText = [q];
+      if (cfg.options) {
+        const opts = isArabic && cfg.optionsAr ? cfg.optionsAr : cfg.options;
+        utteranceText.push(isArabic ? "The options are:" : "The options are:");
+        utteranceText.push(opts.join(", "));
+      }
+
+      const utterance = new SpeechSynthesisUtterance(utteranceText.join(". "));
+      utterance.lang = srLang;
+      utterance.rate = 0.9;
+      window.speechSynthesis.speak(utterance);
     }
     setInputValue("");
     setFieldError("");
-  }, [step]);
+  }, [step, isArabic, srLang, pushAura]);
 
   const progress = (step / (TOTAL_STEPS - 1)) * 100;
 

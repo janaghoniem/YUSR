@@ -247,7 +247,9 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
             "error": result.error,
         }
 
-    combined = " ".join(filter(None, [result.error, result.details, result.content])).lower()
+    # Safely access details field (may not exist for MobileTaskResult)
+    details = getattr(result, 'details', '')
+    combined = " ".join(filter(None, [result.error, details, result.content])).lower()
     if not combined:
         return None
 
@@ -1677,7 +1679,7 @@ async def execute_single_task(
             return TaskResult(
                 task_id=task.task_id,
                 status=result.status,
-                content=result.details,
+                content=getattr(result, 'details', '') or getattr(result, 'content', '') or '',
                 error=result.error
             )
         except Exception as e:
@@ -1746,6 +1748,10 @@ async def execute_single_task(
         content = result_payload.get("content")
         if not content:
             content = result_payload.get("details")
+
+        # Fix Pydantic validation error: Convert dict content to JSON string
+        if isinstance(content, dict):
+            content = json.dumps(content, indent=2)  # Pretty format for readability
 
         return TaskResult(
             task_id=task.task_id,

@@ -1,0 +1,197 @@
+{
+  "run_label": "current_before_opt",
+  "user_id": "eval_user_001",
+  "timestamp": "2026-03-20T14:35:50.745083",
+  "runs": 30,
+  "no_groq": true,
+  "latency_read_mem0": {
+    "system": "mem0",
+    "n_calls": 30,
+    "p50_ms": 714.6,
+    "p95_ms": 1344.4,
+    "min_ms": 620.3,
+    "max_ms": 1481.4,
+    "mean_ms": 877.4,
+    "avg_results": 4.4
+  },
+  "latency_read_baseline": {
+    "system": "baseline",
+    "n_calls": 30,
+    "p50_ms": 161.0,
+    "p95_ms": 527.2,
+    "min_ms": 118.5,
+    "max_ms": 615.4,
+    "mean_ms": 199.9,
+    "avg_chars": 1780,
+    "total_messages": 37,
+    "total_sessions": 3
+  },
+  "latency_write_mem0": {
+    "system": "mem0",
+    "n_calls": 10,
+    "p50_ms": 4711.0,
+    "p95_ms": 14713.0,
+    "min_ms": 1448.8,
+    "max_ms": 14713.0,
+    "mean_ms": 5637.5
+  },
+  "latency_write_baseline": {
+    "system": "baseline",
+    "n_calls": 10,
+    "p50_ms": 185.4,
+    "p95_ms": 502.7,
+    "min_ms": 122.4,
+    "max_ms": 502.7,
+    "mean_ms": 199.5
+  },
+  "latency_embed": {
+    "n_calls": 20,
+    "p50_ms": 14.6,
+    "p95_ms": 59.7,
+    "min_ms": 11.8,
+    "max_ms": 59.7,
+    "mean_ms": 16.4
+  },
+  "latency_comparison_read": {
+    "baseline_p50_ms": 161.0,
+    "mem0_p50_ms": 714.6,
+    "baseline_p95_ms": 527.2,
+    "mem0_p95_ms": 1344.4
+  },
+  "latency_comparison_write": {
+    "baseline_p50_ms": 185.4,
+    "mem0_p50_ms": 4711.0
+  },
+  "recall": {
+    "n": 12,
+    "recall_at_1": 8.3,
+    "recall_at_5": 8.3,
+    "recall_at_10": 8.3,
+    "hits": {
+      "@1": 1,
+      "@5": 1,
+      "@10": 1
+    },
+    "details": [
+      {
+        "query": "open browser",
+        "pref": "User prefers Chrome for web browsing",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Prefers Chrome for web browsing"
+      },
+      {
+        "query": "buy wireless headphones",
+        "pref": "User likes to shop on Amazon for electronics",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Interested in electronics and tech products"
+      },
+      {
+        "query": "what is my name",
+        "pref": "User name is Sara and she works as a software",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Name is Sara"
+      },
+      {
+        "query": "suggest dinner recipes",
+        "pref": "User is vegetarian and prefers healthy meal",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Prefers healthy meal recipes"
+      },
+      {
+        "query": "change display settings",
+        "pref": "User prefers dark mode across all applications",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "User has a 4K monitor"
+      },
+      {
+        "query": "set alarm for 7am",
+        "pref": "User usually wakes up at 7 AM and sets morning",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Sets morning alarms"
+      },
+      {
+        "query": "open text editor",
+        "pref": "User prefers to use Notepad for quick text",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Prefers to use Notepad for quick text editing tasks"
+      },
+      {
+        "query": "search Python tutorials",
+        "pref": "User frequently searches for Python programming",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Frequently searches for Python programming tutorials"
+      },
+      {
+        "query": "open email",
+        "pref": "User prefers Gmail over other email clients",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Prefers Gmail over other email clients for communication"
+      },
+      {
+        "query": "play video",
+        "pref": "User likes to use YouTube for watching educational",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Likes to use YouTube, watches educational content and tech reviews on YouTube"
+      },
+      {
+        "query": "what device am I using",
+        "pref": "User device is a Windows 11 desktop",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "User device is a Windows 11 desktop"
+      },
+      {
+        "query": "change language settings",
+        "pref": "User prefers English language interface",
+        "h1": false,
+        "h5": false,
+        "h10": false,
+        "top": "Prefers English language interface for all applications"
+      }
+    ]
+  },
+  "tokens_mem0": {
+    "prefs_context_chars": 352,
+    "n_memories_injected": 7,
+    "estimated_tokens": 182,
+    "groq_actual": null,
+    "retrieval_ms": 630.6
+  },
+  "tokens_baseline": {
+    "n_messages": 37,
+    "n_sessions": 3,
+    "history_chars": 1780,
+    "history_tokens": 445,
+    "estimated_tokens": 539,
+    "groq_actual": null
+  },
+  "tokens_comparison": {
+    "baseline_tokens": 539,
+    "mem0_tokens": 182,
+    "saved_tokens": 357,
+    "pct_saved": 66.2,
+    "baseline_cost": 0.000318,
+    "mem0_cost": 0.000107
+  }
+}

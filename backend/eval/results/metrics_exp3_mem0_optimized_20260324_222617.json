@@ -1,0 +1,149 @@
+{
+  "run_label": "exp3_mem0_optimized",
+  "user_id": "eval_user_002",
+  "timestamp": "2026-03-24T22:25:38.811297",
+  "runs": 30,
+  "latency_read_mem0": {
+    "system": "mem0",
+    "n_calls": 30,
+    "p50_ms": 661.0,
+    "p95_ms": 1252.7,
+    "min_ms": 0.0,
+    "max_ms": 1416.5,
+    "mean_ms": 569.4,
+    "avg_results": 1.5
+  },
+  "latency_read_baseline": {
+    "system": "baseline",
+    "n_calls": 30,
+    "p50_ms": 181.6,
+    "p95_ms": 211.0,
+    "min_ms": 122.2,
+    "max_ms": 218.6,
+    "mean_ms": 170.6,
+    "avg_chars": 1146,
+    "total_messages": 27,
+    "total_sessions": 3
+  },
+  "latency_write_baseline": {
+    "p50_ms": 142.8,
+    "p95_ms": 199.6,
+    "min_ms": 123.9,
+    "max_ms": 199.6,
+    "mean_ms": 149.6
+  },
+  "latency_write_mem0": {
+    "skipped": true,
+    "reason": "disabled to save tokens"
+  },
+  "latency_embed": {
+    "p50_ms": 13.1,
+    "p95_ms": 40.8,
+    "mean_ms": 15.0
+  },
+  "recall": {
+    "n": 12,
+    "recall_at_1": 83.3,
+    "recall_at_5": 91.7,
+    "recall_at_10": 91.7,
+    "hits": {
+      "@1": 10,
+      "@5": 11,
+      "@10": 11
+    },
+    "details": [
+      {
+        "query": "open browser",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "buy wireless headphones",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "what is my name",
+        "h1": false,
+        "h5": false,
+        "h10": false
+      },
+      {
+        "query": "suggest dinner recipes",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "change display settings",
+        "h1": false,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "set alarm for 7am",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "open text editor",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "search Python tutorials",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "open email",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "play video",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "what device am I using",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "change language settings",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      }
+    ]
+  },
+  "tokens_mem0": {
+    "prefs_context_chars": 143,
+    "n_memories_injected": 2,
+    "estimated_tokens": 103,
+    "retrieval_ms": 680.3
+  },
+  "tokens_baseline": {
+    "n_messages": 27,
+    "history_chars": 1146,
+    "history_tokens": 286,
+    "estimated_tokens": 354
+  },
+  "tokens_comparison": {
+    "baseline_tokens": 354,
+    "mem0_tokens": 103,
+    "saved_tokens": 251,
+    "pct_saved": 70.9,
+    "baseline_cost": 0.000209,
+    "mem0_cost": 6.1e-05
+  }
+}

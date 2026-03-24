@@ -1,0 +1,197 @@
+{
+  "run_label": "current_before_opt_v2",
+  "user_id": "eval_user_001",
+  "timestamp": "2026-03-20T14:45:20.702758",
+  "runs": 30,
+  "no_groq": true,
+  "latency_read_mem0": {
+    "system": "mem0",
+    "n_calls": 30,
+    "p50_ms": 679.4,
+    "p95_ms": 1266.1,
+    "min_ms": 619.7,
+    "max_ms": 1273.8,
+    "mean_ms": 774.6,
+    "avg_results": 4.4
+  },
+  "latency_read_baseline": {
+    "system": "baseline",
+    "n_calls": 30,
+    "p50_ms": 144.1,
+    "p95_ms": 206.5,
+    "min_ms": 114.6,
+    "max_ms": 214.9,
+    "mean_ms": 154.3,
+    "avg_chars": 1780,
+    "total_messages": 37,
+    "total_sessions": 3
+  },
+  "latency_write_mem0": {
+    "system": "mem0",
+    "n_calls": 10,
+    "p50_ms": 91.7,
+    "p95_ms": 2722.7,
+    "min_ms": 75.0,
+    "max_ms": 2722.7,
+    "mean_ms": 840.9
+  },
+  "latency_write_baseline": {
+    "system": "baseline",
+    "n_calls": 10,
+    "p50_ms": 144.0,
+    "p95_ms": 207.2,
+    "min_ms": 116.0,
+    "max_ms": 207.2,
+    "mean_ms": 147.1
+  },
+  "latency_embed": {
+    "n_calls": 20,
+    "p50_ms": 14.0,
+    "p95_ms": 44.2,
+    "min_ms": 12.2,
+    "max_ms": 44.2,
+    "mean_ms": 16.1
+  },
+  "latency_comparison_read": {
+    "baseline_p50_ms": 144.1,
+    "mem0_p50_ms": 679.4,
+    "baseline_p95_ms": 206.5,
+    "mem0_p95_ms": 1266.1
+  },
+  "latency_comparison_write": {
+    "baseline_p50_ms": 144.0,
+    "mem0_p50_ms": 91.7
+  },
+  "recall": {
+    "n": 12,
+    "recall_at_1": 66.7,
+    "recall_at_5": 100.0,
+    "recall_at_10": 100.0,
+    "hits": {
+      "@1": 8,
+      "@5": 12,
+      "@10": 12
+    },
+    "details": [
+      {
+        "query": "open browser",
+        "pref": "Prefers Chrome for web browsing",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Prefers Chrome for web browsing"
+      },
+      {
+        "query": "buy wireless headphones",
+        "pref": "Likes to shop on Amazon",
+        "h1": false,
+        "h5": true,
+        "h10": true,
+        "top": "Interested in electronics and tech products"
+      },
+      {
+        "query": "what is my name",
+        "pref": "Name is Sara",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Name is Sara"
+      },
+      {
+        "query": "suggest dinner recipes",
+        "pref": "User is vegetarian",
+        "h1": false,
+        "h5": true,
+        "h10": true,
+        "top": "Prefers healthy meal recipes"
+      },
+      {
+        "query": "change display settings",
+        "pref": "Prefers dark mode across all applications",
+        "h1": false,
+        "h5": true,
+        "h10": true,
+        "top": "User has a 4K monitor"
+      },
+      {
+        "query": "set alarm for 7am",
+        "pref": "Wakes up at 7 AM",
+        "h1": false,
+        "h5": true,
+        "h10": true,
+        "top": "Sets morning alarms"
+      },
+      {
+        "query": "open text editor",
+        "pref": "Prefers to use Notepad",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Prefers to use Notepad for quick text editing tasks"
+      },
+      {
+        "query": "search Python tutorials",
+        "pref": "Frequently searches for Python",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Frequently searches for Python programming tutorials"
+      },
+      {
+        "query": "open email",
+        "pref": "Prefers Gmail over other email clients",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Prefers Gmail over other email clients for communication"
+      },
+      {
+        "query": "play video",
+        "pref": "Likes to use YouTube",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Likes to use YouTube, watches educational content and tech reviews on YouTube"
+      },
+      {
+        "query": "what device am I using",
+        "pref": "User device is a Windows 11 desktop",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "User device is a Windows 11 desktop"
+      },
+      {
+        "query": "change language settings",
+        "pref": "Prefers English language interface",
+        "h1": true,
+        "h5": true,
+        "h10": true,
+        "top": "Prefers English language interface for all applications"
+      }
+    ]
+  },
+  "tokens_mem0": {
+    "prefs_context_chars": 352,
+    "n_memories_injected": 7,
+    "estimated_tokens": 182,
+    "groq_actual": null,
+    "retrieval_ms": 714.8
+  },
+  "tokens_baseline": {
+    "n_messages": 37,
+    "n_sessions": 3,
+    "history_chars": 1780,
+    "history_tokens": 445,
+    "estimated_tokens": 539,
+    "groq_actual": null
+  },
+  "tokens_comparison": {
+    "baseline_tokens": 539,
+    "mem0_tokens": 182,
+    "saved_tokens": 357,
+    "pct_saved": 66.2,
+    "baseline_cost": 0.000318,
+    "mem0_cost": 0.000107
+  }
+}

@@ -26,7 +26,8 @@ class Mem0PreferenceManager:
             "vector_store": {
                 "provider": "mongodb",
                 "config": {
-                    "MONGODB_URI": MONGODB_URI,
+                    # "MONGODB_URI": MONGODB_URI,
+                    "mongo_uri": MONGODB_URI,
                     "db_name": "yusr_db",
                     "collection_name": "mem0_preferences",
                     "embedding_model_dims": 384
@@ -52,6 +53,8 @@ class Mem0PreferenceManager:
         
         try:
             self.memory = Memory.from_config(config)
+            self._search_cache: Dict[str, tuple] = {}
+            self._CACHE_TTL = 300
             logger.info(f"✅ Mem0 initialized for user {user_id} with MongoDB Atlas")
         except Exception as e:
             logger.error(f"❌ Mem0 initialization failed: {e}")
@@ -166,7 +169,6 @@ class Mem0PreferenceManager:
             return False
 
 
-
     def get_relevant_preferences(
         self,
         query: str,
@@ -175,17 +177,27 @@ class Mem0PreferenceManager:
     ) -> List[Dict]:
         """
         Get preferences relevant to query.
-        Single Atlas ANN search (was 3x with query expansion).
+        Uses a 5-minute TTL in-process cache to avoid repeated Atlas ANN calls
+        for identical or near-identical queries within the same session burst.
         """
+        import time
+        cache_key = f"{self.user_id}:{query[:80]}:{limit}:{min_score}"
+        now = time.time()
+
+        # Cache hit
+        if cache_key in self._search_cache:
+            cached_result, ts = self._search_cache[cache_key]
+            if now - ts < self._CACHE_TTL:
+                logger.debug(f"⚡ Search cache hit for query: {query[:40]}")
+                return cached_result
+
         try:
-            # ONE search call — no expansion loop
             memories = self.memory.search(
                 query=query,
                 user_id=self.user_id,
                 limit=limit * 2
             )
 
-            # Normalise response format (Mem0 returns dict or list depending on version)
             if isinstance(memories, dict):
                 if 'results' in memories:
                     memories = memories['results']
@@ -199,35 +211,39 @@ class Mem0PreferenceManager:
             if not isinstance(memories, list):
                 memories = []
 
-            # Filter by score threshold
             relevant_memories = []
             for mem in memories:
                 if mem is None:
                     continue
                 score = mem.get('score', 0.0)
                 memory_text = mem.get('memory', mem.get('text', 'Unknown'))
-
                 if score >= min_score:
                     relevant_memories.append(mem)
                     logger.info(f"  ✅ [Score: {score:.2f}] {memory_text[:60]}")
                 else:
                     logger.debug(f"  ⤷ Filtered out (score {score:.2f} < {min_score})")
 
-            # Sort by score descending and cap at limit
             relevant_memories.sort(key=lambda x: x.get('score', 0), reverse=True)
             relevant_memories = relevant_memories[:limit]
+
+            # Store in cache
+            self._search_cache[cache_key] = (relevant_memories, now)
+            # Evict stale entries to prevent unbounded growth
+            self._search_cache = {
+                k: v for k, v in self._search_cache.items()
+                if now - v[1] < self._CACHE_TTL
+            }
 
             logger.info(
                 f"✅ Found {len(relevant_memories)} relevant preferences "
                 f"(threshold: {min_score}) for query: {query[:50]}..."
             )
-
             return relevant_memories
 
         except Exception as e:
             logger.error(f"❌ Failed to retrieve preferences: {e}", exc_info=True)
             return []
-    
+        
     def get_conversation_history(self, limit: int = 5) -> List:
         """Get recent conversation history"""
         try:

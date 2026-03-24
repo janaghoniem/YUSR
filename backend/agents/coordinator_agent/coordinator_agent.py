@@ -46,6 +46,8 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize MongoDB checkpointer: {e}")
     checkpointer = None
 
+
+# 
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -881,7 +883,8 @@ def create_coordinator_graph():
                 await checkpointer.aput(
                     config={"configurable": {"thread_id": session_id}},
                     checkpoint={"execution_state": execution_state},
-                    metadata = {"type": "task_progress"}
+                    metadata = {"type": "task_progress"},
+                    new_versions=[]
                 )
                 logger.info(f"💾 Saved task progress")
             except Exception as e:
@@ -1053,35 +1056,43 @@ Extract now:"""
                         extraction_text = extraction_text[4:]
 
                 preferences_to_store = json.loads(extraction_text.strip())
-                
+
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            pref_mgr.add_preference(
-                                pref_obj["preference"],
-                                metadata={
-                                    "category": pref_obj.get("category", "general"),
-                                    "confidence": pref_obj.get("confidence", "medium"),
-                                    "extracted_from": task_summary["original_request"]
-                                }
-                            )
-                            logger.info(f"💾 Stored preference: {pref_obj['preference']}")
+                            try:
+                                pref_mgr.add_preference(
+                                    pref_obj["preference"],
+                                    metadata={
+                                        "category": pref_obj.get("category", "general"),
+                                        "confidence": pref_obj.get("confidence", "medium"),
+                                        "extracted_from": task_summary["original_request"]
+                                    }
+                                )
+                                logger.info(f"💾 Stored preference: {pref_obj['preference']}")
+                            except Exception as pref_err:
+                                logger.debug(f"⚠️ Could not store individual preference: {pref_err}")
                 
-                conversation_context = f"User requested: {task_summary['original_request']}. "
-                conversation_context += f"Successfully completed {success_count} steps."
-                
-                pref_mgr.add_preference(
-                    conversation_context,
-                    metadata={
-                        "category": "conversation_history",
-                        "session_id": session_id,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                )
+                try:
+                    conversation_context = f"User requested: {task_summary['original_request']}. "
+                    conversation_context += f"Successfully completed {success_count} steps."
+                    
+                    pref_mgr.add_preference(
+                        conversation_context,
+                        metadata={
+                            "category": "conversation_history",
+                            "session_id": session_id,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    logger.info(f"💾 Stored conversation context")
+                except Exception as ctx_err:
+                    logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
                 
             except Exception as e:
-                logger.error(f"❌ Failed to store preferences: {e}")
-        
+                logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
+
+                
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
         
@@ -1351,7 +1362,8 @@ async def start_coordinator_agent(broker_instance):
                 await checkpointer.aput(
                     config={"configurable": {"thread_id": session_id}},
                     checkpoint=None,
-                    metadata={"cleared": True}
+                    metadata={"cleared": True},
+                    new_versions=[]
                 )
                 logger.info(f"🗑️ Cleared session history for {session_id}")
             except Exception as e:

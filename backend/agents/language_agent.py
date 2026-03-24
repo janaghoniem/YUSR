@@ -380,15 +380,24 @@ async def start_language_agent(broker):
         agent = get_or_create_agent(session_id, user_id)
 
         # Fetch Mem0 preferences
+        # Fetch Mem0 preferences
+        _skip_retrieval = (
+            len(input_text.split()) <= 3
+            and input_text.lower().strip() in {
+                "yes", "no", "ok", "okay", "sure", "thanks", "thank you",
+                "نعم", "لا", "اه", "ايوه", "شكرا", "تمام", "اوكي"
+            }
+        )
         try:
-            # NEW: Send thinking update
             await ThinkingStepManager.update_step(session_id, "Checking your preferences...", http_request_id)
-            
-            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = get_preference_manager(user_id)
-            
-            all_memories = pref_mgr.get_relevant_preferences(input_text, limit=5)
-            
+
+            if _skip_retrieval:
+                logger.debug("⏭️ Skipping Mem0 retrieval for trivial turn")
+                all_memories = []
+            else:
+                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                pref_mgr = get_preference_manager(user_id)
+                all_memories = pref_mgr.get_relevant_preferences(input_text, limit=5)
             preferences = []
             conversation_history = []
             
@@ -463,42 +472,98 @@ async def start_language_agent(broker):
         response, is_complete = agent.user_turn(input_text)
         print(f"🤖 Agent: {response}\n")
         try:
-            _extraction_prompt = (
-                'You are a personal-info extractor. Read the user message below.\n'
-                'If it contains personal information (name, age, location, job, hobby,\n'
-                'preference, or any fact about the user), extract it.\n'
-                'If it does NOT contain personal info, return exactly: {"personal_info": null}\n\n'
-                f'USER MESSAGE: "{input_text}"\n\n'
-                'Return ONLY valid JSON, no markdown, no explanation:\n'
-                '{"personal_info": "one-sentence summary of what the user revealed, or null"}'
+            _memories_to_store = []
+            _input_lower = input_text.lower()
+
+            # ── Token guard: skip LLM extraction for pure task commands ──
+            _TASK_PREFIXES = (
+                "open ", "launch ", "start ", "close ", "search ", "find ",
+                "navigate", "go to", "click ", "type ", "press ", "scroll",
+                "take a screenshot", "set alarm", "play ", "pause ", "stop ",
+                "افتح", "ابحث", "اكتب", "انتقل",
             )
-            _ext_response = call_groq_api(
-                [{"role": "system", "content": _extraction_prompt}],
-                max_tokens=100
+            _is_task_command = any(
+                _input_lower.strip().startswith(p) for p in _TASK_PREFIXES
             )
-            if _ext_response:
-                _clean = _ext_response.strip()
-                if _clean.startswith("```"):
-                    _clean = _clean.split("```")[1]
-                    if _clean.startswith("json"):
-                        _clean = _clean[4:]
-                _extracted = json.loads(_clean.strip())
-                _pi = _extracted.get("personal_info")
-                if _pi and str(_pi).lower() != "null":
-                    from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                    _pmgr = get_preference_manager(user_id)
-                    _pmgr.add_preference(
-                        str(_pi),
+
+            if not _is_task_command:
+                # Personal info via LLM extraction (keep existing approach)
+                _extraction_prompt = (
+                    'You are a personal-info extractor. Read the user message below.\n'
+                    'If it contains personal information (name, age, location, job, hobby,\n'
+                    'preference, or any fact about the user), extract it.\n'
+                    'If it does NOT contain personal info, return exactly: {"personal_info": null}\n\n'
+                    f'USER MESSAGE: "{input_text}"\n\n'
+                    'Return ONLY valid JSON, no markdown, no explanation:\n'
+                    '{"personal_info": "one-sentence summary of what the user revealed, or null"}'
+                )
+                _ext_response = call_groq_api(
+                    [{"role": "system", "content": _extraction_prompt}],
+                    max_tokens=100
+                )
+                if _ext_response:
+                    _clean = _ext_response.strip()
+                    if _clean.startswith("```"):
+                        _clean = _clean.split("```")[1]
+                        if _clean.startswith("json"):
+                            _clean = _clean[4:]
+                    _extracted = json.loads(_clean.strip())
+                    _pi = _extracted.get("personal_info")
+                    if _pi and str(_pi).lower() != "null":
+                        _memories_to_store.append((str(_pi), "personal_info"))
+
+            # Implicit app preference detection (no LLM needed)
+            _app_signals = [
+                ("instead of", "app_preference"), ("always use", "app_preference"),
+                ("i prefer", "app_preference"), ("use chrome", "app_preference"),
+                ("use word", "app_preference"), ("use notepad", "app_preference"),
+                ("use edge", "app_preference"), ("use telegram", "app_preference"),
+                ("use whatsapp", "app_preference"),
+            ]
+            for signal, cat in _app_signals:
+                if signal in _input_lower:
+                    _memories_to_store.append((input_text.strip(), cat))
+                    break
+
+            # Communication style detection
+            _style_signals = [
+                "keep it short", "be brief", "bullet points", "no long answers",
+                "always respond in", "respond in arabic", "respond in english",
+                "use simple language", "be concise",
+            ]
+            for signal in _style_signals:
+                if signal in _input_lower:
+                    _memories_to_store.append((input_text.strip(), "communication_style"))
+                    break
+
+            # Behavior pattern detection
+            _pattern_signals = [
+                "i usually", "i always", "every morning", "every night",
+                "i work", "i wake up", "i sleep", "night shift", "i start my day",
+            ]
+            for signal in _pattern_signals:
+                if signal in _input_lower:
+                    _memories_to_store.append((input_text.strip(), "behavior_pattern"))
+                    break
+
+            # Store all detected memories using safe deduplication
+            if _memories_to_store:
+                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                _pmgr = get_preference_manager(user_id)
+                for _text, _cat in _memories_to_store:
+                    _pmgr.add_preference_safe(
+                        _text,
                         metadata={
-                            "category": "personal_info",
+                            "category": _cat,
                             "source": "language_agent",
                             "session_id": session_id
-                        }
+                        },
+                        similarity_threshold=0.85
                     )
-                    print(f"💾 Stored personal info: {_pi}")
+                    logger.info(f"💾 Stored [{_cat}]: {_text[:60]}")
+
         except Exception as _ext_err:
-            logger.warning(f"⚠️ Personal info extraction (non-fatal): {_ext_err}")
-        
+            logger.warning(f"⚠️ Memory storage (non-fatal): {_ext_err}")
         if is_complete:
             # NEW: Send thinking update
             await ThinkingStepManager.update_step(session_id, "Preparing for coordinator...", http_request_id)

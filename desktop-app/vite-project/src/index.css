@@ -2086,3 +2086,156 @@ body {
     max-width: 92%;
   }
 }
+
+/* Face Capture Component Styles */
+.face-capture-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border-radius: 24px;
+  min-height: 500px;
+}
+
+.face-capture-title {
+  color: #fff;
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.face-capture-subtitle {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  margin-bottom: 24px;
+  text-align: center;
+}
+
+.webcam-wrapper {
+  position: relative;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 3px solid #00ff88;
+  margin-bottom: 24px;
+}
+
+.webcam-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.captured-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.countdown-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.countdown-number {
+  font-size: 48px;
+  font-weight: bold;
+  color: #00ff88;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.7; }
+}
+
+.face-capture-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.face-capture-btn {
+  padding: 10px 24px;
+  border-radius: 50px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border: none;
+}
+
+.face-capture-btn.primary {
+  background: #00ff88;
+  color: #1a1a2e;
+}
+
+.face-capture-btn.primary:hover {
+  background: #00cc6a;
+  transform: translateY(-2px);
+}
+
+.face-capture-btn.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.face-capture-btn.ghost {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.face-capture-btn.ghost:hover {
+  color: #fff;
+}
+
+.face-error-message {
+  color: #ff4444;
+  font-size: 14px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.face-capture-note {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  text-align: center;
+  margin-top: 16px;
+}
+
+.loading-spinner {
+  color: #fff;
+  font-size: 14px;
+}
+
+.face-success-message {
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid #00ff88;
+  border-radius: 12px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.onboarding-btn.secondary {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #fff;
+}
+
+.onboarding-btn.secondary:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.face-registration-section {
+  margin-top: 16px;
+}

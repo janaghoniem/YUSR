@@ -19,15 +19,21 @@ function App() {
   const [assistantMessage, setAssistantMessage] = useState("");
   // user ID
 
+// App.jsx - Fix userId initialization
   const [userId, setUserId] = useState(() => {
+      // Only use stored userId if onboarding is NOT complete
+      // If we're logged out, we need a new ID for new accounts
+      const onboardingComplete = localStorage.getItem("onboardingComplete") === "true";
       const stored = localStorage.getItem("userId");
-      if (stored) {
+      
+      if (onboardingComplete && stored) {
           console.log("[Auth] Using existing user ID:", stored);
           return stored;
       }
+      
+      // Generate new user ID for new accounts
       const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      localStorage.setItem("userId", newUserId);
-      console.log("[Auth] Created new user ID:", newUserId);
+      console.log("[Auth] Created new user ID for new account:", newUserId);
       return newUserId;
   });
 
@@ -1016,15 +1022,29 @@ function App() {
   };
 
   /* ---------- LOGOUT ---------- */
+  // In App.jsx, update the handleLogout function
   const handleLogout = () => {
-      // Clear auth state but preserve the remembered username hint
-      const rememberedUsername = localStorage.getItem("userName") || "";
+      // Clear auth state
       localStorage.removeItem("onboardingComplete");
       localStorage.removeItem("currentSessionId");
-      // Keep userId so data isn't orphaned, keep userName so login can prefill
+      localStorage.removeItem("userName");
+      localStorage.removeItem("ttsVoice");
+      localStorage.removeItem("authMethod");
+      
+      // IMPORTANT: Clear the userId so a new one is generated for next account
+      // But don't remove it completely - we'll let the useState generate a new one
+      // Actually, let's remove it so the next signup gets a fresh ID
+      localStorage.removeItem("userId");
+      
+      // Reset userId state to a new value
+      const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setUserId(newUserId);
+      
+      // Reset other states
+      setUserName("User");
       setAuthState("login");
-      setUserName("Labubu");
-      console.log("[Auth] Logged out");
+      
+      console.log("[Auth] Logged out, new user ID generated for next signup:", newUserId);
   };
   /* ---------- INTERRUPT COMMANDS ---------- */
   const sendInterrupt = useCallback((command) => {

@@ -84,3 +84,8 @@ gtts
 anthropic
 
 # devDependencies
+# Install required Python packages
+face-recognition
+opencv-python
+numpy
+python-multipart

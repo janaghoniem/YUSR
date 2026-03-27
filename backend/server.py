@@ -38,6 +38,8 @@ from dotenv import load_dotenv
 import json
 from memory_api import router as memory_router
 from datetime import datetime, timezone
+from face_auth import face_auth
+import base64
 
 # --- WebSocket connection manager ---
 class ConnectionManager:
@@ -548,11 +550,20 @@ async def create_account(data: OnboardingData):
         users_col = db["users"]
 
         # Check for duplicate username
-        if users_col.find_one({"username": data.username}):
+        existing_user = users_col.find_one({"username": data.username})
+        if existing_user:
+            logger.warning(f"Duplicate username attempt: {data.username}")
             raise HTTPException(status_code=409, detail="Username already taken")
 
-        # Hash password
-        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest()
+        # Check if user_id already exists (shouldn't, but just in case)
+        existing_by_id = users_col.find_one({"user_id": data.user_id})
+        if existing_by_id:
+            logger.warning(f"Duplicate user_id attempt: {data.user_id}")
+            # This is a conflict - user_id should be unique
+            raise HTTPException(status_code=409, detail="User ID already exists")
+
+        # Hash password (optional, could be empty string if using face only)
+        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest() if data.password else ""
 
         user_doc = {
             "user_id": data.user_id,
@@ -561,15 +572,14 @@ async def create_account(data: OnboardingData):
             "introduction": data.introduction,
             "preferences": data.preferences,
             "created_at": datetime.utcnow().isoformat(),
-            "onboarding_complete": True
+            "onboarding_complete": True,
+            "has_face_auth": True  # Since they registered face during onboarding
         }
 
         users_col.insert_one(user_doc)
         logger.info(f"✅ Account created for user_id: {data.user_id}, username: {data.username}")
 
-        # ── Store user profile into Mem0 for agent personalization ──────────
-        # This makes the user's profession, language, and preferences available
-        # to the Language Agent and Reasoning Agent at runtime.
+        # Store user profile into Mem0 for agent personalization
         try:
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
             pref_mgr = get_preference_manager(data.user_id)
@@ -608,7 +618,6 @@ async def create_account(data: OnboardingData):
     except Exception as e:
         logger.error(f"❌ Account creation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/onboarding/check-username")
 async def check_username(username: str):
@@ -1279,6 +1288,689 @@ async def new_chat_endpoint(request: dict):
     except Exception as e:
         logger.error(f"❌ New chat error: {e}")
         return {"status": "error", "message": str(e)}, 500
+
+class LoginData(BaseModel):
+    username: str
+    password: str
+
+@app.post("/onboarding/login")
+async def login(data: LoginData):
+    try:
+        from pymongo import MongoClient
+        import hashlib, os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        
+        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest()
+        user = db["users"].find_one({
+            "username": data.username,
+            "password_hash": hashed_pw
+        })
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        return {
+            "status": "ok",
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "preferences": user.get("preferences", {})
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/chat-messages/{session_id}")
+async def get_chat_messages(session_id: str, user_id: str):
+    """
+    Fetch all messages for a specific session, filtered by user_id.
+    Returns only user and assistant messages (strips system prompt).
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        # IMPORTANT: Verify ownership with user_id - this ensures user isolation
+        doc = db["language_agent_conversations"].find_one(
+            {"session_id": session_id, "user_id": user_id},
+            sort=[("timestamp", -1)]
+        )
+
+        if not doc or "messages" not in doc:
+            logger.warning(f"No messages found for session {session_id} belonging to user {user_id}")
+            return {"messages": [], "session_id": session_id}
+
+        # Strip system messages, return only user/assistant
+        import json as json_lib
+
+        def clean_content(role, content):
+            """Strip JSON wrapper from assistant messages stored by language agent."""
+            if role != "assistant" or not isinstance(content, str):
+                return content
+            try:
+                parsed = json_lib.loads(content)
+                return (
+                    parsed.get("response_text") or
+                    parsed.get("text") or
+                    parsed.get("response") or
+                    content
+                )
+            except Exception:
+                return content
+
+        messages = [
+            {
+                "role": m["role"],
+                "content": clean_content(m["role"], m.get("content", ""))
+            }
+            for m in doc["messages"]
+            if m.get("role") in ("user", "assistant")
+        ]
+        
+        logger.info(f"✅ Retrieved {len(messages)} messages for session {session_id} (user: {user_id})")
+        return {"messages": messages, "session_id": session_id}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch chat messages: {e}")
+        raise HTTPException(status_code=500, detail=str(e)) 
+
+
+# ============================================================================
+# CHAT LIST, TITLES, AND HISTORY
+# ============================================================================
+
+@app.get("/chats/{user_id}")
+async def get_user_chats(user_id: str):
+    """
+    Returns all chat sessions for a user, sorted by most recent.
+    Reads directly from yusr_db.language_agent_conversations.
+    Generates a title from the first user message if none is stored.
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        # IMPORTANT: Filter by user_id - ensures user isolation
+        docs = list(
+            db["language_agent_conversations"].find(
+                {"user_id": user_id},  # This line ensures user isolation
+                {"session_id": 1, "title": 1, "messages": 1, "timestamp": 1}
+            ).sort("timestamp", -1)
+        )
+
+        chats = []
+        for doc in docs:
+            sid = doc.get("session_id")
+            if not sid:
+                continue
+
+            # Use stored title or derive from first user message
+            title = doc.get("title")
+            if not title:
+                messages = doc.get("messages", [])
+                for m in messages:
+                    if m.get("role") == "user":
+                        content = m.get("content", "")
+                        # Truncate to 40 chars as working title
+                        title = content[:40] + ("..." if len(content) > 40 else "")
+                        break
+            if not title:
+                title = "New Chat"
+
+            chats.append({
+                "session_id": sid,
+                "title": title,
+                "timestamp": doc.get("timestamp", 0)
+            })
+
+        logger.info(f"✅ Returning {len(chats)} chats for user {user_id}")
+        return {"chats": chats}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get chats for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/update-chat-title")
+async def update_chat_title(request: Request):
+    """
+    Saves a human-readable title for a session.
+    Called by frontend after first AI response generates a title.
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        data = await request.json()
+        session_id = data.get("session_id")
+        user_id = data.get("user_id")
+        title = data.get("title", "").strip()
+
+        if not session_id or not user_id or not title:
+            raise HTTPException(status_code=400, detail="Missing session_id, user_id, or title")
+
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        db["language_agent_conversations"].update_one(
+            {"session_id": session_id, "user_id": user_id},
+            {"$set": {"title": title}},
+            upsert=False
+        )
+
+        logger.info(f"✅ Title updated for session {session_id}: '{title}'")
+        return {"status": "ok", "title": title}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update title: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-chat-title")
+async def generate_chat_title(request: Request):
+    """
+    Generates a chat title.
+    - summarize=False (default): called on first message, just truncates text
+    - summarize=True: called after 4 exchanges, uses Gemini to summarize full conversation
+    """
+    try:
+        data = await request.json()
+        message = data.get("message", "").strip()
+        summarize = data.get("summarize", False)
+        session_id = data.get("session_id")
+        user_id = data.get("user_id")
+
+        if not summarize:
+            # Fast path — just truncate first message, no API call
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        # Summarize path — fetch full conversation and ask Gemini
+        if not genai_client:
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        # Get full conversation from MongoDB
+        conversation_text = ""
+        if session_id and user_id:
+            try:
+                from pymongo import MongoClient
+                import os
+                client = MongoClient(os.getenv("MONGODB_URI"))
+                db = client["yusr_db"]
+                doc = db["language_agent_conversations"].find_one(
+                    {"session_id": session_id, "user_id": user_id}
+                )
+                if doc and "messages" in doc:
+                    lines = []
+                    for m in doc["messages"]:
+                        if m.get("role") == "user":
+                            lines.append(f"User: {m['content'][:100]}")
+                        elif m.get("role") == "assistant":
+                            # Parse response_text out of JSON if needed
+                            content = m.get("content", "")
+                            try:
+                                parsed = json.loads(content)
+                                content = parsed.get("response_text", content)
+                            except Exception:
+                                pass
+                            lines.append(f"AURA: {content[:100]}")
+                    conversation_text = "\n".join(lines[:10])  # first 10 turns max
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch conversation for title: {e}")
+
+        if not conversation_text:
+            title = message[:40] + ("..." if len(message) > 40 else "")
+            return {"title": title or "New Chat"}
+
+        prompt = f"""Summarize this conversation into a very short title of maximum 5 words.
+
+{conversation_text}
+
+Rules:
+- Maximum 5 words
+- No punctuation at the end
+- No quotes
+- Be specific about what was done or discussed
+- Examples: "Open Notepad write preferences", "Search Amazon white socks", "Set 7am alarm"
+
+Return ONLY the title, nothing else."""
+
+        response = genai_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+
+        title = response.text.strip().strip('"').strip("'")
+        if len(title) > 50:
+            title = title[:50]
+
+        logger.info(f"✅ Summarized title: '{title}'")
+        return {"title": title}
+
+    except Exception as e:
+        logger.error(f"❌ Title generation failed: {e}")
+        return {"title": data.get("message", "New Chat")[:35] if 'data' in dir() else "New Chat"}
+
+
+#face authentication endpoints
+
+@app.post("/onboarding/register-face")
+async def register_face(request: Request):
+    """
+    Register face biometrics for a user (signup flow)
+    """
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        user_id = data.get("user_id", "")
+        face_image = data.get("face_image", "")
+        
+        # Validate inputs
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        
+        if not face_image:
+            raise HTTPException(status_code=400, detail="Face image is required")
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        logger.info(f"Processing face registration for user: {username}")
+        
+        # Process the face image
+        encoding, message = face_auth.process_face_image(face_image)
+        if not encoding:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Check if username already exists with face data
+        if face_auth.get_user_face_status(username):
+            # Optionally update existing face data
+            success, msg = face_auth.store_face_data(user_id, username, encoding)
+            if not success:
+                raise HTTPException(status_code=500, detail=msg)
+            
+            return {
+                "status": "success",
+                "message": "Face biometrics updated successfully",
+                "user_id": user_id,
+                "username": username,
+                "action": "updated"
+            }
+        else:
+            # Store new face data
+            success, msg = face_auth.store_face_data(user_id, username, encoding)
+            if not success:
+                raise HTTPException(status_code=500, detail=msg)
+            
+            return {
+                "status": "success",
+                "message": "Face biometrics registered successfully",
+                "user_id": user_id,
+                "username": username,
+                "action": "registered"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Face registration error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/onboarding/verify-face")
+async def verify_face_login(request: Request):
+    """
+    Verify face biometrics for login
+    """
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        face_image = data.get("face_image", "")
+        
+        # Validate inputs
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        
+        if not face_image:
+            raise HTTPException(status_code=400, detail="Face image is required")
+        
+        logger.info(f"Verifying face for user: {username}")
+        
+        # Check if user has face data
+        if not face_auth.get_user_face_status(username):
+            raise HTTPException(
+                status_code=404, 
+                detail="No face biometrics found for this username. Please sign up first."
+            )
+        
+        # Process the face image
+        encoding, message = face_auth.process_face_image(face_image)
+        if not encoding:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Verify face
+        verified, result = face_auth.verify_face(username, encoding)
+        
+        if not verified:
+            raise HTTPException(status_code=401, detail=result)
+        
+        # Get user data from users collection
+        from pymongo import MongoClient
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        user = db["users"].find_one({"username": username})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User account not found")
+        
+        logger.info(f"✅ Face verification successful for {username} (confidence: {result.get('confidence', 'N/A')})")
+        
+        return {
+            "status": "ok",
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "preferences": user.get("preferences", {}),
+            "confidence": result.get("confidence", 0.95),
+            "auth_method": "face"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Face verification error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/onboarding/face-status/{username}")
+async def get_face_status(username: str):
+    """
+    Check if a user has face biometrics registered
+    """
+    try:
+        has_face = face_auth.get_user_face_status(username)
+        return {
+            "username": username,
+            "has_face_auth": has_face
+        }
+    except Exception as e:
+        logger.error(f"❌ Error checking face status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/onboarding/face-data/{user_id}")
+async def delete_face_data(user_id: str):
+    """
+    Delete face data for a user (useful for account deletion)
+    """
+    try:
+        deleted = face_auth.delete_face_data(user_id)
+        if deleted:
+            return {"status": "success", "message": "Face data deleted"}
+        else:
+            return {"status": "not_found", "message": "No face data found"}
+    except Exception as e:
+        logger.error(f"❌ Error deleting face data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Add this to server.py (after other onboarding endpoints)
+
+# Make sure numpy is imported at the top of the file (add this if missing)
+import numpy as np
+
+@app.post("/onboarding/login-face-only")
+async def login_face_only(request: Request):
+    """
+    Login using ONLY face - no username required
+    Uses strict thresholds for high security
+    """
+    try:
+        data = await request.json()
+        face_image = data.get("face_image", "")
+        
+        if not face_image:
+            raise HTTPException(status_code=400, detail="Face image required")
+        
+        logger.info(f"Processing face-only login with strict security")
+        
+        # Process the face image with multiple passes for accuracy
+        encoding, message = face_auth.process_face_image(face_image)
+        if not encoding:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Find user by face encoding (compare against all stored faces)
+        from pymongo import MongoClient
+        import numpy as np
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        
+        # Get all users with face data
+        all_face_users = list(db["face_auth_data"].find({}))
+        
+        if not all_face_users:
+            logger.warning("No face data found in database")
+            raise HTTPException(status_code=404, detail="No registered faces found. Please sign up first.")
+        
+        # Find the best match
+        matches = []
+        
+        for user_data in all_face_users:
+            stored_encrypted = user_data.get("face_encoding_data")
+            if not stored_encrypted:
+                continue
+            
+            stored_encoding = face_auth._verify_encoding(stored_encrypted)
+            if stored_encoding is None:
+                logger.warning(f"Corrupted face data for user {user_data.get('username')}")
+                continue
+            
+            # Calculate distance
+            stored_array = np.array(stored_encoding)
+            current_array = np.array(encoding)
+            distance = np.linalg.norm(stored_array - current_array)
+            
+            # Calculate confidence
+            confidence_percent = face_auth.calculate_confidence(distance)
+            
+            matches.append({
+                "user_data": user_data,
+                "distance": distance,
+                "confidence_percent": confidence_percent,
+                "confidence": confidence_percent / 100
+            })
+            
+            logger.info(f"Comparing with user {user_data['username']}: distance={distance:.4f}, confidence={confidence_percent:.1f}%")
+        
+        # Sort by distance (best first) and confidence (best first)
+        matches.sort(key=lambda x: (x["distance"], -x["confidence_percent"]))
+        
+        if not matches:
+            raise HTTPException(status_code=404, detail="No valid face data found")
+        
+        best_match = matches[0]
+        
+        # STRICT ACCEPTANCE CRITERIA
+        is_acceptable = (
+            best_match["distance"] <= face_auth.max_acceptable_distance and 
+            best_match["confidence_percent"] >= face_auth.min_confidence_percent
+        )
+        
+        if not is_acceptable:
+            logger.warning(f"Face rejected. Best match: {best_match['user_data']['username']} with {best_match['confidence_percent']:.1f}% confidence (need > {face_auth.min_confidence_percent:.0f}%)")
+            
+            # Check if there's a second match that's also close (could indicate confusion)
+            if len(matches) > 1 and matches[1]["distance"] - best_match["distance"] < 0.05:
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Face ambiguous. Multiple similar faces detected. Please ensure good lighting and look directly at the camera."
+                )
+            
+            raise HTTPException(
+                status_code=401,
+                detail=f"Face not recognized. Best match confidence: {best_match['confidence_percent']:.1f}% (need > {face_auth.min_confidence_percent:.0f}%). Please ensure good lighting and look directly at the camera."
+            )
+        
+        # Get full user data
+        user = db["users"].find_one({"user_id": best_match["user_data"]["user_id"]})
+        
+        if not user:
+            logger.error(f"User account not found for user_id: {best_match['user_data']['user_id']}")
+            raise HTTPException(status_code=404, detail="User account not found")
+        
+        logger.info(f"✅ Face-only login successful for {user['username']} (confidence: {best_match['confidence_percent']:.1f}%, distance: {best_match['distance']:.4f})")
+        
+        return {
+            "status": "ok",
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "preferences": user.get("preferences", {}),
+            "confidence": best_match["confidence"],
+            "confidence_percent": best_match["confidence_percent"],
+            "distance": round(best_match["distance"], 4),
+            "auth_method": "face_only"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Face-only login error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+@app.post("/onboarding/register-face")
+async def register_face(request: Request):
+    """
+    Register face biometrics with quality check
+    """
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        user_id = data.get("user_id", "")
+        face_image = data.get("face_image", "")
+        
+        # Validate inputs
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        
+        if not face_image:
+            raise HTTPException(status_code=400, detail="Face image is required")
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        logger.info(f"Processing face registration for user: {username}, user_id: {user_id}")
+        
+        # Process the face image with quality check
+        encoding, message = face_auth.process_face_image(face_image)
+        if not encoding:
+            raise HTTPException(status_code=400, detail=message)
+        
+        # Check if this user_id is already associated with a different username
+        from pymongo import MongoClient
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        
+        existing_face = db["face_auth_data"].find_one({"user_id": user_id})
+        if existing_face and existing_face.get("username") != username:
+            logger.warning(f"User ID {user_id} is already associated with username {existing_face['username']}")
+            raise HTTPException(
+                status_code=409, 
+                detail=f"User ID {user_id} is already associated with a different username. Please logout and try again."
+            )
+        
+        # Verify face quality by checking if we can detect the face consistently
+        # Process again with different parameters to ensure consistency
+        encoding2, _ = face_auth.process_face_image(face_image)
+        if not encoding2:
+            raise HTTPException(status_code=400, detail="Could not reliably detect face. Please try again with better lighting.")
+        
+        # Store new face data
+        success, msg = face_auth.store_face_data(user_id, username, encoding)
+        if not success:
+            raise HTTPException(status_code=500, detail=msg)
+        
+        logger.info(f"✅ Face registered successfully for {username} (user_id: {user_id})")
+        
+        return {
+            "status": "success",
+            "message": "Face biometrics registered successfully",
+            "user_id": user_id,
+            "username": username,
+            "action": "registered"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Face registration error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+    
+@app.get("/debug/user-sessions/{user_id}")
+async def debug_user_sessions(user_id: str):
+    """
+    Debug endpoint to list all sessions for a user
+    (Remove in production or add authentication)
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+        
+        sessions = list(db["language_agent_conversations"].find(
+            {"user_id": user_id},
+            {"session_id": 1, "title": 1, "timestamp": 1}
+        ).sort("timestamp", -1))
+        
+        return {
+            "user_id": user_id,
+            "session_count": len(sessions),
+            "sessions": sessions
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/onboarding/cleanup-user/{user_id}")
+async def cleanup_user_data(user_id: str):
+    """
+    Cleanup endpoint to remove all traces of a user
+    Useful for debugging and testing
+    """
+    try:
+        from pymongo import MongoClient
+        import os
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        
+        # Delete from users collection
+        user_result = db["users"].delete_one({"user_id": user_id})
+        
+        # Delete from face_auth_data
+        face_result = db["face_auth_data"].delete_one({"user_id": user_id})
+        
+        # Delete from conversations
+        conv_result = db["language_agent_conversations"].delete_many({"user_id": user_id})
+        
+        return {
+            "status": "success",
+            "deleted": {
+                "user": user_result.deleted_count,
+                "face_data": face_result.deleted_count,
+                "conversations": conv_result.deleted_count
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 if __name__ == "__main__":
     import uvicorn

@@ -80,11 +80,13 @@ opencv-python>=4.7.0
 ultralytics>=8.0.0  # For YOLO model
 gtts
 
-pyautogui
-docker
-playwright
 # Anthropic
 anthropic
 
 # devDependencies
 sentence-transformers
+# Install required Python packages
+face-recognition
+opencv-python
+numpy
+python-multipart

@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+// OnboardingPage.jsx - Fully Fixed with Proper User ID Management
+import React, { useState, useEffect } from "react";
 import StepIntro from "./StepIntro";
 import StepUserIntro from "./StepUserIntro";
 import StepPreferences from "./StepPreferences";
@@ -23,6 +24,33 @@ const OnboardingPage = ({ userId, onComplete }) => {
     },
   });
 
+  // CRITICAL: Ensure the correct userId is stored in localStorage
+  useEffect(() => {
+    console.log("[OnboardingPage] Current userId from props:", userId);
+    
+    // Check if we have a valid userId
+    if (!userId || userId === "undefined" || userId === "null") {
+      console.error("[OnboardingPage] Invalid userId received:", userId);
+      // Generate a new userId if invalid
+      const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      console.log("[OnboardingPage] Generated new userId:", newUserId);
+      localStorage.setItem("userId", newUserId);
+    } else {
+      // Sync localStorage with the userId from props
+      const storedUserId = localStorage.getItem("userId");
+      if (storedUserId !== userId) {
+        console.log("[OnboardingPage] Syncing localStorage userId from", storedUserId, "to", userId);
+        localStorage.setItem("userId", userId);
+      }
+    }
+    
+    // Log the current state for debugging
+    console.log("[OnboardingPage] Form data:", {
+      username: formData.username,
+      preferences: formData.preferences
+    });
+  }, [userId, formData.username, formData.preferences]);
+
   const next = () => setStep((s) => Math.min(s + 1, TOTAL_STEPS - 1));
 
   const handleFinalSubmit = async () => {
@@ -30,8 +58,21 @@ const OnboardingPage = ({ userId, onComplete }) => {
     setError("");
 
     try {
+      // Get the current userId from localStorage (should be synced)
+      const currentUserId = localStorage.getItem("userId");
+      
+      if (!currentUserId) {
+        throw new Error("User ID not found. Please restart onboarding.");
+      }
+      
+      console.log("[OnboardingPage] Submitting account creation for:", {
+        user_id: currentUserId,
+        username: formData.username,
+        has_password: !!formData.password
+      });
+      
       const payload = {
-        user_id: userId,
+        user_id: currentUserId,
         username: formData.username,
         password: formData.password,
         introduction: formData.introduction,
@@ -49,19 +90,27 @@ const OnboardingPage = ({ userId, onComplete }) => {
         throw new Error(data.detail || "Account creation failed");
       }
 
-      // Persist onboarding state so we never show it again
+      console.log("[OnboardingPage] Account created successfully for:", formData.username);
+      
+      // Persist onboarding state
       localStorage.setItem("onboardingComplete", "true");
       localStorage.setItem("userName", formData.username);
       localStorage.setItem("ttsVoice", formData.preferences.voice);
+      
+      // Ensure userId is still correct
+      const finalUserId = localStorage.getItem("userId");
+      console.log("[OnboardingPage] Final userId after account creation:", finalUserId);
 
-      // Tell App.jsx we're done
+      // Call the onComplete callback to transition to main app
       onComplete({
+        userId: finalUserId,
         username: formData.username,
         preferences: formData.preferences,
       });
+      
     } catch (err) {
+      console.error("[OnboardingPage] Account creation error:", err);
       setError(err.message || "Something went wrong. Please try again.");
-    } finally {
       setIsSubmitting(false);
     }
   };

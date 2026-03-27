@@ -247,7 +247,9 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
             "error": result.error,
         }
 
-    combined = " ".join(filter(None, [result.error, result.details, result.content])).lower()
+    # Safely access details field (may not exist for MobileTaskResult)
+    details = getattr(result, 'details', '')
+    combined = " ".join(filter(None, [result.error, details, result.content])).lower()
     if not combined:
         return None
 
@@ -1557,26 +1559,21 @@ def create_coordinator_graph():
 COMPLETED TASK:
 {json.dumps(task_summary, indent=2)}
 
-Extract facts in these categories:
-1. TOOLS: Apps/sites the user regularly uses (e.g., "Uses Gmail for email", "Uses Chrome as browser")
-2. CONTACTS: People/emails the user interacts with (e.g., "Frequently emails shahd2202743@miuegypt.edu.eg")
-3. PATTERNS: How the user works (e.g., "Sends emails with short subjects", "Opens YouTube for videos")
-4. ACCOUNTS: Accounts the user has (e.g., "Has Gmail account hala2206898@miuegypt.edu.eg") - NO PASSWORDS EVER
-
-Be generous. If something appeared in the task, it is worth remembering.
-One-time actions still reveal user patterns (e.g., sent email means user uses email).
-Always extract at least 1-2 facts unless the task was purely system-level with no user data.
+RULES:
+- Only extract repeatable preferences (app choices, workflows, patterns)
+- Ignore one-time actions
+- Format as clear statements
 
 OUTPUT FORMAT (JSON array):
 [
   {{
-    "preference": "Uses Gmail for sending emails",
+    "preference": "User prefers Chrome for web browsing",
     "category": "app_usage",
     "confidence": "high"
   }}
 ]
 
-If truly nothing useful (e.g. task was just opening notepad with no user data), return: []
+If NO preferences, return: []
 
 Extract now:"""
                 
@@ -1597,50 +1594,21 @@ Extract now:"""
                             )
                             logger.info(f"💾 Stored preference: {pref_obj['preference']}")
                 
-                #chnage done here
-                apps_used = list(set(
-                    t.extra_params.get("app_name", "")
-                    for t in state.get("tasks", [])
-                    if hasattr(t, "extra_params") and t.extra_params.get("app_name")
-                ))
-                contexts_used = list(set(
-                    t.context
-                    for t in state.get("tasks", [])
-                    if hasattr(t, "context")
-                ))
-                apps_used_str = ", ".join(filter(None, apps_used)) if apps_used else "none recorded"
-                
-                conversation_context = (
-                    f"User completed task: {task_summary['original_request']}. "
-                    f"Apps used: {apps_used_str}. "
-                    f"Task types: {', '.join(contexts_used)}. "
-                    f"Steps taken: {success_count}."
-                )
+                conversation_context = f"User requested: {task_summary['original_request']}. "
+                conversation_context += f"Successfully completed {success_count} steps."
                 
                 pref_mgr.add_preference(
                     conversation_context,
                     metadata={
                         "category": "conversation_history",
                         "session_id": session_id,
-                        "timestamp": datetime.now().isoformat(),
-                        "apps_used": apps_used,
-                        "steps": success_count,
-                        "original_request": task_summary["original_request"]
+                        "timestamp": datetime.now().isoformat()
                     }
                 )
                 
-# ──            Run pattern learning after storing memories ───────────────
-                try:
-                    from agents.coordinator_agent.memory.pattern_learner import run_pattern_learning
-                    new_patterns = run_pattern_learning(user_id, pref_mgr)
-                    if new_patterns > 0:
-                        logger.info(f"🧠 {new_patterns} new behavioral patterns learned for {user_id}")
-                except Exception as pattern_err:
-                    logger.warning(f"⚠️ Pattern learning failed (non-fatal): {pattern_err}")
-                
             except Exception as e:
                 logger.error(f"❌ Failed to store preferences: {e}")
-
+        
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
         
@@ -1711,7 +1679,7 @@ async def execute_single_task(
             return TaskResult(
                 task_id=task.task_id,
                 status=result.status,
-                content=result.details,
+                content=getattr(result, 'details', '') or getattr(result, 'content', '') or '',
                 error=result.error
             )
         except Exception as e:
@@ -1780,6 +1748,10 @@ async def execute_single_task(
         content = result_payload.get("content")
         if not content:
             content = result_payload.get("details")
+
+        # Fix Pydantic validation error: Convert dict content to JSON string
+        if isinstance(content, dict):
+            content = json.dumps(content, indent=2)  # Pretty format for readability
 
         return TaskResult(
             task_id=task.task_id,

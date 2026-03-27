@@ -1094,9 +1094,25 @@ def create_coordinator_graph():
 
         if checkpointer and session_id:
             try:
+                # execution_state={
+                #     "completed_task_ids": list(results.keys()),
+                #     "failed_task_ids":task_queue.get_failed_index(),
+                #     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
+                #     "timestamp": datetime.now().isoformat()
+                # }
+                # Get failed task IDs from execution history
+                failed_task_ids = []
+                for entry in task_queue.execution_history:
+                    if entry.get("result", {}).get("status") == "failed":
+                        task_data = entry.get("task", {})
+                        if isinstance(task_data, dict):
+                            failed_task_ids.append(task_data.get("task_id", ""))
+                        elif hasattr(task_data, "task_id"):
+                            failed_task_ids.append(task_data.task_id)
+                
                 execution_state={
                     "completed_task_ids": list(results.keys()),
-                    "failed_task_ids":task_queue.get_failed_index(),
+                    "failed_task_ids": failed_task_ids,
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
@@ -1589,7 +1605,7 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            pref_mgr.add_preference(
+                            pref_mgr.add_preference_zero_token(
                                 pref_obj["preference"],
                                 metadata={
                                     "category": pref_obj.get("category", "general"),
@@ -1599,15 +1615,34 @@ Extract now:"""
                             )
                             logger.info(f"💾 Stored preference: {pref_obj['preference']}")
                 
-                conversation_context = f"User requested: {task_summary['original_request']}. "
-                conversation_context += f"Successfully completed {success_count} steps."
+                apps_used = list(set(
+                    t.extra_params.get("app_name", "")
+                    for t in state.get("tasks", [])
+                    if hasattr(t, "extra_params") and t.extra_params.get("app_name")
+                ))
+                contexts_used = list(set(
+                    t.context
+                    for t in state.get("tasks", [])
+                    if hasattr(t, "context")
+                ))
+                apps_used_str = ", ".join(filter(None, apps_used)) if apps_used else "none recorded"
                 
-                pref_mgr.add_preference(
+                conversation_context = (
+                    f"User completed task: {task_summary['original_request']}. "
+                    f"Apps used: {apps_used_str}. "
+                    f"Task types: {', '.join(contexts_used)}. "
+                    f"Steps taken: {success_count}."
+                )
+                
+                pref_mgr.add_preference_zero_token(
                     conversation_context,
                     metadata={
                         "category": "conversation_history",
                         "session_id": session_id,
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
+                        "apps_used": apps_used,
+                        "steps": success_count,
+                        "original_request": task_summary["original_request"]
                     }
                 )
                 

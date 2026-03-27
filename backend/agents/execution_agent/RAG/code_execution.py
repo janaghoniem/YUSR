@@ -649,64 +649,64 @@ class CoordinatorRAGBridge:
                 # ========================================================================
                 # NEW: Try OmniParser detection if error suggests element not found
                 # ========================================================================
-            #     if any(keyword in error_context.lower() for keyword in 
-            #         [
-            #             'not found', 'cannot find', 'no such element', 'failed to locate',
-            #             'modulenotfounderror', 'importerror',
-            #             'pywinauto', 'uiautomation',
-            #             'element', 'button', 'window',
-            #             'failed:', 'error:',
-            #             'locateonscreen'
-            #         ]):
+                if any(keyword in error_context.lower() for keyword in 
+                    [
+                        'not found', 'cannot find', 'no such element', 'failed to locate',
+                        'modulenotfounderror', 'importerror',
+                        'pywinauto', 'uiautomation',
+                        'element', 'button', 'window',
+                        'failed:', 'error:',
+                        'locateonscreen'
+                    ]):
 
-            #         logger.info(f"🔍 OmniParser trigger check:")
-            #         logger.info(f"   Error context: {error_context[:200]}")
-            #         logger.info(f"   Attempting OmniParser fallback...")
+                    logger.info(f"🔍 OmniParser trigger check:")
+                    logger.info(f"   Error context: {error_context[:200]}")
+                    logger.info(f"   Attempting OmniParser fallback...")
                                                     
-            #         logger.warning("🔍 Error suggests element detection issue - trying OmniParser...")
+                    logger.warning("🔍 Error suggests element detection issue - trying OmniParser...")
                     
-            #         # Extract what to look for
-            #         element_desc = self._extract_element_description(task, error_context)
+                    # Extract what to look for
+                    element_desc = self._extract_element_description(task, error_context)
                     
-            #         if element_desc is None:
-            #             logger.info("⏭️ Skipping OmniParser - not a UI interaction task")
-            #             # Don't continue here - let it retry with next context
-            #         elif element_desc:
-            #             # Try to detect coordinates
-            #             logger.info(f"🎯 Valid UI element detected: '{element_desc}'")
-            #             coords = self._detect_element_coordinates(element_desc)
+                    if element_desc is None:
+                        logger.info("⏭️ Skipping OmniParser - not a UI interaction task")
+                        # Don't continue here - let it retry with next context
+                    elif element_desc:
+                        # Try to detect coordinates
+                        logger.info(f"🎯 Valid UI element detected: '{element_desc}'")
+                        coords = self._detect_element_coordinates(element_desc)
                         
-            #             if coords:
-            #                 logger.info(f"✅ OmniParser found element at {coords}!")
+                        if coords:
+                            logger.info(f"✅ OmniParser found element at {coords}!")
                             
-            #                 # Generate new code with exact coordinates
-            #                 new_code = self._regenerate_code_with_coordinates(
-            #                     task, coords, element_desc
-            #                 )
+                            # Generate new code with exact coordinates
+                            new_code = self._regenerate_code_with_coordinates(
+                                task, coords, element_desc
+                            )
                             
-            #                 # Execute the new code
-            #                 logger.info("🔄 Executing OmniParser-assisted code...")
-            #                 logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
+                            # Execute the new code
+                            logger.info("🔄 Executing OmniParser-assisted code...")
+                            logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
                             
-            #                 exec_result = self.sandbox.execute_code(
-            #                     code=new_code,
-            #                     use_docker=False,
-            #                     retry_on_failure=False
-            #                 )
+                            exec_result = self.sandbox.execute_code(
+                                code=new_code,
+                                use_docker=False,
+                                retry_on_failure=False
+                            )
                             
-            #                 if exec_result.validation_passed and exec_result.security_passed:
-            #                     logger.info(f"✅✅✅ Task succeeded with OmniParser assistance!")
-            #                     return self.adapter.execution_result_to_task_result(task, exec_result)
-            #                 else:
-            #                     logger.warning("⚠️ OmniParser-assisted code also failed")
-            #                     logger.debug(f"OmniParser execution stdout: {exec_result.stdout}")
-            #                     logger.debug(f"OmniParser execution stderr: {exec_result.stderr}")
-            #             else:
-            #                 logger.warning(f"❌ OmniParser couldn't find: '{element_desc}'")
+                            if exec_result.validation_passed and exec_result.security_passed:
+                                logger.info(f"✅✅✅ Task succeeded with OmniParser assistance!")
+                                return self.adapter.execution_result_to_task_result(task, exec_result)
+                            else:
+                                logger.warning("⚠️ OmniParser-assisted code also failed")
+                                logger.debug(f"OmniParser execution stdout: {exec_result.stdout}")
+                                logger.debug(f"OmniParser execution stderr: {exec_result.stderr}")
+                        else:
+                            logger.warning(f"❌ OmniParser couldn't find: '{element_desc}'")
                 
-            #     logger.debug(f"Error context for retry: {error_context}")
+                logger.debug(f"Error context for retry: {error_context}")
                 
-            #     start_context_index += self.rag.config.top_k
+                start_context_index += self.rag.config.top_k
                 
             except Exception as e:
                 logger.error(f"❌ Exception during RAG execution: {e}")

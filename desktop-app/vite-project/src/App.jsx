@@ -6,12 +6,14 @@ import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
-import OnboardingPage from "./components/onboarding/OnboardingPage"; 
+import OnboardingPage from "./components/onboarding/OnboardingPage";
+import SplashScreen from "./components/splash/SplashScreen";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
 function App() {
   /* ---------- STATE ---------- */
+  const [showSplash, setShowSplash] = useState(true);
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
@@ -1387,6 +1389,8 @@ function App() {
 
   return (
     <>
+      {showSplash && <SplashScreen onFinish={() => setShowSplash(false)} />}
+      
       {showOnboarding ? (
         <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
       ) : (

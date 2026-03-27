@@ -2,7 +2,8 @@
 import 'package:google_fonts/google_fonts.dart';
 
 class AuraTheme {
-  static const Color pink50 = Color(0xFFFFF0F8);
+  // ─── Pink palette ─────────────────────────────────────────────────────────
+  static const Color pink50  = Color(0xFFFFF0F8);
   static const Color pink100 = Color(0xFFFFD6EF);
   static const Color pink200 = Color(0xFFFFAEDD);
   static const Color pink300 = Color(0xFFFF80C0);
@@ -13,82 +14,86 @@ class AuraTheme {
   static const Color pink800 = Color(0xFF700040);
   static const Color pink900 = Color(0xFF47002A);
 
-  static const Color bgBase = Color(0xFF0F0C0A);
-  static const Color bgSurface = Color(0xFF19140F);
-  static const Color bgElevated = Color(0xFF231B15);
-  static const Color bgOverlay = Color(0xFF2D2319);
-  static const Color bgMuted = Color(0xFF3D3028);
+  // ─── Background scale ─────────────────────────────────────────────────────
+  static const Color bgBase     = Color(0xFF0A0908);
+  static const Color bgSurface  = Color(0xFF141110);
+  static const Color bgElevated = Color(0xFF1E1816);
+  static const Color bgOverlay  = Color(0xFF272018);
+  static const Color bgMuted    = Color(0xFF363028);
 
-  static const Color textPrimary = Color(0xFFF5F0EB);
-  static const Color textSecondary = Color(0xFFBFB3A8);
-  static const Color textMuted = Color(0xFF8A7D72);
-  static const Color textDisabled = Color(0xFF5A5048);
+  // ─── Text scale ───────────────────────────────────────────────────────────
+  static const Color textPrimary   = Color(0xFFF6F1EC);
+  static const Color textSecondary = Color(0xFFBEB2A7);
+  static const Color textMuted     = Color(0xFF887B70);
+  static const Color textDisabled  = Color(0xFF564E46);
 
-  static const Color error = Color(0xFFFF6B6B);
+  // ─── Semantic ─────────────────────────────────────────────────────────────
+  static const Color error   = Color(0xFFFF6B6B);
   static const Color success = Color(0xFF4DD68C);
   static const Color warning = Color(0xFFFFBA44);
 
+  // Semi-transparent accent used in controls
+  static const Color pink400Dull = Color(0x7FFF3D9A);
+
+  // ─── Theme ────────────────────────────────────────────────────────────────
   static ThemeData get darkTheme {
+    // Disable network font fetching entirely.
+    // This prevents the "Unable to load AssetManifest.json" crash on emulators
+    // and devices without internet access. The font must be bundled locally
+    // in pubspec.yaml under flutter > fonts.
+    GoogleFonts.config.allowRuntimeFetching = false;
+
+    // Base text style using the locally-bundled font family.
+    // Falls back to the device sans-serif if the font asset is missing.
+    const String fontFamily = 'PlusJakartaSans';
+
+    TextStyle t(
+      Color color, {
+      FontWeight weight = FontWeight.w400,
+      double? size,
+      double spacing = 0,
+    }) =>
+        TextStyle(
+          fontFamily: fontFamily,
+          color: color,
+          fontWeight: weight,
+          fontSize: size,
+          letterSpacing: spacing,
+        );
+
     return ThemeData(
       brightness: Brightness.dark,
       primaryColor: pink400,
       scaffoldBackgroundColor: bgBase,
       canvasColor: bgSurface,
       cardColor: bgElevated,
-      textTheme: GoogleFonts.dmSansTextTheme(
-        ThemeData.dark().textTheme,
-      ).copyWith(
-        displayLarge: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        displayMedium: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        displaySmall: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        headlineLarge: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        headlineMedium: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        headlineSmall: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        titleLarge: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        titleMedium: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        titleSmall: GoogleFonts.dmSans(
-          color: textPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-        bodyLarge: GoogleFonts.dmSans(color: textPrimary),
-        bodyMedium: GoogleFonts.dmSans(color: textPrimary),
-        bodySmall: GoogleFonts.dmSans(color: textSecondary),
-        labelLarge: GoogleFonts.dmSans(color: textSecondary),
-        labelMedium: GoogleFonts.dmSans(color: textSecondary),
-        labelSmall: GoogleFonts.dmSans(color: textMuted),
+      fontFamily: fontFamily,
+      textTheme: ThemeData.dark().textTheme.copyWith(
+        displayLarge:   t(textPrimary, weight: FontWeight.w600),
+        displayMedium:  t(textPrimary, weight: FontWeight.w600),
+        displaySmall:   t(textPrimary, weight: FontWeight.w600),
+        headlineLarge:  t(textPrimary, weight: FontWeight.w600),
+        headlineMedium: t(textPrimary, weight: FontWeight.w600),
+        headlineSmall:  t(textPrimary, weight: FontWeight.w600),
+        titleLarge:     t(textPrimary, weight: FontWeight.w600),
+        titleMedium:    t(textPrimary, weight: FontWeight.w600),
+        titleSmall:     t(textPrimary, weight: FontWeight.w500),
+        bodyLarge:      t(textPrimary),
+        bodyMedium:     t(textPrimary),
+        bodySmall:      t(textSecondary),
+        labelLarge:     t(textSecondary),
+        labelMedium:    t(textSecondary),
+        labelSmall:     t(textMuted),
       ),
-      appBarTheme: const AppBarTheme(
+      appBarTheme: AppBarTheme(
         backgroundColor: bgBase,
         elevation: 0,
-        iconTheme: IconThemeData(color: textPrimary),
-        titleTextStyle: TextStyle(
-          color: textPrimary,
-          fontSize: 20,
-          fontWeight: FontWeight.w600,
+        surfaceTintColor: Colors.transparent,
+        iconTheme: const IconThemeData(color: textPrimary),
+        titleTextStyle: t(textPrimary,
+          weight: FontWeight.w600,
+          size: 18,
+          spacing: -0.3,
         ),
       ),
       colorScheme: const ColorScheme.dark(
@@ -101,8 +106,8 @@ class AuraTheme {
         onSurface: textPrimary,
         onError: textPrimary,
       ).copyWith(surface: bgBase),
+      splashFactory: InkRipple.splashFactory,
+      highlightColor: Colors.transparent,
     );
   }
-
-  static const Color pink400Dull = Color(0x7FFF3D9A);
 }

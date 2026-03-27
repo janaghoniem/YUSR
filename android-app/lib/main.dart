@@ -1,14 +1,31 @@
-﻿import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
-import 'package:google_fonts/google_fonts.dart';
+
 import 'package:audioplayers/audioplayers.dart';
-import 'theme.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:video_player/video_player.dart';
+
 import 'screens/startup_screen.dart';
+import 'theme.dart';
 import 'widgets/task_execution_border.dart';
+
+// Convenience helper — plain TextStyle, no google_fonts network call
+TextStyle _f(
+  Color color, {
+  FontWeight weight = FontWeight.w400,
+  double size = 14,
+  double spacing = 0,
+  double height = 1.4,
+}) => TextStyle(
+  fontFamily: 'PlusJakartaSans',
+  color: color,
+  fontWeight: weight,
+  fontSize: size,
+  letterSpacing: spacing,
+  height: height,
+);
 
 void main() {
   runApp(const MyApp());
@@ -16,10 +33,10 @@ void main() {
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'AURA',
       theme: AuraTheme.darkTheme,
       home: const StartupScreen(),
@@ -27,19 +44,16 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// Device Manager - Handles communication with backend
+// ─── Device Manager ───────────────────────────────────────────────────────────
 class DeviceManager {
-  static Function(String)? onTypeReceived;
-  static const String BACKEND_URL =
-      'http://10.0.2.2:8000'; // Android emulator localhost
-  static const String DEVICE_ID = 'android_device_1';
-  static const platform = MethodChannel('com.example.automation/service');
+  static const String backendUrl = 'http://10.0.2.2:8000';
+  static const String deviceId = 'android_device_1';
+  static const _platform = MethodChannel('com.example.automation/service');
 
-  // Register device with backend
   static Future<bool> registerDevice() async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/register'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'name': 'Flutter Device',
@@ -49,47 +63,29 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-
-      if (response.statusCode == 200) {
-        debugPrint('âœ… Device registered successfully');
-        return true;
-      } else {
-        debugPrint('âŒ Device registration failed: ${response.statusCode}');
-        return false;
-      }
-    } catch (e) {
-      debugPrint('âŒ Error registering device: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Send UI tree to backend
-  static Future<bool> sendUITree(Map<String, dynamic> uiTree) async {
+  static Future<bool> sendUITree(Map<String, dynamic> tree) async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/ui-tree'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/ui-tree'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(uiTree),
+        body: jsonEncode(tree),
       );
-
-      if (response.statusCode == 200) {
-        debugPrint('âœ… UI tree sent successfully');
-        return true;
-      } else {
-        debugPrint('âŒ Failed to send UI tree: ${response.statusCode}');
-        return false;
-      }
-    } catch (e) {
-      debugPrint('âŒ Error sending UI tree: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Send device status
   static Future<bool> sendStatus() async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/status'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/status'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'status': 'online',
@@ -98,205 +94,99 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-
-      if (response.statusCode == 200) {
-        return true;
-      }
-      return false;
-    } catch (e) {
-      debugPrint('âŒ Error sending status: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Get UI tree from real Android device via Accessibility API
   static Future<Map<String, dynamic>> getAccessibilityTree() async {
     try {
-      debugPrint('ðŸ“¡ Fetching accessibility tree from device...');
-      final result = await platform.invokeMethod('getAccessibilityTree');
-
-      if (result is String) {
-        final tree = jsonDecode(result) as Map<String, dynamic>;
-        debugPrint(
-          'âœ… Got accessibility tree: ${tree['app_name']} - ${tree['screen_name']}',
-        );
-        debugPrint('   Elements: ${(tree['elements'] as List?)?.length ?? 0}');
-        return tree;
-      } else if (result is Map) {
-        return Map<String, dynamic>.from(result);
-      }
-
+      final result = await _platform.invokeMethod('getAccessibilityTree');
+      if (result is String) return jsonDecode(result) as Map<String, dynamic>;
+      if (result is Map) return Map<String, dynamic>.from(result);
       return {};
-    } catch (e) {
-      debugPrint('âŒ Error getting accessibility tree: $e');
+    } catch (_) {
       return {};
     }
   }
 
-  /// Execute actions via MethodChannel
   static Future<Map<String, dynamic>> executeAction(
     Map<String, dynamic> action,
   ) async {
     try {
-      final actionType = action['action_type'] ?? 'unknown';
-      final elementId = action['element_id'];
-      final text = action['text'];
-
-      debugPrint('ðŸŽ¬ Executing action: $actionType');
-
-      switch (actionType) {
+      final type = action['action_type'] ?? '';
+      switch (type) {
         case 'click':
-          debugPrint('   ðŸ“Œ Executing click on element $elementId');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'click',
-              'element_id': elementId,
-            });
-
-            debugPrint('   âœ… Click executed successfully');
-            await Future.delayed(const Duration(milliseconds: 1500));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-              debugPrint('   âœ… Updated backend with real UI tree');
-            }
-          } catch (e) {
-            debugPrint('   âŒ Error executing click: $e');
-            return {
-              'action_id': action['action_id'] ?? 'unknown',
-              'success': false,
-              'error': 'Click failed: $e',
-              'execution_time_ms': 0,
-            };
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'click',
+            'element_id': action['element_id'],
+          });
+          await Future.delayed(const Duration(milliseconds: 1500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'type':
-          debugPrint('   âŒ¨ï¸  Executing Type: $text');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'type',
-              'element_id': elementId,
-              'text': text,
-            });
-
-            debugPrint('   âœ… Type executed successfully');
-            await Future.delayed(const Duration(milliseconds: 500));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-              debugPrint(
-                '   âœ… Updated UI tree after typing: $elementId = $text',
-              );
-            }
-          } catch (e) {
-            debugPrint(
-              '   âš ï¸  Type action completed but error updating UI: $e',
-            );
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'type',
+            'element_id': action['element_id'],
+            'text': action['text'],
+          });
+          await Future.delayed(const Duration(milliseconds: 500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'scroll':
-          final direction = action['direction'] ?? 'down';
-          debugPrint('   ðŸ“œ Scrolling $direction');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'scroll',
-              'direction': direction,
-            });
-
-            await Future.delayed(const Duration(milliseconds: 800));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   âŒ Error scrolling: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'scroll',
+            'direction': action['direction'] ?? 'down',
+          });
+          await Future.delayed(const Duration(milliseconds: 800));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'wait':
-          final duration = action['duration'] ?? 500;
-          debugPrint('   â±ï¸  Waiting ${duration}ms');
-          await Future.delayed(Duration(milliseconds: duration as int));
+          await Future.delayed(
+            Duration(milliseconds: (action['duration'] ?? 500) as int),
+          );
           break;
-
         case 'navigate_home':
         case 'goToHome':
-          debugPrint('   ðŸ  NAVIGATE HOME');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': 'HOME',
-            });
-
-            debugPrint('   âœ… HOME action executed');
-            await Future.delayed(const Duration(milliseconds: 2500));
-
-            final homeTree = await getAccessibilityTree();
-            if (homeTree.isNotEmpty) {
-              await sendUITree(homeTree);
-            }
-          } catch (e) {
-            debugPrint('   âŒ Error executing HOME: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': 'HOME',
+          });
+          await Future.delayed(const Duration(milliseconds: 2500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'navigate_back':
-          debugPrint('   â¬…ï¸  NAVIGATE BACK');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': 'BACK',
-            });
-
-            debugPrint('   âœ… BACK action executed');
-            await Future.delayed(const Duration(milliseconds: 1000));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   âŒ Error executing BACK: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': 'BACK',
+          });
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'global_action':
-          final actionName =
+          final name =
               action['global_action'] ?? action['action_name'] ?? 'HOME';
-          debugPrint('   ðŸ”˜ Performing global action: $actionName');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': actionName,
-            });
-
-            await Future.delayed(const Duration(milliseconds: 1000));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   âŒ Error executing global action: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': name,
+          });
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
-        default:
-          debugPrint('   â“ Unknown action type: $actionType');
       }
-
       return {
         'action_id': action['action_id'] ?? 'unknown',
         'success': true,
         'execution_time_ms': 100,
       };
     } catch (e) {
-      debugPrint('âŒ Error executing action: $e');
       return {
         'action_id': action['action_id'] ?? 'unknown',
         'success': false,
@@ -307,37 +197,29 @@ class DeviceManager {
   }
 }
 
-// Color Palette - Exact colors from reference
+// ─── App colours ──────────────────────────────────────────────────────────────
 class AppColors {
-  static const darkPlum1 = Color(0xFF280A25); // (40,10,37)
-  static const darkPlum2 = Color(0xFF401628); // (64,22,40)
-  static const darkPlum3 = Color(0xFF23071D); // (35,7,29)
-  static const darkPlum4 = Color(0xFF1B0E25); // (27,14,37)
-  static const darkPlum5 = Color(0xFF10011B); // (16,1,27)
-  static const darkPlum6 = Color(0xFF0C0114); // (12,1,20)
-  static const pink = Color(0xFFe91e63); // Bright pink accent
-  static const pinkDull = Color(0xFF9d4871); // Dull pink for inactive states
+  static const darkPlum4 = Color(0xFF1B0E25);
 }
 
+// ─── HomeWrapper / AutomationDemo ────────────────────────────────────────────
 class HomeWrapper extends StatelessWidget {
   const HomeWrapper({super.key});
-
   @override
-  Widget build(BuildContext context) {
-    return const AutomationDemo();
-  }
+  Widget build(BuildContext context) => const AutomationDemo();
 }
 
 class AutomationDemo extends StatefulWidget {
   const AutomationDemo({super.key});
-
   @override
   State<AutomationDemo> createState() => _AutomationDemoState();
 }
 
 class _AutomationDemoState extends State<AutomationDemo>
     with TickerProviderStateMixin {
-  static const platform = MethodChannel('com.example.automation/service');
+  static const _platform = MethodChannel('com.example.automation/service');
+
+  // ignore: unused_field
   String _status = 'Waiting...';
   bool _serviceEnabled = false;
   bool _isLoading = false;
@@ -345,23 +227,17 @@ class _AutomationDemoState extends State<AutomationDemo>
   bool _isSidebarOpen = false;
   bool _chatMode = false;
   bool _showSettings = false;
-  final String _settingsSection = 'profile';
 
-  final TextEditingController _textController = TextEditingController();
+  final TextEditingController _textCtrl = TextEditingController();
   String _responseText = '';
-  String _transcribedText = ''; // âœ… NEW: Store transcribed text separately
-  bool _isThinking = false; // âœ… NEW: Thinking indicator
-  final String _userName = 'User'; // Placeholder for user name
-  final String _userEmail = 'user@example.com';
-  final String _selectedTheme = 'Dark';
-  final String _selectedLanguage = 'English';
+  String _transcribedText = '';
+  bool _isThinking = false;
+  final String _userName = 'User';
 
   HttpServer? _actionServer;
-  late AnimationController _pulseController;
-  late AnimationController _thinkingController; // âœ… NEW: Thinking animation
-  late VideoPlayerController _videoController;
-
-  // âœ… NEW: Audio player for TTS
+  late AnimationController _pulseCtrl;
+  late AnimationController _thinkCtrl;
+  late VideoPlayerController _videoCtrl;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   @override
@@ -373,398 +249,247 @@ class _AutomationDemoState extends State<AutomationDemo>
     _startActionServer();
     _startPollingForActions();
 
-    _pulseController = AnimationController(
+    _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     );
-
-    // âœ… NEW: Thinking animation controller
-    _thinkingController = AnimationController(
+    _thinkCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     );
 
-    _videoController = VideoPlayerController.asset('assets/Background3.mp4')
+    _videoCtrl = VideoPlayerController.asset('assets/Background3.mp4')
       ..initialize().then((_) {
         setState(() {});
-        _videoController.setLooping(true);
-        _videoController.play();
+        _videoCtrl
+          ..setLooping(true)
+          ..play();
       });
   }
+
+  // ── helpers ────────────────────────────────────────────────────────────────
 
   Future<void> _startActionServer() async {
     try {
       _actionServer = await HttpServer.bind('0.0.0.0', 9999);
-      debugPrint('âœ… Action server started on 0.0.0.0:9999');
-
-      _actionServer!.listen((HttpRequest request) async {
+      _actionServer!.listen((request) async {
         try {
           if (request.method == 'POST') {
-            final contentLength = request.contentLength;
-            if (contentLength == 0) {
-              request.response.statusCode = 400;
-              request.response.write('{"error": "empty body"}');
-              await request.response.close();
-              return;
-            }
-
             final body = await utf8.decoder.bind(request).join();
             final data = jsonDecode(body) as Map<String, dynamic>;
-
-            if (data.containsKey('action') &&
-                data['action'].toString().contains('START_AUTOMATION')) {
-              await _handleBroadcastIntent(data);
-              request.response.headers.contentType = ContentType(
-                'application',
-                'json',
-              );
-              request.response.write(
-                jsonEncode({'success': true, 'message': 'Broadcast received'}),
-              );
-              await request.response.close();
+            if (data['action']?.toString().contains('START_AUTOMATION') ==
+                true) {
+              await _platform.invokeMethod('receiveBroadcast', data);
+              if (data['action'].toString().contains('START_AUTOMATION')) {
+                await _platform.invokeMethod('startAutomation');
+              }
+              request.response
+                ..headers.contentType = ContentType.json
+                ..write('{"success":true}');
             } else {
               final result = await DeviceManager.executeAction(data);
-              request.response.headers.contentType = ContentType(
-                'application',
-                'json',
-              );
-              request.response.write(jsonEncode(result));
-              await request.response.close();
+              request.response
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode(result));
             }
+            await request.response.close();
           } else {
             request.response.statusCode = 405;
-            request.response.write('{"error": "method not allowed"}');
             await request.response.close();
           }
         } catch (e) {
-          debugPrint('âŒ Action server error: $e');
           request.response.statusCode = 500;
-          request.response.write('{"error": "${e.toString()}"}');
+          request.response.write('{"error":"${e.toString()}"}');
           await request.response.close();
         }
       });
     } catch (e) {
-      debugPrint('âŒ Failed to start action server: $e');
-    }
-  }
-
-  Future<void> _handleBroadcastIntent(
-    Map<String, dynamic> broadcastData,
-  ) async {
-    try {
-      await platform.invokeMethod('receiveBroadcast', broadcastData);
-      if (broadcastData['action'].toString().contains('START_AUTOMATION')) {
-        await platform.invokeMethod('startAutomation');
-      }
-    } catch (e) {
-      debugPrint('âŒ Error handling broadcast: $e');
+      debugPrint('[Server] start error: $e');
     }
   }
 
   Future<void> _registerWithBackend() async {
-    final registered = await DeviceManager.registerDevice();
-    if (registered) {
-      final initialTree = await DeviceManager.getAccessibilityTree();
-      if (initialTree.isNotEmpty) {
-        await DeviceManager.sendUITree(initialTree);
-      }
-      _startStatusUpdates();
+    if (await DeviceManager.registerDevice()) {
+      final t = await DeviceManager.getAccessibilityTree();
+      if (t.isNotEmpty) await DeviceManager.sendUITree(t);
+      Future.doWhile(() async {
+        await Future.delayed(const Duration(seconds: 5));
+        await DeviceManager.sendStatus();
+        return true;
+      });
     }
-  }
-
-  Future<void> _sendUITree() async {
-    final uiTree = {
-      'screen_id': 'screen_main',
-      'device_id': DeviceManager.DEVICE_ID,
-      'app_name': 'AURA',
-      'app_package': 'com.aura.app',
-      'screen_name': 'Main Screen',
-      'elements': [
-        {
-          'element_id': 1,
-          'type': 'button',
-          'text': 'Send',
-          'content_description': 'Send',
-          'clickable': true,
-          'focusable': true,
-        },
-        {
-          'element_id': 2,
-          'type': 'textfield',
-          'text': _textController.text,
-          'content_description': 'Text input field',
-          'clickable': true,
-          'focusable': true,
-        },
-      ],
-      'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
-      'screen_width': 1080,
-      'screen_height': 2340,
-    };
-
-    await DeviceManager.sendUITree(uiTree);
-  }
-
-  void _startStatusUpdates() {
-    Future.doWhile(() async {
-      await Future.delayed(const Duration(seconds: 5));
-      await DeviceManager.sendStatus();
-      return true;
-    });
   }
 
   void _startPollingForActions() {
     Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 1));
       try {
-        final response = await http.get(
+        final r = await http.get(
           Uri.parse(
-            '${DeviceManager.BACKEND_URL}/device/${DeviceManager.DEVICE_ID}/pending-actions',
+            '${DeviceManager.backendUrl}/device/${DeviceManager.deviceId}/pending-actions',
           ),
         );
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body) as Map<String, dynamic>;
-          final actions = data['actions'] as List<dynamic>? ?? [];
-          // if (data['status'] == 'clarification_needed' || data.containsKey('question')) {
-          // setState(() {
-          //   _isThinking = false; // Stop the loading spinner
-          //   _responseText = data['question']; // Show the question in your UI
-          // });
-
-          // Optionally play audio for the question
-          //
-          if (actions.isNotEmpty) {
-            for (final action in actions) {
-              await DeviceManager.executeAction(action as Map<String, dynamic>);
-            }
+        if (r.statusCode == 200) {
+          final actions =
+              ((jsonDecode(r.body) as Map)['actions'] as List?) ?? [];
+          for (final a in actions) {
+            await DeviceManager.executeAction(a as Map<String, dynamic>);
           }
         }
-      } catch (e) {
-        debugPrint('âš ï¸  Error polling actions: $e');
-      }
+      } catch (_) {}
       return true;
+    });
+  }
+
+  Future<void> _sendUITree() async {
+    await DeviceManager.sendUITree({
+      'screen_id': 'screen_main',
+      'device_id': DeviceManager.deviceId,
+      'app_name': 'AURA',
+      'screen_name': 'Main Screen',
+      'elements': [
+        {'element_id': 1, 'type': 'button', 'text': 'Send', 'clickable': true},
+        {
+          'element_id': 2,
+          'type': 'textfield',
+          'text': _textCtrl.text,
+          'clickable': true,
+        },
+      ],
+      'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
     });
   }
 
   Future<void> _checkServiceStatus() async {
     try {
-      final bool isEnabled = await platform.invokeMethod('isServiceEnabled');
+      final bool enabled = await _platform.invokeMethod('isServiceEnabled');
       setState(() {
-        _serviceEnabled = isEnabled;
+        _serviceEnabled = enabled;
         _status =
-            isEnabled
+            enabled
                 ? 'Accessibility Service Enabled'
                 : 'Please enable Accessibility Service';
       });
     } catch (e) {
-      setState(() {
-        _status = 'Error checking service: $e';
-      });
+      setState(() => _status = 'Error: $e');
     }
   }
 
   void _setupMethodChannelListener() {
-    platform.setMethodCallHandler((call) async {
-      switch (call.method) {
-        case 'onUITreeUpdate':
-          final tree = call.arguments;
-          debugPrint('ðŸ“¡ UI Tree update from native: ${tree['app_name']}');
-          return {'status': 'received'};
-        default:
-          return null;
-      }
+    _platform.setMethodCallHandler((call) async {
+      if (call.method == 'onUITreeUpdate') return {'status': 'received'};
+      return null;
     });
   }
 
   Future<void> _openAccessibilitySettings() async {
     try {
-      await platform.invokeMethod('openAccessibilitySettings');
+      await _platform.invokeMethod('openAccessibilitySettings');
     } catch (e) {
-      setState(() {
-        _status = 'Error opening settings: $e';
-      });
+      setState(() => _status = 'Error: $e');
     }
   }
 
-  // âœ… MODIFIED: Auto-send after transcription
-  // âœ… FIXED: Handles clarification_needed responses
   Future<void> _sendTextToBackend(String text) async {
     if (text.trim().isEmpty) return;
-
     setState(() {
       _isLoading = true;
       _isThinking = true;
       _status = 'Processing...';
       _responseText = '';
     });
-
-    _thinkingController.repeat();
-
+    _thinkCtrl.repeat();
     try {
       await _sendUITree();
-
-      debugPrint('[Backend] Sending text: $text');
-
-      final response = await http.post(
-        Uri.parse('${DeviceManager.BACKEND_URL}/process'),
+      final resp = await http.post(
+        Uri.parse('${DeviceManager.backendUrl}/process'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'input': text,
-          'session_id':
-              'flutter_session_${DateTime.now().millisecondsSinceEpoch}',
+          'session_id': 'flutter_${DateTime.now().millisecondsSinceEpoch}',
           'user_id': 'flutter_user',
           'device_type': 'mobile',
         }),
       );
-
-      debugPrint('[Backend] Response status: ${response.statusCode}');
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      debugPrint('[Backend] Response data: $data');
-
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
       setState(() {
         _isLoading = false;
         _isThinking = false;
-        _thinkingController.stop();
-        _thinkingController.reset();
-
-        if (response.statusCode == 200) {
-          // âœ… CHECK FOR CLARIFICATION FIRST!
+        _thinkCtrl.stop();
+        _thinkCtrl.reset();
+        if (resp.statusCode == 200) {
           if (data['status'] == 'clarification_needed') {
             _status = 'Question:';
             _responseText = data['question'] ?? 'Clarification needed';
-            _textController.clear();
-            _transcribedText = '';
-
-            // âœ… Play TTS for the question
-            _playTTSAudio(_responseText);
-
-            debugPrint('[Clarification] Question: $_responseText');
-          }
-          // âœ… NORMAL SUCCESS RESPONSE
-          else {
-            _status = 'Response received!';
+          } else {
+            _status = 'Done';
             _responseText =
                 data['text'] ?? data['response'] ?? 'Task completed';
-            _textController.clear();
-            _transcribedText = '';
-
-            // âœ… Play TTS audio
-            _playTTSAudio(_responseText);
           }
+          _textCtrl.clear();
+          _transcribedText = '';
+          _playTTSAudio(_responseText);
         } else {
-          _status = 'Error: ${data['error'] ?? 'Unknown error'}';
-          _responseText = data['error'] ?? 'Unknown error';
+          _status = 'Error';
+          _responseText = data['error']?.toString() ?? 'Unknown error';
         }
       });
     } catch (e) {
       setState(() {
         _isLoading = false;
         _isThinking = false;
-        _thinkingController.stop();
-        _thinkingController.reset();
-        _status = 'Error: $e';
+        _thinkCtrl.stop();
+        _thinkCtrl.reset();
+        _status = 'Error';
         _responseText = e.toString();
       });
     }
   }
 
-  // âœ… NEW: Play TTS audio from backend
   Future<void> _playTTSAudio(String text) async {
     try {
-      debugPrint('[TTS] Requesting audio for: $text');
-
-      final response = await http.post(
-        Uri.parse('${DeviceManager.BACKEND_URL}/text-to-speech'),
+      final r = await http.post(
+        Uri.parse('${DeviceManager.backendUrl}/text-to-speech'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'text': text}),
       );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final audioData = data['audio_data'] as String;
-        final format = data['format'] ?? 'mp3';
-
-        debugPrint(
-          '[TTS] Received audio: ${audioData.length} chars, format: $format',
-        );
-
-        // âœ… Decode base64 to bytes
-        final bytes = base64.decode(audioData);
-
-        // âœ… Save to temp file
-        final tempDir = Directory.systemTemp;
-        final tempFile = File('${tempDir.path}/tts_audio.$format');
-        await tempFile.writeAsBytes(bytes);
-
-        debugPrint('[TTS] Audio saved to: ${tempFile.path}');
-
-        // âœ… Play audio
-        await _audioPlayer.play(DeviceFileSource(tempFile.path));
-        debugPrint('[TTS] âœ… Audio playing');
-
-        // âœ… Clean up after playback
-        _audioPlayer.onPlayerComplete.listen((_) {
-          tempFile.delete();
-          debugPrint('[TTS] âœ… Audio playback complete, temp file deleted');
-        });
-      } else {
-        debugPrint('[TTS] âŒ Failed to get audio: ${response.statusCode}');
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        final bytes = base64.decode(data['audio_data'] as String);
+        final fmt = data['format'] ?? 'mp3';
+        final tmp = File('${Directory.systemTemp.path}/tts.$fmt');
+        await tmp.writeAsBytes(bytes);
+        await _audioPlayer.play(DeviceFileSource(tmp.path));
+        _audioPlayer.onPlayerComplete.listen((_) => tmp.delete());
       }
-    } catch (e) {
-      debugPrint('[TTS] âŒ Error playing audio: $e');
-    }
+    } catch (_) {}
   }
 
-  // âœ… MODIFIED: Auto-send on second mic tap
   Future<void> _toggleRecording() async {
     try {
       if (_isRecording) {
-        // âœ… STOP RECORDING AND AUTO-SEND
-        _pulseController.stop();
-        _pulseController.reset();
-
-        setState(() {
-          _status = 'Processing audio...';
-        });
-
-        final result = await platform.invokeMethod('toggleRecording');
-
-        if (result is Map) {
-          final status = result['status'];
-
-          if (status == 'success') {
-            final transcript = result['transcript'] ?? '';
-            setState(() {
-              _isRecording = false;
-              _transcribedText = transcript; // âœ… Show on screen
-              _status = 'Transcribed: $transcript';
-            });
-
-            debugPrint('[STT] âœ… Transcript: $transcript');
-
-            // âœ… AUTO-SEND to backend
-            if (transcript.isNotEmpty) {
-              await _sendTextToBackend(transcript);
-            }
-          }
+        _pulseCtrl.stop();
+        _pulseCtrl.reset();
+        setState(() => _status = 'Processing audio...');
+        final result = await _platform.invokeMethod('toggleRecording');
+        if (result is Map && result['status'] == 'success') {
+          final transcript = result['transcript'] ?? '';
+          setState(() {
+            _isRecording = false;
+            _transcribedText = transcript;
+            _status = 'Transcribed: $transcript';
+          });
+          if (transcript.isNotEmpty) await _sendTextToBackend(transcript);
         }
       } else {
-        // âœ… START RECORDING
-        _pulseController.repeat(reverse: true);
-
-        final result = await platform.invokeMethod('toggleRecording');
-
-        if (result is Map) {
-          final status = result['status'];
-
-          if (status == 'recording') {
-            setState(() {
-              _isRecording = true;
-              _status = 'Recording audio...';
-              _transcribedText = ''; // Clear previous transcript
-            });
-          }
+        _pulseCtrl.repeat(reverse: true);
+        final result = await _platform.invokeMethod('toggleRecording');
+        if (result is Map && result['status'] == 'recording') {
+          setState(() {
+            _isRecording = true;
+            _status = 'Recording...';
+            _transcribedText = '';
+          });
         }
       }
     } catch (e) {
@@ -772,34 +497,33 @@ class _AutomationDemoState extends State<AutomationDemo>
         _isRecording = false;
         _status = 'Mic error: $e';
       });
-      _pulseController.stop();
-      _pulseController.reset();
+      _pulseCtrl.stop();
+      _pulseCtrl.reset();
     }
   }
 
-  String _getTimeGreeting() {
-    final hour = DateTime.now().hour;
-    if (hour >= 5 && hour < 9) return 'ðŸŒ… Rise and shine, $_userName!';
-    if (hour >= 9 && hour < 12) return 'â˜€ï¸ Good morning, $_userName!';
-    if (hour >= 12 && hour < 15) return 'ðŸ½ï¸ Lunchtime, $_userName?';
-    if (hour >= 15 && hour < 18) return 'ðŸŒ‡ Good afternoon, $_userName!';
-    if (hour >= 18 && hour < 21) return 'ðŸŒ† Evening vibes, $_userName!';
-    if (hour >= 21 && hour < 24) {
-      return 'ðŸŒ™ Hello night owl, $_userName! Working so late?';
-    }
-    return 'ðŸ’¤ Burning the midnight oil, $_userName?';
+  String _greeting() {
+    final h = DateTime.now().hour;
+    if (h >= 5 && h < 9) return 'Rise and shine, $_userName!';
+    if (h >= 9 && h < 12) return 'Good morning, $_userName!';
+    if (h >= 12 && h < 15) return 'Lunchtime, $_userName?';
+    if (h >= 15 && h < 18) return 'Good afternoon, $_userName!';
+    if (h >= 18 && h < 21) return 'Evening, $_userName!';
+    return 'Hello night owl, $_userName!';
   }
 
   @override
   void dispose() {
-    _textController.dispose();
+    _textCtrl.dispose();
     _actionServer?.close();
-    _pulseController.dispose();
-    _thinkingController.dispose(); // âœ… Dispose thinking controller
-    _videoController.dispose();
-    _audioPlayer.dispose(); // âœ… Dispose audio player
+    _pulseCtrl.dispose();
+    _thinkCtrl.dispose();
+    _videoCtrl.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
+
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -809,317 +533,116 @@ class _AutomationDemoState extends State<AutomationDemo>
         backgroundColor: AuraTheme.bgBase,
         body: Stack(
           children: [
-            // Video background
-            if (_videoController.value.isInitialized)
-              SizedBox.expand(
-                child: FittedBox(
-                  fit: BoxFit.cover,
-                  child: SizedBox(
-                    width: _videoController.value.size.width,
-                    height: _videoController.value.size.height,
-                    child: VideoPlayer(_videoController),
-                  ),
-                ),
-              ),
-
-            // Main Content
             SafeArea(
               child: Column(
                 children: [
                   const SizedBox(height: 20),
-
-                  // Header
                   Padding(
                     padding: const EdgeInsets.only(
-                      top: 60.0,
+                      top: 60,
                       left: 20,
                       right: 20,
                     ),
                     child: Column(
                       children: [
                         Text(
-                          _getTimeGreeting(),
-                          style: GoogleFonts.dmSans(
-                            fontSize: 15,
-                            color: Colors.white.withValues(alpha: 0.65),
-                            fontWeight: FontWeight.w400,
+                          _greeting(),
+                          style: _f(
+                            Colors.white.withOpacity(0.50),
+                            size: 13,
+                            weight: FontWeight.w400,
                           ),
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 10),
                         Text(
                           'What would you like done today?',
-                          style: GoogleFonts.dmSans(
-                            fontSize: 26,
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: -0.5,
+                          style: _f(
+                            Colors.white,
+                            size: 22,
+                            weight: FontWeight.w600,
+                            spacing: -0.4,
                           ),
                           textAlign: TextAlign.center,
                         ),
                       ],
                     ),
                   ),
-
                   const Spacer(),
 
-                  // âœ… NEW: Transcribed Text Display
-                  if (_transcribedText.isNotEmpty && !_isThinking)
-                    Container(
-                      alignment: Alignment.topLeft,
-                      margin: const EdgeInsets.symmetric(horizontal: 20),
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        color: AppColors.darkPlum4.withValues(alpha: 0.6),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: AuraTheme.pink400.withValues(alpha: 0.3),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.mic_rounded,
-                            color: AuraTheme.pink400,
-                            size: 20,
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              _transcribedText,
-                              style: GoogleFonts.dmSans(
-                                fontSize: 15,
-                                color: Colors.white.withValues(alpha: 0.9),
-                                height: 1.5,
-                              ),
-                              textAlign: TextAlign.left,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                  if (_transcribedText.isNotEmpty && !_isThinking) ...[
+                    _infoCard(icon: Icons.mic_rounded, text: _transcribedText),
+                    const SizedBox(height: 12),
+                  ],
 
-                  if (_transcribedText.isNotEmpty && !_isThinking)
-                    const SizedBox(height: 16),
-
-                  // âœ… NEW: Thinking Indicator
-                  if (_isThinking)
+                  if (_isThinking) ...[
                     AnimatedBuilder(
-                      animation: _thinkingController,
-                      builder: (context, child) {
-                        return Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 20),
-                          padding: const EdgeInsets.all(18),
-                          decoration: BoxDecoration(
-                            color: AppColors.darkPlum4.withValues(alpha: 0.6),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: AuraTheme.pink400.withValues(
-                                alpha: 0.3 + _thinkingController.value * 0.3,
-                              ),
-                            ),
+                      animation: _thinkCtrl,
+                      builder:
+                          (_, __) => _infoCard(
+                            icon: null,
+                            text: 'Thinking...',
+                            spinner: true,
+                            spinV: _thinkCtrl.value,
                           ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                    AuraTheme.pink400.withValues(
-                                      alpha:
-                                          0.7 + _thinkingController.value * 0.3,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              Text(
-                                'Thinking...',
-                                style: GoogleFonts.dmSans(
-                                  fontSize: 15,
-                                  color: Colors.white.withValues(alpha: 0.8),
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
                     ),
+                    const SizedBox(height: 12),
+                  ],
 
-                  if (_isThinking) const SizedBox(height: 16),
-
-                  // Response Display
-                  if (_responseText.isNotEmpty && !_isThinking)
-                    Container(
-                      alignment: Alignment.topLeft,
-                      margin: const EdgeInsets.symmetric(horizontal: 20),
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        color: AppColors.darkPlum4.withValues(alpha: 0.6),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                          color: AuraTheme.bgMuted.withValues(alpha: 0.3),
-                        ),
-                      ),
-                      child: Text(
-                        _responseText,
-                        style: GoogleFonts.dmSans(
-                          fontSize: 15,
-                          color: Colors.white,
-                          height: 1.5,
-                        ),
-                        textAlign: TextAlign.left,
-                      ),
-                    ),
+                  if (_responseText.isNotEmpty && !_isThinking) ...[
+                    _infoCard(icon: Icons.auto_awesome, text: _responseText),
+                    const SizedBox(height: 12),
+                  ],
 
                   const Spacer(),
 
-                  // Accessibility Buttons
                   if (!_serviceEnabled)
                     Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
+                      padding: const EdgeInsets.only(bottom: 14),
                       child: Column(
                         children: [
-                          // Enable button
-                          Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              onTap: _openAccessibilitySettings,
-                              borderRadius: BorderRadius.circular(12),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 20,
-                                  vertical: 12,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AuraTheme.bgElevated.withValues(
-                                    alpha: 0.6,
-                                  ),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: AuraTheme.pink400.withValues(
-                                      alpha: 0.3,
-                                    ),
-                                    width: 1.5,
-                                  ),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      Icons.accessibility_new_rounded,
-                                      color: AuraTheme.pink400,
-                                      size: 18,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Enable Accessibility Service',
-                                      style: GoogleFonts.dmSans(
-                                        fontSize: 13,
-                                        color: AuraTheme.pink400,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
+                          _flatButton(
+                            icon: Icons.accessibility_new_rounded,
+                            label: 'Enable Accessibility Service',
+                            onTap: _openAccessibilitySettings,
+                            primary: true,
                           ),
-                          const SizedBox(height: 12),
-                          // Refresh button
-                          Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              onTap: _checkServiceStatus,
-                              borderRadius: BorderRadius.circular(12),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 20,
-                                  vertical: 12,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AuraTheme.bgElevated.withValues(
-                                    alpha: 0.4,
-                                  ),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.15),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      Icons.refresh_rounded,
-                                      color: Colors.white.withValues(
-                                        alpha: 0.7,
-                                      ),
-                                      size: 18,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Refresh Status',
-                                      style: GoogleFonts.dmSans(
-                                        fontSize: 13,
-                                        color: Colors.white.withValues(
-                                          alpha: 0.7,
-                                        ),
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
+                          const SizedBox(height: 8),
+                          _flatButton(
+                            icon: Icons.refresh_rounded,
+                            label: 'Refresh Status',
+                            onTap: _checkServiceStatus,
+                            primary: false,
                           ),
                         ],
                       ),
                     ),
 
-                  // Voice Controls
                   _buildVoiceControls(),
-
                   const SizedBox(height: 90),
                 ],
               ),
             ),
 
-            // Sidebar
             _buildSidebar(),
-
-            // Settings Modal
             if (_showSettings) _buildSettingsModal(),
 
-            // Menu button
             if (!_isSidebarOpen && !_showSettings)
               Positioned(
                 top: 50,
                 left: 20,
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () {
-                      setState(() {
-                        _isSidebarOpen = true;
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(12),
-                    child: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: AuraTheme.bgElevated.withValues(alpha: 0.5),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(
-                        Icons.menu_rounded,
-                        color: Colors.white,
-                        size: 24,
-                      ),
+                child: GestureDetector(
+                  onTap: () => setState(() => _isSidebarOpen = true),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AuraTheme.bgElevated.withOpacity(0.55),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: const Icon(
+                      Icons.menu_rounded,
+                      color: Colors.white,
+                      size: 22,
                     ),
                   ),
                 ),
@@ -1130,84 +653,129 @@ class _AutomationDemoState extends State<AutomationDemo>
     );
   }
 
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  Widget _infoCard({
+    IconData? icon,
+    required String text,
+    bool spinner = false,
+    double spinV = 0,
+  }) => Container(
+    alignment: Alignment.topLeft,
+    margin: const EdgeInsets.symmetric(horizontal: 20),
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: AppColors.darkPlum4.withOpacity(0.55),
+      borderRadius: BorderRadius.circular(15),
+      border: Border.all(color: AuraTheme.pink400.withOpacity(0.18)),
+    ),
+    child: Row(
+      children: [
+        if (spinner)
+          SizedBox(
+            width: 17,
+            height: 17,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.7,
+              valueColor: AlwaysStoppedAnimation(
+                AuraTheme.pink400.withOpacity(0.55 + spinV * 0.4),
+              ),
+            ),
+          )
+        else if (icon != null)
+          Icon(icon, color: AuraTheme.pink300, size: 17),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Text(
+            text,
+            style: _f(Colors.white.withOpacity(0.88), size: 13, height: 1.52),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _flatButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+    required bool primary,
+  }) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        // Flat colours — no gradient — GLES2-safe
+        color: AuraTheme.bgElevated.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+          color:
+              primary
+                  ? AuraTheme.pink400.withOpacity(0.28)
+                  : Colors.white.withOpacity(0.10),
+          width: 1.1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            color: primary ? AuraTheme.pink400 : Colors.white.withOpacity(0.55),
+            size: 16,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: _f(
+              primary ? AuraTheme.pink400 : Colors.white.withOpacity(0.60),
+              size: 12,
+              weight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  // ── Voice controls ─────────────────────────────────────────────────────────
+
   Widget _buildVoiceControls() {
     if (_chatMode) {
       return Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24),
+        margin: const EdgeInsets.symmetric(horizontal: 20),
         padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
         decoration: BoxDecoration(
-          color: AuraTheme.bgElevated.withValues(alpha: 0.7),
+          color: AuraTheme.bgElevated.withOpacity(0.7),
           borderRadius: BorderRadius.circular(28),
-          border: Border.all(
-            color: AuraTheme.bgMuted.withValues(alpha: 0.5),
-            width: 1.5,
-          ),
+          border: Border.all(color: Colors.white.withOpacity(0.07), width: 1),
         ),
         child: Row(
           children: [
             Expanded(
               child: TextField(
-                controller: _textController,
-                style: GoogleFonts.dmSans(color: Colors.white, fontSize: 14),
+                controller: _textCtrl,
+                style: _f(Colors.white, size: 14),
                 decoration: InputDecoration(
                   hintText: 'Type your message...',
-                  hintStyle: GoogleFonts.dmSans(
-                    color: Colors.white.withValues(alpha: 0.4),
-                    fontSize: 14,
-                  ),
+                  hintStyle: _f(Colors.white.withOpacity(0.30), size: 14),
                   border: InputBorder.none,
                   contentPadding: const EdgeInsets.symmetric(
                     horizontal: 16,
                     vertical: 12,
                   ),
                 ),
-                onSubmitted: (_) => _sendTextToBackend(_textController.text),
+                onSubmitted: (_) => _sendTextToBackend(_textCtrl.text),
               ),
             ),
-            // Send button
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () => _sendTextToBackend(_textController.text),
-                borderRadius: BorderRadius.circular(24),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AuraTheme.pink400Dull.withValues(alpha: 0.5),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.send_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
+            _circleBtn(
+              icon: Icons.arrow_upward_rounded,
+              onTap: () => _sendTextToBackend(_textCtrl.text),
             ),
             const SizedBox(width: 4),
-            // Mic button
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () {
-                  setState(() {
-                    _chatMode = false;
-                  });
-                },
-                borderRadius: BorderRadius.circular(24),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AuraTheme.pink400Dull.withValues(alpha: 0.5),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.mic_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
+            _circleBtn(
+              icon: Icons.mic_rounded,
+              onTap: () => setState(() => _chatMode = false),
             ),
             const SizedBox(width: 4),
           ],
@@ -1215,175 +783,75 @@ class _AutomationDemoState extends State<AutomationDemo>
       );
     }
 
-    // Voice mode
     return AnimatedBuilder(
-      animation: _pulseController,
-      builder: (context, child) {
-        final pulseValue = _pulseController.value;
+      animation: _pulseCtrl,
+      builder: (_, __) {
+        final pv = _pulseCtrl.value;
         return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 50),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          margin: const EdgeInsets.symmetric(horizontal: 46),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
             color:
                 _isRecording
-                    ? AuraTheme.bgElevated.withValues(alpha: 0.8)
-                    : AppColors.darkPlum4.withValues(alpha: 0.7),
+                    ? AuraTheme.bgElevated.withOpacity(0.8)
+                    : AppColors.darkPlum4.withOpacity(0.65),
             borderRadius: BorderRadius.circular(32),
             border: Border.all(
               color:
                   _isRecording
-                      ? AuraTheme.pink400.withValues(
-                        alpha: 0.4 + pulseValue * 0.3,
-                      )
-                      : Colors.white.withValues(alpha: 0.2),
-              width: 1.5,
+                      ? AuraTheme.pink400.withOpacity(0.32 + pv * 0.28)
+                      : Colors.white.withOpacity(0.10),
+              width: 1.2,
             ),
-            boxShadow:
-                _isRecording
-                    ? [
-                      BoxShadow(
-                        color: AuraTheme.pink400.withValues(
-                          alpha: 0.25 + pulseValue * 0.25,
-                        ),
-                        blurRadius: 20 + pulseValue * 15,
-                        spreadRadius: 2 + pulseValue * 4,
-                      ),
-                    ]
-                    : null,
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             mainAxisSize: MainAxisSize.min,
             children: [
-              // X button
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () {
-                    setState(() {
-                      _chatMode = true;
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(24),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
+              _circleBtn(
+                icon: Icons.close_rounded,
+                small: true,
+                onTap: () => setState(() => _chatMode = true),
+              ),
+              const SizedBox(width: 10),
+
+              // Main mic button — flat color, no gradient
+              GestureDetector(
+                onTap: _toggleRecording,
+                child: Container(
+                  width: 66,
+                  height: 66,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    // Flat solid colour — GLES2-safe
+                    color:
+                        _isRecording
+                            ? AuraTheme.pink500
+                            : AuraTheme.pink400Dull.withOpacity(0.35),
+                    border: Border.all(
                       color:
                           _isRecording
-                              ? AuraTheme.bgMuted.withValues(alpha: 0.4)
-                              : Colors.white.withValues(alpha: 0.08),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withValues(alpha: 0.2),
-                        width: 1,
-                      ),
+                              ? Colors.transparent
+                              : Colors.white.withOpacity(0.14),
+                      width: 1.2,
                     ),
-                    child: Icon(
-                      Icons.close_rounded,
-                      color: Colors.white.withValues(alpha: 0.75),
-                      size: 20,
-                    ),
+                  ),
+                  child: Icon(
+                    _isRecording ? Icons.stop_rounded : Icons.mic_rounded,
+                    size: 30,
+                    color:
+                        _isRecording
+                            ? Colors.white
+                            : Colors.white.withOpacity(0.72),
                   ),
                 ),
               ),
 
-              const SizedBox(width: 12),
-
-              // âœ… MODIFIED: Mic button (tap once to record, tap again to send)
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: _toggleRecording,
-                  borderRadius: BorderRadius.circular(40),
-                  child: Container(
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient:
-                          _isRecording
-                              ? RadialGradient(
-                                colors: [
-                                  AuraTheme.pink400.withValues(alpha: 0.9),
-                                  AuraTheme.pink400.withValues(alpha: 0.7),
-                                ],
-                              )
-                              : RadialGradient(
-                                colors: [
-                                  AuraTheme.pink400Dull.withValues(alpha: 0.3),
-                                  AuraTheme.pink400Dull.withValues(alpha: 0.2),
-                                ],
-                              ),
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withValues(alpha: 0.2),
-                        width: 1.5,
-                      ),
-                      boxShadow:
-                          _isRecording
-                              ? [
-                                BoxShadow(
-                                  color: AuraTheme.pink400.withValues(
-                                    alpha: 0.35 + pulseValue * 0.3,
-                                  ),
-                                  blurRadius: 25 + pulseValue * 20,
-                                  spreadRadius: 3 + pulseValue * 6,
-                                ),
-                              ]
-                              : null,
-                    ),
-                    child: Icon(
-                      _isRecording ? Icons.stop_rounded : Icons.mic_rounded,
-                      size: 34,
-                      color:
-                          _isRecording
-                              ? Colors.white
-                              : Colors.white.withValues(alpha: 0.8),
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              // Settings button
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () {
-                    setState(() {
-                      _showSettings = true;
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(24),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color:
-                          _isRecording
-                              ? AuraTheme.bgMuted.withValues(alpha: 0.4)
-                              : Colors.white.withValues(alpha: 0.08),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withValues(alpha: 0.2),
-                        width: 1,
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.settings_rounded,
-                      color: Colors.white.withValues(alpha: 0.75),
-                      size: 20,
-                    ),
-                  ),
-                ),
+              const SizedBox(width: 10),
+              _circleBtn(
+                icon: Icons.settings_rounded,
+                small: true,
+                onTap: () => setState(() => _showSettings = true),
               ),
             ],
           ),
@@ -1392,31 +860,46 @@ class _AutomationDemoState extends State<AutomationDemo>
     );
   }
 
-  // ... (rest of the code remains the same: _buildSidebar, _buildSettingsModal, etc.)
-  // I'll include the complete sidebar and settings in the next section
+  Widget _circleBtn({
+    required IconData icon,
+    bool small = false,
+    required VoidCallback onTap,
+  }) {
+    final sz = small ? 40.0 : 44.0;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: sz,
+        height: sz,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withOpacity(0.07),
+          border: Border.all(color: Colors.white.withOpacity(0.12)),
+        ),
+        child: Icon(
+          icon,
+          color: Colors.white.withOpacity(0.75),
+          size: small ? 17 : 19,
+        ),
+      ),
+    );
+  }
+
+  // ── Sidebar ────────────────────────────────────────────────────────────────
 
   Widget _buildSidebar() {
     return AnimatedPositioned(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeInOutCubic,
       left: _isSidebarOpen ? 0 : -280,
       top: 0,
       bottom: 0,
       child: Container(
         width: 280,
-        decoration: BoxDecoration(
-          color: AuraTheme.bgSurface,
-          border: Border(
-            right: BorderSide(
-              color: AuraTheme.bgElevated.withValues(alpha: 0.5),
-              width: 1,
-            ),
-          ),
-        ),
+        color: AuraTheme.bgSurface,
         child: SafeArea(
           child: Column(
             children: [
-              // Header
               Padding(
                 padding: const EdgeInsets.all(20),
                 child: Row(
@@ -1424,248 +907,137 @@ class _AutomationDemoState extends State<AutomationDemo>
                   children: [
                     Text(
                       'AURA',
-                      style: GoogleFonts.dmSans(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                        letterSpacing: 3,
+                      style: _f(
+                        Colors.white,
+                        weight: FontWeight.w600,
+                        size: 17,
+                        spacing: 4,
                       ),
                     ),
-                    Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        onTap: () {
-                          setState(() {
-                            _isSidebarOpen = false;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(8),
-                        child: Container(
-                          padding: const EdgeInsets.all(4),
-                          child: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 22,
-                          ),
-                        ),
+                    GestureDetector(
+                      onTap: () => setState(() => _isSidebarOpen = false),
+                      child: const Icon(
+                        Icons.close_rounded,
+                        color: Colors.white,
+                        size: 20,
                       ),
                     ),
                   ],
                 ),
               ),
-
-              // New Chat Button
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () {
-                      setState(() {
+                child: GestureDetector(
+                  onTap:
+                      () => setState(() {
                         _responseText = '';
                         _transcribedText = '';
-                        _textController.clear();
+                        _textCtrl.clear();
                         _chatMode = false;
                         _isSidebarOpen = false;
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 14,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AuraTheme.bgElevated.withValues(alpha: 0.4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AuraTheme.bgMuted.withValues(alpha: 0.3),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.edit_square,
-                            color: Colors.white.withValues(alpha: 0.8),
-                            size: 18,
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            'New chat',
-                            style: GoogleFonts.dmSans(
-                              color: Colors.white.withValues(alpha: 0.9),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                      }),
+                  child: _sidebarRow(Icons.edit_square, 'New chat'),
                 ),
               ),
-
               const Spacer(),
-
-              // Settings Button
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () {
-                      setState(() {
+                child: GestureDetector(
+                  onTap:
+                      () => setState(() {
                         _showSettings = true;
                         _isSidebarOpen = false;
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(10),
+                      }),
+                  child: _sidebarRow(Icons.settings_rounded, 'Settings'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sidebarRow(IconData icon, String label) => Container(
+    padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 13),
+    decoration: BoxDecoration(
+      color: AuraTheme.bgElevated.withOpacity(0.4),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: Colors.white.withOpacity(0.06)),
+    ),
+    child: Row(
+      children: [
+        Icon(icon, color: Colors.white.withOpacity(0.70), size: 16),
+        const SizedBox(width: 11),
+        Text(
+          label,
+          style: _f(
+            Colors.white.withOpacity(0.85),
+            size: 13,
+            weight: FontWeight.w500,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  // ── Settings modal ─────────────────────────────────────────────────────────
+
+  Widget _buildSettingsModal() => Container(
+    color: Colors.black.withOpacity(0.80),
+    child: Center(
+      child: Container(
+        width: MediaQuery.of(context).size.width * 0.92,
+        height: MediaQuery.of(context).size.height * 0.82,
+        decoration: BoxDecoration(
+          color: AuraTheme.bgSurface,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withOpacity(0.06)),
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Settings',
+                    style: _f(
+                      Colors.white.withOpacity(0.9),
+                      size: 17,
+                      weight: FontWeight.w600,
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => setState(() => _showSettings = false),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 14,
-                      ),
+                      padding: const EdgeInsets.all(7),
                       decoration: BoxDecoration(
-                        color: AuraTheme.bgElevated.withValues(alpha: 0.4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AuraTheme.bgMuted.withValues(alpha: 0.3),
-                        ),
+                        color: AuraTheme.bgElevated.withOpacity(0.4),
+                        borderRadius: BorderRadius.circular(9),
                       ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.settings_rounded,
-                            color: Colors.white.withValues(alpha: 0.8),
-                            size: 18,
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            'Settings',
-                            style: GoogleFonts.dmSans(
-                              color: Colors.white.withValues(alpha: 0.9),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
+                      child: const Icon(
+                        Icons.close_rounded,
+                        color: Colors.white,
+                        size: 17,
                       ),
                     ),
                   ),
-                ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSettingsModal() {
-    return Container(
-      color: Colors.black.withValues(alpha: 0.85),
-      child: Center(
-        child: Container(
-          width: MediaQuery.of(context).size.width * 0.92,
-          height: MediaQuery.of(context).size.height * 0.85,
-          decoration: BoxDecoration(
-            color: AuraTheme.bgSurface,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(
-              color: AuraTheme.bgElevated.withValues(alpha: 0.5),
             ),
-          ),
-          child: Column(
-            children: [
-              // Top bar
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Settings',
-                      style: GoogleFonts.dmSans(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white.withValues(alpha: 0.9),
-                      ),
-                    ),
-                    Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        onTap: () {
-                          setState(() {
-                            _showSettings = false;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: AuraTheme.bgElevated.withValues(alpha: 0.4),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+            Expanded(
+              child: Center(
+                child: Text(
+                  'Settings content',
+                  style: _f(AuraTheme.textMuted, size: 13),
                 ),
               ),
-
-              // Tabs and content (keeping your existing implementation)
-              // ... (rest of settings modal code)
-              Expanded(
-                child: Center(
-                  child: Text(
-                    'Settings content here',
-                    style: GoogleFonts.dmSans(color: Colors.white),
-                  ),
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
-    );
-  }
-
-  Widget _buildProfileSettings() {
-    // Keep your existing implementation
-    return Container();
-  }
-
-  Widget _buildMemorySettings() {
-    // Keep your existing implementation
-    return Container();
-  }
-
-  Widget _buildEditableField(
-    String label,
-    String value,
-    Function(String) onChanged,
-  ) {
-    // Keep your existing implementation
-    return Container();
-  }
-
-  Widget _buildWorkingDropdown(
-    String label,
-    String value,
-    List<String> options,
-    Function(String?) onChanged,
-  ) {
-    // Keep your existing implementation
-    return Container();
-  }
-
-  Widget _buildStatCard(String value, String label, Color color) {
-    // Keep your existing implementation
-    return Container();
-  }
+    ),
+  );
 }

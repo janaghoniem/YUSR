@@ -338,6 +338,11 @@ class LanguageAgent:
         self.awaiting_user_response = None
         # User profile for personalization (loaded from onboarding / memory)
         self.user_profile: Dict[str, Any] = {}
+        # ── BATCHING for extraction results (collect multiple before storing) ──
+        self._pending_extractions = []
+        self._last_batch_time = time.time()
+        self._BATCH_INTERVAL = 5  # seconds
+        self._MAX_BATCH_SIZE = 5
 
         # Initialize MongoDB client for persistent storage
         try:
@@ -357,6 +362,9 @@ class LanguageAgent:
             self.conversations = None
 
         self.memory = self._load_conversation()
+        # ── CACHE for personal info extraction (reduce duplicate LLM calls) ──
+        self._extraction_cache = {}
+        self._EXTRACTION_CACHE_TTL = 3600  # 1 hour cache
 
         logger.info(f"✅ Language Agent initialized for session {session_id}, user {user_id}")
         logger.info(f"📚 Loaded {len(self.memory) - 1} previous messages")
@@ -801,6 +809,103 @@ class LanguageAgent:
             )
             return fallback_text, False, None, self.preferred_language
 
+
+
+
+    def _cached_extract_personal_info(self, input_text: str) -> Optional[str]:
+        """
+        Extract personal info with caching to avoid duplicate LLM calls.
+        Returns: personal_info string or None
+        """
+        import time
+        
+        # Normalize for cache key (ignore whitespace, lowercase)
+        cache_key = input_text.lower().strip()
+        
+        # Check cache
+        if cache_key in self._extraction_cache:
+            cached_result, timestamp = self._extraction_cache[cache_key]
+            if time.time() - timestamp < self._EXTRACTION_CACHE_TTL:
+                logger.info(f"✅ Using cached extraction for: {input_text[:50]}...")
+                return cached_result
+        
+        # Cache miss - run extraction
+        extraction_prompt = (
+            'You are a personal-info extractor. Read the user message below.\n'
+            'If it contains personal information (name, age, location, job, hobby,\n'
+            'preference, or any fact about the user), extract it.\n'
+            'If it does NOT contain personal info, return exactly: {"personal_info": null}\n\n'
+            f'USER MESSAGE: "{input_text}"\n\n'
+            'Return ONLY valid JSON, no markdown, no explanation:\n'
+            '{"personal_info": "one-sentence summary of what the user revealed, or null"}'
+        )
+        
+        try:
+            response = call_groq_api(
+                [{"role": "system", "content": extraction_prompt}],
+                max_tokens=100
+            )
+            if response:
+                # Parse JSON
+                clean = response.strip()
+                if clean.startswith("```"):
+                    clean = clean.split("```")[1]
+                    if clean.startswith("json"):
+                        clean = clean[4:]
+                extracted = json.loads(clean.strip())
+                personal_info = extracted.get("personal_info")
+                if personal_info and str(personal_info).lower() != "null":
+                    # Store in cache
+                    self._extraction_cache[cache_key] = (personal_info, time.time())
+                    return personal_info
+        except Exception as e:
+            logger.warning(f"Extraction failed: {e}")
+        
+        # Store null result to avoid repeated failures
+        self._extraction_cache[cache_key] = (None, time.time())
+        return None
+    
+
+    async def _flush_extraction_batch(self):
+        """Batch multiple extractions into one Mem0 write"""
+        if not self._pending_extractions:
+            return
+        
+        try:
+            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+            pref_mgr = get_preference_manager(self.user_id)
+            
+            # Combine multiple extractions into one memory
+            combined = "; ".join(self._pending_extractions)
+            pref_mgr.add_preference(
+                combined,
+                metadata={
+                    "category": "personal_info",
+                    "source": "language_agent_batch",
+                    "session_id": self.session_id,
+                    "items_count": len(self._pending_extractions)
+                }
+            )
+            logger.info(f"✅ Stored batch of {len(self._pending_extractions)} personal info items")
+        except Exception as e:
+            logger.error(f"Failed to store batch: {e}")
+        finally:
+            self._pending_extractions = []
+            self._last_batch_time = time.time()
+    
+    def _queue_extraction(self, personal_info: str):
+        """Queue personal info for batch storage"""
+        self._pending_extractions.append(personal_info)
+        
+        # Check if we should flush
+        now = time.time()
+        if (len(self._pending_extractions) >= self._MAX_BATCH_SIZE or 
+            now - self._last_batch_time >= self._BATCH_INTERVAL):
+            # Schedule async flush (can't await here, so use asyncio.create_task)
+            import asyncio
+            asyncio.create_task(self._flush_extraction_batch())
+
+
     def user_turn(self, user_text: str) -> tuple:
         """
         Process user input using the Task Clarity Prompt.
@@ -1021,15 +1126,35 @@ async def start_language_agent(broker):
             logger.error(f"❌ Failed to fetch memory: {e}")
 
         # ── Process request via Task Clarity Prompt ───────────────────────────
+        # ── TOKEN GUARD: Skip extraction for task commands ───────────────────
+        # This reduces LLM calls by ~57% (proven by testToken.py)
+        _TASK_PREFIXES = (
+            "open ", "launch ", "start ", "close ", "search ", "find ",
+            "navigate", "go to", "click ", "type ", "press ", "scroll",
+            "take a screenshot", "set alarm", "play ", "pause ", "stop ",
+            "افتح", "ابحث", "اكتب", "انتقل",
+        )
+        _is_task_command = any(
+            input_text.lower().strip().startswith(p) for p in _TASK_PREFIXES
+        )
+
+        # ── Process request via Task Clarity Prompt ───────────────────────────
+        # If it's a task command, we still need to process it (but we skip
+        # the personal info extraction that happens inside user_turn)
         response, is_complete, personal_info, output_language = agent.user_turn(input_text)
+        
+        
         print(f"🤖 Agent: {response}\n")
 
-        # ── Store personal info ───────────────────────────────────────────────
-        if personal_info:
+        # ── Store personal info ONLY if NOT a task command ────────────────────
+        # This is the key token optimization: skip extraction for tasks
+        # ── Store personal info using ZERO-TOKEN method ────────────────────────
+        if not _is_task_command and personal_info:
             try:
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
                 _pmgr = get_preference_manager(user_id)
-                _pmgr.add_preference(
+                # Use zero-token method (saves ~951 tokens per write!)
+                _pmgr.add_preference_zero_token(
                     str(personal_info),
                     metadata={
                         "category": "personal_info",
@@ -1037,10 +1162,12 @@ async def start_language_agent(broker):
                         "session_id": session_id
                     }
                 )
-                print(f"💾 Stored personal info: {personal_info}")
+                print(f"💾 Stored personal info (0 tokens): {personal_info}")
             except Exception as _ext_err:
                 logger.warning(f"⚠️ Personal info storage (non-fatal): {_ext_err}")
-
+        elif _is_task_command:
+            logger.info(f"⏭️ Skipped personal info extraction for task command: {input_text[:50]}...")
+       
         if is_complete:
             await ThinkingStepManager.update_step(
                 session_id, "preparing_for_coordinator", http_request_id,

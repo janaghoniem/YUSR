@@ -1581,10 +1581,11 @@ Extract now:"""
                 extraction_text = extraction_response.content if hasattr(extraction_response, 'content') else str(extraction_response)
                 preferences_to_store = extract_json_payload(extraction_text, [])
                 
+
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            pref_mgr.add_preference(
+                            pref_mgr.add_preference_zero_token(
                                 pref_obj["preference"],
                                 metadata={
                                     "category": pref_obj.get("category", "general"),
@@ -1594,21 +1595,50 @@ Extract now:"""
                             )
                             logger.info(f"💾 Stored preference: {pref_obj['preference']}")
                 
-                conversation_context = f"User requested: {task_summary['original_request']}. "
-                conversation_context += f"Successfully completed {success_count} steps."
+                # Extract apps and contexts used in this task
+                apps_used = list(set(
+                    t.extra_params.get("app_name", "")
+                    for t in state.get("tasks", [])
+                    if hasattr(t, "extra_params") and t.extra_params.get("app_name")
+                ))
+                contexts_used = list(set(
+                    t.context
+                    for t in state.get("tasks", [])
+                    if hasattr(t, "context")
+                ))
+                apps_used_str = ", ".join(filter(None, apps_used)) if apps_used else "none recorded"
                 
-                pref_mgr.add_preference(
+                conversation_context = (
+                    f"User completed task: {task_summary['original_request']}. "
+                    f"Apps used: {apps_used_str}. "
+                    f"Task types: {', '.join(contexts_used)}. "
+                    f"Steps taken: {success_count}."
+                )
+
+                pref_mgr.add_preference_zero_token(
                     conversation_context,
                     metadata={
                         "category": "conversation_history",
                         "session_id": session_id,
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
+                        "apps_used": apps_used,
+                        "steps": success_count,
+                        "original_request": task_summary["original_request"]
                     }
                 )
                 
+                # ── Run pattern learning after storing memories ───────────────
+                try:
+                    from agents.coordinator_agent.memory.pattern_learner import run_pattern_learning
+                    new_patterns = run_pattern_learning(user_id, pref_mgr)
+                    if new_patterns > 0:
+                        logger.info(f"🧠 {new_patterns} new behavioral patterns learned for {user_id}")
+                except Exception as pattern_err:
+                    logger.warning(f"⚠️ Pattern learning failed (non-fatal): {pattern_err}")
+                
             except Exception as e:
                 logger.error(f"❌ Failed to store preferences: {e}")
-        
+
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
         

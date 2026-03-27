@@ -1,0 +1,153 @@
+{
+  "run_label": "exp5_rl_fully_optimized",
+  "user_id": "eval_user_002",
+  "timestamp": "2026-03-26T23:22:33.121707",
+  "runs": 30,
+  "latency_read_mem0": {
+    "system": "mem0",
+    "n_calls": 30,
+    "p50_ms": 688.1,
+    "p95_ms": 1222.9,
+    "min_ms": 620.03,
+    "max_ms": 1226.9,
+    "mean_ms": 757.7,
+    "avg_results": 1.5
+  },
+  "latency_read_baseline": {
+    "system": "baseline",
+    "n_calls": 30,
+    "p50_ms": 146.3,
+    "p95_ms": 212.9,
+    "min_ms": 110.7,
+    "max_ms": 304.3,
+    "mean_ms": 162.7,
+    "avg_chars": 1146,
+    "total_messages": 27,
+    "total_sessions": 3
+  },
+  "latency_write_baseline": {
+    "p50_ms": 145.1,
+    "p95_ms": 323.8,
+    "min_ms": 118.9,
+    "max_ms": 323.8,
+    "mean_ms": 177.0
+  },
+  "latency_write_mem0": {
+    "skipped": true,
+    "reason": "disabled to save tokens"
+  },
+  "latency_embed": {
+    "p50_ms": 13.9,
+    "p95_ms": 35.8,
+    "mean_ms": 14.6
+  },
+  "recall": {
+    "n": 12,
+    "recall_at_1": 91.7,
+    "recall_at_5": 100.0,
+    "recall_at_10": 100.0,
+    "hits": {
+      "@1": 11,
+      "@5": 12,
+      "@10": 12
+    },
+    "details": [
+      {
+        "query": "open browser",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "buy wireless headphones",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "what is my name",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "suggest dinner recipes",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "change display settings",
+        "h1": false,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "set alarm for 7am",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "open text editor",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "search Python tutorials",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "open email",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "play video",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "what device am I using",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      },
+      {
+        "query": "change language settings",
+        "h1": true,
+        "h5": true,
+        "h10": true
+      }
+    ]
+  },
+  "tokens_mem0": {
+    "prefs_context_chars": 143,
+    "n_memories_injected": 2,
+    "estimated_tokens": 97,
+    "retrieval_ms": 684.0
+  },
+  "tokens_baseline": {
+    "n_messages": 27,
+    "history_chars": 1146,
+    "history_tokens": 261,
+    "estimated_tokens": 328
+  },
+  "tokens_comparison": {
+    "baseline_tokens": 328,
+    "mem0_tokens": 97,
+    "saved_tokens": 231,
+    "pct_saved": 70.4,
+    "baseline_cost": 0.000194,
+    "mem0_cost": 5.7e-05
+  },
+  "rl_overhead": {
+    "skipped": true,
+    "reason": "RL components not present"
+  }
+}

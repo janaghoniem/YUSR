@@ -1116,9 +1116,23 @@ def create_coordinator_graph():
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
+                #edit here
+                # await save_checkpoint_compat(
+                #     session_id,
+                #     {"execution_state": execution_state},
+                #     {"type": "task_progress"}
+                # )
                 await save_checkpoint_compat(
                     session_id,
-                    {"execution_state": execution_state},
+                    {
+                        "v": 1,
+                        "id": str(uuid.uuid4()),
+                        "ts": datetime.now().isoformat(),
+                        "channel_values": {"execution_state": execution_state},
+                        "channel_versions": {},
+                        "versions_seen": {},
+                        "pending_sends": [],
+                    },
                     {"type": "task_progress"}
                 )
                 logger.info(f"💾 Saved task progress")

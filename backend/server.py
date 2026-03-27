@@ -28,6 +28,7 @@ from agents.coordinator_agent.coordinator_agent import start_coordinator_agent
 from agents.reasoning_agent import start_reasoning_agent
 # from agents.execution_agent.Coordinator import start_execution_agent
 from agents.execution_agent.RAG.code_execution import initialize_execution_agent_for_server
+from agents.execution_agent.strategies.task_memory import TaskMemory
 from agents.utils.protocol import (
     AgentMessage, MessageType, AgentType, Channels,
     ClarificationMessage, StructuredResponse, ContextSnapshot, ResponseType
@@ -96,6 +97,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # Store pending responses (for HTTP API)
 pending_responses = {}
 
+
+def _preload_task_memory_embedding() -> None:
+    """Warm TaskMemory + embedding model before first user task."""
+    try:
+        logger.info("🔥 Preloading TaskMemory embedding model...")
+        mem = TaskMemory()
+        mem._get_embedder()
+        mem._embed(["startup warmup"])
+        logger.info("✅ TaskMemory embedding model preloaded")
+    except Exception as e:
+        logger.warning(f"⚠️ TaskMemory preload skipped: {e}")
+
 # Initialize Google Gemini API client using new SDK
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_KEY:
@@ -124,6 +137,9 @@ async def lifespan(app: FastAPI):
     broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_coordinator_output)
     broker.subscribe(Channels.WEBSOCKET_OUTPUT, handle_ws_output)
     logger.info("✅ Subscribed to output channels")
+
+    # Preload embedding model so first action task doesn't pay cold-start cost
+    await asyncio.to_thread(_preload_task_memory_embedding)
     
     # Start all agents as background tasks (don't wait for them)
     try:

@@ -1559,21 +1559,26 @@ def create_coordinator_graph():
 COMPLETED TASK:
 {json.dumps(task_summary, indent=2)}
 
-RULES:
-- Only extract repeatable preferences (app choices, workflows, patterns)
-- Ignore one-time actions
-- Format as clear statements
+Extract facts in these categories:
+1. TOOLS: Apps/sites the user regularly uses (e.g., "Uses Gmail for email", "Uses Chrome as browser")
+2. CONTACTS: People/emails the user interacts with (e.g., "Frequently emails shahd2202743@miuegypt.edu.eg")
+3. PATTERNS: How the user works (e.g., "Sends emails with short subjects", "Opens YouTube for videos")
+4. ACCOUNTS: Accounts the user has (e.g., "Has Gmail account hala2206898@miuegypt.edu.eg") - NO PASSWORDS EVER
+
+Be generous. If something appeared in the task, it is worth remembering.
+One-time actions still reveal user patterns (e.g., sent email means user uses email).
+Always extract at least 1-2 facts unless the task was purely system-level with no user data.
 
 OUTPUT FORMAT (JSON array):
 [
   {{
-    "preference": "User prefers Chrome for web browsing",
+    "preference": "Uses Gmail for sending emails",
     "category": "app_usage",
     "confidence": "high"
   }}
 ]
 
-If NO preferences, return: []
+If truly nothing useful (e.g. task was just opening notepad with no user data), return: []
 
 Extract now:"""
                 

@@ -677,7 +677,7 @@ User: "Login to Gmail with user@example.com and password mypass123"
 
 ## Example 3: Email Composition Task
 
-User: "Compose an email to rescheduling tomorrow's meeting with Sara"
+User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
 (Note: user does NOT provide subject or body, so reasoning task is needed to generate them. Assume user preferences indicate Gmail as email app.)
 
 - task_id: task_1
@@ -705,12 +705,12 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara"
 
 - task_id: task_3
   goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Fill the To field with Sara's email address
+  ai_prompt: Compose new email to sara@gmail.com
   device: mobile
   context: local
   target_agent: action
   extra_params:
-    text: sara@example.com
+    recipient: sara@gmail.com
   depends_on: ["task_2"]
 
 - task_id: task_4

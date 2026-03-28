@@ -1,5 +1,6 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -227,6 +228,7 @@ class _AutomationDemoState extends State<AutomationDemo>
   bool _isSidebarOpen = false;
   bool _chatMode = false;
   bool _showSettings = false;
+  int _activeSettingsSection = 0; // 0: Profile, 1: Memory
 
   final TextEditingController _textCtrl = TextEditingController();
   String _responseText = '';
@@ -258,7 +260,7 @@ class _AutomationDemoState extends State<AutomationDemo>
       duration: const Duration(milliseconds: 1000),
     );
 
-    _videoCtrl = VideoPlayerController.asset('assets/Background3.mp4')
+    _videoCtrl = VideoPlayerController.asset('assets/aura1.webm')
       ..initialize().then((_) {
         setState(() {});
         _videoCtrl
@@ -530,206 +532,639 @@ class _AutomationDemoState extends State<AutomationDemo>
     return TaskExecutionBorder(
       isExecuting: _isLoading || _isRecording,
       child: Scaffold(
-        backgroundColor: AuraTheme.bgBase,
+        backgroundColor:
+            Colors
+                .black, // AuraTheme.bgBase usually, but black is good behind video
         body: Stack(
           children: [
-            SafeArea(
-              child: Column(
-                children: [
-                  const SizedBox(height: 20),
-                  Padding(
-                    padding: const EdgeInsets.only(
-                      top: 60,
-                      left: 20,
-                      right: 20,
-                    ),
-                    child: Column(
-                      children: [
-                        Text(
-                          _greeting(),
-                          style: _f(
-                            Colors.white.withOpacity(0.50),
-                            size: 13,
-                            weight: FontWeight.w400,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          'What would you like done today?',
-                          style: _f(
-                            Colors.white,
-                            size: 22,
-                            weight: FontWeight.w600,
-                            spacing: -0.4,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Spacer(),
-
-                  if (_transcribedText.isNotEmpty && !_isThinking) ...[
-                    _infoCard(icon: Icons.mic_rounded, text: _transcribedText),
-                    const SizedBox(height: 12),
-                  ],
-
-                  if (_isThinking) ...[
-                    AnimatedBuilder(
-                      animation: _thinkCtrl,
-                      builder:
-                          (_, __) => _infoCard(
-                            icon: null,
-                            text: 'Thinking...',
-                            spinner: true,
-                            spinV: _thinkCtrl.value,
-                          ),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-
-                  if (_responseText.isNotEmpty && !_isThinking) ...[
-                    _infoCard(icon: Icons.auto_awesome, text: _responseText),
-                    const SizedBox(height: 12),
-                  ],
-
-                  const Spacer(),
-
-                  if (!_serviceEnabled)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 14),
-                      child: Column(
-                        children: [
-                          _flatButton(
-                            icon: Icons.accessibility_new_rounded,
-                            label: 'Enable Accessibility Service',
-                            onTap: _openAccessibilitySettings,
-                            primary: true,
-                          ),
-                          const SizedBox(height: 8),
-                          _flatButton(
-                            icon: Icons.refresh_rounded,
-                            label: 'Refresh Status',
-                            onTap: _checkServiceStatus,
-                            primary: false,
-                          ),
-                        ],
-                      ),
-                    ),
-
-                  _buildVoiceControls(),
-                  const SizedBox(height: 90),
-                ],
-              ),
-            ),
-
-            _buildSidebar(),
-            if (_showSettings) _buildSettingsModal(),
-
-            if (!_isSidebarOpen && !_showSettings)
-              Positioned(
-                top: 50,
-                left: 20,
-                child: GestureDetector(
-                  onTap: () => setState(() => _isSidebarOpen = true),
-                  child: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AuraTheme.bgElevated.withOpacity(0.55),
-                      borderRadius: BorderRadius.circular(11),
-                    ),
-                    child: const Icon(
-                      Icons.menu_rounded,
-                      color: Colors.white,
-                      size: 22,
-                    ),
+            // Video Background
+            if (_videoCtrl.value.isInitialized)
+              SizedBox.expand(
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _videoCtrl.value.size.width,
+                    height: _videoCtrl.value.size.height,
+                    child: VideoPlayer(_videoCtrl),
                   ),
                 ),
               ),
+
+            SafeArea(child: _chatMode ? _buildChatMode() : _buildVoiceMode()),
+
+            _buildSidebar(),
+            if (_showSettings) _buildSettingsModal(),
           ],
         ),
       ),
     );
   }
 
-  // ── helpers ────────────────────────────────────────────────────────────────
-
-  Widget _infoCard({
-    IconData? icon,
-    required String text,
-    bool spinner = false,
-    double spinV = 0,
-  }) => Container(
-    alignment: Alignment.topLeft,
-    margin: const EdgeInsets.symmetric(horizontal: 20),
-    padding: const EdgeInsets.all(14),
-    decoration: BoxDecoration(
-      color: AppColors.darkPlum4.withOpacity(0.55),
-      borderRadius: BorderRadius.circular(15),
-      border: Border.all(color: AuraTheme.pink400.withOpacity(0.18)),
-    ),
-    child: Row(
+  Widget _buildChatMode() {
+    return Column(
       children: [
-        if (spinner)
-          SizedBox(
-            width: 17,
-            height: 17,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.7,
-              valueColor: AlwaysStoppedAnimation(
-                AuraTheme.pink400.withOpacity(0.55 + spinV * 0.4),
+        // Header
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              GestureDetector(
+                onTap: () => setState(() => _isSidebarOpen = true),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: AuraTheme.bgElevated.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.05)),
+                  ),
+                  child: const Icon(
+                    Icons.menu_rounded,
+                    color: AuraTheme.textSecondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+              Text(
+                'AURA',
+                style: _f(
+                  AuraTheme.textPrimary,
+                  size: 16,
+                  weight: FontWeight.w600,
+                  spacing: 1.5,
+                ),
+              ),
+              GestureDetector(
+                onTap: () {
+                  // close/minimize logic
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: AuraTheme.bgElevated.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.05)),
+                  ),
+                  child: const Icon(
+                    Icons.close_rounded,
+                    color: AuraTheme.textSecondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Chat content area with frosted glass
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.08),
+                width: 1,
               ),
             ),
-          )
-        else if (icon != null)
-          Icon(icon, color: AuraTheme.pink300, size: 17),
-        const SizedBox(width: 11),
-        Expanded(
-          child: Text(
-            text,
-            style: _f(Colors.white.withOpacity(0.88), size: 13, height: 1.52),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  color: AuraTheme.bgSurface.withOpacity(0.4),
+                  padding: const EdgeInsets.all(20),
+                  child: ListView(
+                    physics: const BouncingScrollPhysics(),
+                    children: [
+                      if (_transcribedText.isEmpty &&
+                          _responseText.isEmpty) ...[
+                        const SizedBox(height: 40),
+                        Text(
+                          _greeting(),
+                          style: _f(AuraTheme.textMuted, size: 14),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'What would you like to know?',
+                          style: _f(
+                            AuraTheme.textPrimary,
+                            size: 24,
+                            weight: FontWeight.w600,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+
+                      // User message
+                      if (_transcribedText.isNotEmpty) ...[
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: AnimatedOpacity(
+                            opacity: 1.0,
+                            duration: const Duration(milliseconds: 500),
+                            child: Text(
+                              _transcribedText,
+                              style: _f(
+                                AuraTheme.textSecondary,
+                                size: 16,
+                                weight: FontWeight.w400,
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      // Thinking indicator
+                      if (_isThinking) ...[
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedBuilder(
+                            animation: _thinkCtrl,
+                            builder: (_, __) {
+                              return Opacity(
+                                opacity: 0.5 + (_thinkCtrl.value * 0.5),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.auto_awesome,
+                                      color: AuraTheme.pink400,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Thinking...',
+                                      style: _f(
+                                        AuraTheme.pink300,
+                                        size: 15,
+                                        weight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      // AI Response
+                      if (_responseText.isNotEmpty && !_isThinking) ...[
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedOpacity(
+                            opacity: 1.0,
+                            duration: const Duration(milliseconds: 500),
+                            child: Text(
+                              _responseText,
+                              style: _f(
+                                AuraTheme.textPrimary,
+                                size: 16,
+                                weight: FontWeight.w500,
+                                height: 1.6,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      if (!_serviceEnabled)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 20, bottom: 20),
+                          child: Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: AuraTheme.pink900.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: AuraTheme.pink400.withOpacity(0.3),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.warning_amber_rounded,
+                                      color: AuraTheme.pink400,
+                                      size: 20,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Action Service Disabled',
+                                      style: _f(
+                                        AuraTheme.pink300,
+                                        weight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  'AURA requires accessibility permissions to interact with other apps on your screen.',
+                                  style: _f(AuraTheme.textSecondary, size: 13),
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _glassButton(
+                                        icon: Icons.accessibility_new_rounded,
+                                        label: 'Settings',
+                                        onTap: _openAccessibilitySettings,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _glassButton(
+                                        icon: Icons.refresh_rounded,
+                                        label: 'Refresh',
+                                        onTap: _checkServiceStatus,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+
+        // Text Entry Field
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(30),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgOverlay.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.08),
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _textCtrl,
+                        style: _f(AuraTheme.textPrimary, size: 15),
+                        decoration: InputDecoration(
+                          hintText: 'Ask anything...',
+                          hintStyle: _f(AuraTheme.textMuted, size: 15),
+                          border: InputBorder.none,
+                          isDense: true,
+                        ),
+                        onSubmitted: (val) {
+                          if (val.isNotEmpty) {
+                            _sendTextToBackend(val);
+                            _textCtrl.clear();
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () {
+                        if (_textCtrl.text.isNotEmpty) {
+                          _sendTextToBackend(_textCtrl.text);
+                          _textCtrl.clear();
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AuraTheme.bgMuted.withOpacity(0.5),
+                        ),
+                        child: const Icon(
+                          Icons.arrow_upward_rounded,
+                          color: AuraTheme.textPrimary,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap:
+                          () => setState(() {
+                            _chatMode = false;
+                            _toggleRecording();
+                          }),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AuraTheme.pink400.withOpacity(0.15),
+                        ),
+                        child: const Icon(
+                          Icons.mic_rounded,
+                          color: AuraTheme.pink400,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
       ],
-    ),
-  );
+    );
+  }
 
-  Widget _flatButton({
+  Widget _buildVoiceGlassContainer({
+    required Widget child,
+    double borderRadius = 24,
+    double sigma = 20,
+    EdgeInsetsGeometry padding = const EdgeInsets.all(20),
+  }) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.white.withOpacity(0.08), width: 1),
+        borderRadius: BorderRadius.circular(borderRadius),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
+          child: Container(
+            padding: padding,
+            color: AuraTheme.bgSurface.withOpacity(0.4),
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVoiceMode() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+      child: Column(
+        children: [
+          // 1. Top Container (Logo & Name)
+          Expanded(
+            flex: 3,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 32,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  AnimatedBuilder(
+                    animation: _pulseCtrl,
+                    builder: (context, child) {
+                      return Transform.rotate(
+                        angle: _pulseCtrl.value * 2 * 3.14159,
+                        child: Icon(
+                          Icons.blur_on_rounded,
+                          size: 70 + (_pulseCtrl.value * 20),
+                          color: AuraTheme.pink400.withOpacity(
+                            0.6 + (_pulseCtrl.value * 0.4),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'AURA',
+                    style: _f(
+                      AuraTheme.textPrimary,
+                      size: 22,
+                      weight: FontWeight.w600,
+                      spacing: 3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 2. Middle Container (Status, X, Settings)
+          _buildVoiceGlassContainer(
+            borderRadius: 50, // More rounded corners per request
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                GestureDetector(
+                  onTap:
+                      () => setState(() {
+                        _chatMode = true;
+                        if (_isRecording) _toggleRecording();
+                      }),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.transparent,
+                    child: const Icon(
+                      Icons.close_rounded,
+                      color: AuraTheme.textSecondary,
+                      size: 24,
+                    ),
+                  ),
+                ),
+
+                AnimatedBuilder(
+                  animation: _pulseCtrl,
+                  builder: (context, child) {
+                    String status = 'Ready';
+                    if (_isRecording) status = 'Listening...';
+                    if (_isThinking) status = 'Processing...';
+
+                    return Text(
+                      status,
+                      style: _f(
+                        _isRecording
+                            ? AuraTheme.pink400
+                            : AuraTheme.textSecondary,
+                        size: 16,
+                        weight: FontWeight.w500,
+                      ),
+                    );
+                  },
+                ),
+
+                GestureDetector(
+                  onTap: () => setState(() => _showSettings = true),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.transparent,
+                    child: const Icon(
+                      Icons.settings_rounded,
+                      color: AuraTheme.textSecondary,
+                      size: 24,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 3. Bottom Container (Transcription & Waveform)
+          Expanded(
+            flex: 5,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 32,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      alignment: Alignment.center,
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: Text(
+                          _transcribedText.isEmpty && _isRecording
+                              ? 'Speak now...'
+                              : (_transcribedText.isEmpty && !_isRecording
+                                  ? 'Ready'
+                                  : _transcribedText),
+                          style: _f(
+                            AuraTheme.textPrimary,
+                            size: 26,
+                            weight: FontWeight.w300,
+                            height: 1.4,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Waveform and Record Button
+                  SizedBox(
+                    height: 140,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Flexible(
+                          child: AnimatedBuilder(
+                            animation: _pulseCtrl,
+                            builder: (context, child) {
+                              return Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: List.generate(15, (index) {
+                                  double height =
+                                      20.0 +
+                                      (index % 3 == 0 ? 30 : 10) *
+                                          _pulseCtrl.value;
+                                  return Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 4,
+                                    ),
+                                    width: 4,
+                                    height: height,
+                                    decoration: BoxDecoration(
+                                      color: AuraTheme.pink400.withOpacity(0.6),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  );
+                                }),
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        GestureDetector(
+                          onTap: _toggleRecording,
+                          child: AnimatedBuilder(
+                            animation: _pulseCtrl,
+                            builder: (context, child) {
+                              return Container(
+                                padding: const EdgeInsets.all(18),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color:
+                                      _isRecording
+                                          ? AuraTheme.pink500
+                                          : AuraTheme.bgMuted,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: (_isRecording
+                                              ? AuraTheme.pink500
+                                              : Colors.transparent)
+                                          .withOpacity(0.4 * _pulseCtrl.value),
+                                      blurRadius: 20,
+                                      spreadRadius: 10,
+                                    ),
+                                  ],
+                                ),
+                                child: Icon(
+                                  _isRecording
+                                      ? Icons.stop_rounded
+                                      : Icons.mic_rounded,
+                                  color: AuraTheme.textPrimary,
+                                  size: 32,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _glassButton({
     required IconData icon,
     required String label,
     required VoidCallback onTap,
-    required bool primary,
   }) => GestureDetector(
     onTap: onTap,
     child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        // Flat colours — no gradient — GLES2-safe
-        color: AuraTheme.bgElevated.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(11),
-        border: Border.all(
-          color:
-              primary
-                  ? AuraTheme.pink400.withOpacity(0.28)
-                  : Colors.white.withOpacity(0.10),
-          width: 1.1,
-        ),
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.1), width: 1.5),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            icon,
-            color: primary ? AuraTheme.pink400 : Colors.white.withOpacity(0.55),
-            size: 16,
-          ),
+          Icon(icon, color: Colors.white.withOpacity(0.8), size: 18),
           const SizedBox(width: 8),
           Text(
             label,
             style: _f(
-              primary ? AuraTheme.pink400 : Colors.white.withOpacity(0.60),
-              size: 12,
+              Colors.white.withOpacity(0.8),
+              size: 13,
               weight: FontWeight.w500,
             ),
           ),
@@ -738,242 +1173,121 @@ class _AutomationDemoState extends State<AutomationDemo>
     ),
   );
 
-  // ── Voice controls ─────────────────────────────────────────────────────────
-
-  Widget _buildVoiceControls() {
-    if (_chatMode) {
-      return Container(
-        margin: const EdgeInsets.symmetric(horizontal: 20),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        decoration: BoxDecoration(
-          color: AuraTheme.bgElevated.withOpacity(0.7),
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(color: Colors.white.withOpacity(0.07), width: 1),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _textCtrl,
-                style: _f(Colors.white, size: 14),
-                decoration: InputDecoration(
-                  hintText: 'Type your message...',
-                  hintStyle: _f(Colors.white.withOpacity(0.30), size: 14),
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                ),
-                onSubmitted: (_) => _sendTextToBackend(_textCtrl.text),
-              ),
-            ),
-            _circleBtn(
-              icon: Icons.arrow_upward_rounded,
-              onTap: () => _sendTextToBackend(_textCtrl.text),
-            ),
-            const SizedBox(width: 4),
-            _circleBtn(
-              icon: Icons.mic_rounded,
-              onTap: () => setState(() => _chatMode = false),
-            ),
-            const SizedBox(width: 4),
-          ],
-        ),
-      );
-    }
-
-    return AnimatedBuilder(
-      animation: _pulseCtrl,
-      builder: (_, __) {
-        final pv = _pulseCtrl.value;
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 46),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color:
-                _isRecording
-                    ? AuraTheme.bgElevated.withOpacity(0.8)
-                    : AppColors.darkPlum4.withOpacity(0.65),
-            borderRadius: BorderRadius.circular(32),
-            border: Border.all(
-              color:
-                  _isRecording
-                      ? AuraTheme.pink400.withOpacity(0.32 + pv * 0.28)
-                      : Colors.white.withOpacity(0.10),
-              width: 1.2,
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _circleBtn(
-                icon: Icons.close_rounded,
-                small: true,
-                onTap: () => setState(() => _chatMode = true),
-              ),
-              const SizedBox(width: 10),
-
-              // Main mic button — flat color, no gradient
-              GestureDetector(
-                onTap: _toggleRecording,
-                child: Container(
-                  width: 66,
-                  height: 66,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    // Flat solid colour — GLES2-safe
-                    color:
-                        _isRecording
-                            ? AuraTheme.pink500
-                            : AuraTheme.pink400Dull.withOpacity(0.35),
-                    border: Border.all(
-                      color:
-                          _isRecording
-                              ? Colors.transparent
-                              : Colors.white.withOpacity(0.14),
-                      width: 1.2,
-                    ),
-                  ),
-                  child: Icon(
-                    _isRecording ? Icons.stop_rounded : Icons.mic_rounded,
-                    size: 30,
-                    color:
-                        _isRecording
-                            ? Colors.white
-                            : Colors.white.withOpacity(0.72),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 10),
-              _circleBtn(
-                icon: Icons.settings_rounded,
-                small: true,
-                onTap: () => setState(() => _showSettings = true),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _circleBtn({
-    required IconData icon,
-    bool small = false,
-    required VoidCallback onTap,
-  }) {
-    final sz = small ? 40.0 : 44.0;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: sz,
-        height: sz,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.white.withOpacity(0.07),
-          border: Border.all(color: Colors.white.withOpacity(0.12)),
-        ),
-        child: Icon(
-          icon,
-          color: Colors.white.withOpacity(0.75),
-          size: small ? 17 : 19,
-        ),
-      ),
-    );
-  }
-
   // ── Sidebar ────────────────────────────────────────────────────────────────
 
   Widget _buildSidebar() {
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 280),
-      curve: Curves.easeInOutCubic,
-      left: _isSidebarOpen ? 0 : -280,
-      top: 0,
-      bottom: 0,
-      child: Container(
-        width: 280,
-        color: AuraTheme.bgSurface,
-        child: SafeArea(
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'AURA',
-                      style: _f(
-                        Colors.white,
-                        weight: FontWeight.w600,
-                        size: 17,
-                        spacing: 4,
+    return Stack(
+      children: [
+        if (_isSidebarOpen)
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => setState(() => _isSidebarOpen = false),
+              child: Container(color: Colors.black.withOpacity(0.3)),
+            ),
+          ),
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeInOutCubic,
+          left: _isSidebarOpen ? 0 : -280,
+          top: 0,
+          bottom: 0,
+          child: ClipRRect(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+              child: Container(
+                width: 280,
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgElevated.withOpacity(0.6),
+                  border: Border(
+                    right: BorderSide(color: Colors.white.withOpacity(0.08)),
+                  ),
+                ),
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'AURA',
+                              style: _f(
+                                Colors.white,
+                                weight: FontWeight.w600,
+                                size: 17,
+                                spacing: 4,
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap:
+                                  () => setState(() => _isSidebarOpen = false),
+                              child: Icon(
+                                Icons.close_rounded,
+                                color: Colors.white.withOpacity(0.6),
+                                size: 20,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                    GestureDetector(
-                      onTap: () => setState(() => _isSidebarOpen = false),
-                      child: const Icon(
-                        Icons.close_rounded,
-                        color: Colors.white,
-                        size: 20,
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: GestureDetector(
+                          onTap:
+                              () => setState(() {
+                                _responseText = '';
+                                _transcribedText = '';
+                                _textCtrl.clear();
+                                _chatMode = false;
+                                _isSidebarOpen = false;
+                              }),
+                          child: _sidebarRow(Icons.edit_square, 'New chat'),
+                        ),
                       ),
-                    ),
-                  ],
+                      const Spacer(),
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: GestureDetector(
+                          onTap:
+                              () => setState(() {
+                                _showSettings = true;
+                                _isSidebarOpen = false;
+                              }),
+                          child: _sidebarRow(
+                            Icons.settings_rounded,
+                            'Settings',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: GestureDetector(
-                  onTap:
-                      () => setState(() {
-                        _responseText = '';
-                        _transcribedText = '';
-                        _textCtrl.clear();
-                        _chatMode = false;
-                        _isSidebarOpen = false;
-                      }),
-                  child: _sidebarRow(Icons.edit_square, 'New chat'),
-                ),
-              ),
-              const Spacer(),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: GestureDetector(
-                  onTap:
-                      () => setState(() {
-                        _showSettings = true;
-                        _isSidebarOpen = false;
-                      }),
-                  child: _sidebarRow(Icons.settings_rounded, 'Settings'),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
+      ],
     );
   }
 
-  Widget _sidebarRow(IconData icon, String label) => Container(
-    padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 13),
+  Widget _sidebarRow(IconData icon, String label) => AnimatedContainer(
+    duration: const Duration(milliseconds: 200),
+    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
     decoration: BoxDecoration(
-      color: AuraTheme.bgElevated.withOpacity(0.4),
-      borderRadius: BorderRadius.circular(10),
-      border: Border.all(color: Colors.white.withOpacity(0.06)),
+      color: Colors.white.withOpacity(0.03),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.white.withOpacity(0.05)),
     ),
     child: Row(
       children: [
-        Icon(icon, color: Colors.white.withOpacity(0.70), size: 16),
-        const SizedBox(width: 11),
+        Icon(icon, color: Colors.white.withOpacity(0.8), size: 16),
+        const SizedBox(width: 12),
         Text(
           label,
           style: _f(
-            Colors.white.withOpacity(0.85),
-            size: 13,
+            Colors.white.withOpacity(0.9),
+            size: 14,
             weight: FontWeight.w500,
           ),
         ),
@@ -981,63 +1295,379 @@ class _AutomationDemoState extends State<AutomationDemo>
     ),
   );
 
-  // ── Settings modal ─────────────────────────────────────────────────────────
+  //  Settings modal
 
-  Widget _buildSettingsModal() => Container(
-    color: Colors.black.withOpacity(0.80),
-    child: Center(
-      child: Container(
-        width: MediaQuery.of(context).size.width * 0.92,
-        height: MediaQuery.of(context).size.height * 0.82,
-        decoration: BoxDecoration(
-          color: AuraTheme.bgSurface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.white.withOpacity(0.06)),
+  Widget _buildSettingsModal() {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: () => setState(() => _showSettings = false),
+            child: Container(color: Colors.black.withOpacity(0.6)),
+          ),
         ),
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Settings',
-                    style: _f(
-                      Colors.white.withOpacity(0.9),
-                      size: 17,
-                      weight: FontWeight.w600,
-                    ),
+        Center(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(24),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.fastOutSlowIn,
+                width: MediaQuery.of(context).size.width * 0.92,
+                height: MediaQuery.of(context).size.height * 0.85,
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgSurface.withOpacity(0.6),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.1),
+                    width: 1.5,
                   ),
-                  GestureDetector(
-                    onTap: () => setState(() => _showSettings = false),
-                    child: Container(
-                      padding: const EdgeInsets.all(7),
-                      decoration: BoxDecoration(
-                        color: AuraTheme.bgElevated.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: const Icon(
-                        Icons.close_rounded,
-                        color: Colors.white,
-                        size: 17,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 30,
+                      spreadRadius: -5,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  children: [
+                    // Header
+                    Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Settings',
+                            style: _f(
+                              Colors.white.withOpacity(0.95),
+                              size: 18,
+                              weight: FontWeight.w600,
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () => setState(() => _showSettings = false),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(
+                                Icons.close_rounded,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ),
-                ],
+
+                    // Nav Tabs
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.05),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _buildSettingsTab(
+                                0,
+                                'Profile',
+                                Icons.person_rounded,
+                              ),
+                            ),
+                            Expanded(
+                              child: _buildSettingsTab(
+                                1,
+                                'Memory',
+                                Icons.memory_rounded,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Content Area
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child:
+                            _activeSettingsSection == 0
+                                ? _buildProfileSettings()
+                                : _buildMemorySettings(),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            Expanded(
-              child: Center(
-                child: Text(
-                  'Settings content',
-                  style: _f(AuraTheme.textMuted, size: 13),
-                ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsTab(int index, String label, IconData icon) {
+    bool isActive = _activeSettingsSection == index;
+    return GestureDetector(
+      onTap: () => setState(() => _activeSettingsSection = index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: isActive ? Colors.white.withOpacity(0.1) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: isActive ? Colors.white : AuraTheme.textSecondary,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: _f(
+                isActive ? Colors.white : AuraTheme.textSecondary,
+                size: 13,
+                weight: isActive ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
           ],
         ),
       ),
-    ),
-  );
+    );
+  }
+
+  Widget _buildProfileSettings() {
+    return SingleChildScrollView(
+      key: const ValueKey('profile'),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSettingsInput('Username', _userName),
+          const SizedBox(height: 16),
+          _buildSettingsInput('Email', 'user@example.com'),
+          const SizedBox(height: 16),
+          _buildSettingsDropdown('Theme', 'Dark'),
+          const SizedBox(height: 16),
+          _buildSettingsDropdown('Voice', 'Gacrux'),
+          const SizedBox(height: 30),
+          _buildActionBtn('Save Changes', AuraTheme.pink500, () {}),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMemorySettings() {
+    return SingleChildScrollView(
+      key: const ValueKey('memory'),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Total preferences',
+                  '24',
+                  AuraTheme.pink400,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Personal info',
+                  '8',
+                  AuraTheme.pink300,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'App preferences',
+                  '16',
+                  AuraTheme.pink200,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Storage used',
+                  '1.2 MB',
+                  AuraTheme.textSecondary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 30),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withOpacity(0.05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Manage Memory',
+                  style: _f(Colors.white, size: 15, weight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Clearing memory will remove all stored preferences and context.',
+                  style: _f(AuraTheme.textSecondary, size: 13, height: 1.4),
+                ),
+                const SizedBox(height: 16),
+                _buildActionBtn(
+                  'Clear Memory',
+                  Colors.redAccent.withOpacity(0.8),
+                  () {},
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSettingsInput(String label, String placeholder) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: _f(AuraTheme.textSecondary, size: 13, weight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.08)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(placeholder, style: _f(Colors.white, size: 14)),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsDropdown(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: _f(AuraTheme.textSecondary, size: 13, weight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.08)),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(value, style: _f(Colors.white, size: 14)),
+              Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: AuraTheme.textSecondary,
+                size: 18,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMemoryStatCard(String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(value, style: _f(color, size: 24, weight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: _f(
+              AuraTheme.textSecondary,
+              size: 12,
+              weight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionBtn(String label, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.3),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Text(
+          label,
+          style: _f(Colors.white, size: 14, weight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
 }

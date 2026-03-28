@@ -47,9 +47,7 @@ dependencies:
 
   audioplayers: any
   flutter_tts: ^4.2.5
-  three_dart: ^0.0.16
   universal_html: ^2.3.0
-  flutter_gl: ^0.0.21
   speech_to_text: ^7.3.0
 dev_dependencies:
   flutter_test:
@@ -96,6 +94,7 @@ flutter:
   assets:
     - assets/aura.webm
     - assets/aura1.webm
+    - assets/aura_onboarding.webm
     - assets/Background3.mp4
     - assets/Background2.mp4
     - assets/Background.mp4

@@ -52,6 +52,7 @@ try:
             "$or": [
                 {"metadata.step": {"$exists": False}},
                 {"metadata": {"$exists": False}},
+                {"metadata": None},
             ]
         })
         if _deleted.deleted_count > 0:
@@ -90,12 +91,25 @@ def extract_json_payload(text: str, default):
     return default
 
 async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Save checkpoint via MongoDBSaver.
+    IMPORTANT: metadata MUST contain 'step' (int) or LangGraph will crash
+    on the next read with KeyError: 'step'.
+    """
     if not checkpointer or not session_id:
         return False
+
+    # Ensure 'step' is always present in metadata — LangGraph requires it
+    safe_metadata = {"step": 0, "source": "loop"}
+    if metadata:
+        safe_metadata.update(metadata)
+    if "step" not in safe_metadata or not isinstance(safe_metadata.get("step"), int):
+        safe_metadata["step"] = 0
+
     kwargs = {
         "config": {"configurable": {"thread_id": session_id, "checkpoint_ns": ""}},
         "checkpoint": checkpoint_value,
-        "metadata": metadata or {}
+        "metadata": safe_metadata,
     }
     try:
         await checkpointer.aput(**kwargs)
@@ -106,7 +120,9 @@ async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, me
         kwargs["new_versions"] = {}
         await checkpointer.aput(**kwargs)
         return True
-
+    except Exception as e:
+        logger.warning(f"⚠️ save_checkpoint_compat failed (non-fatal): {e}")
+        return False
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -1148,7 +1164,7 @@ def create_coordinator_graph():
                         "versions_seen": {},
                         "pending_sends": [],
                     },
-                    {"type": "task_progress"}
+                    {"step": 0, "type": "task_progress"}  # step key is required
                 )
                 logger.info(f"💾 Saved task progress")
             except Exception as e:
@@ -1889,10 +1905,12 @@ async def start_coordinator_agent(broker_instance):
             "user_id": user_id,
             "conversation_history": []
         }
+
         config = {
             "configurable": {
                 "thread_id": session_id,
-                "user_id": user_id
+                "checkpoint_ns": "",   # required by MongoDBSaver
+                "user_id": user_id,
             }
         }
 
@@ -1919,13 +1937,35 @@ async def start_coordinator_agent(broker_instance):
                     try:
                         if checkpointer and session_id:
                             mongo_client["yusr_db"]["langgraph_checkpoints"].delete_many(
-                                {"thread_id": session_id}
-                            )
+                        {
+                            "$or": [
+                                {"thread_id": session_id},
+                                {"config.configurable.thread_id": session_id},
+                            ]
+                        }
+                    )
+                            mongo_client["yusr_db"]["langgraph_checkpoints"].delete_many(
+                        {
+                            "$or": [
+                                {"thread_id": session_id},
+                                {"config.configurable.thread_id": session_id},
+                            ]
+                        }
+                    )
                             logger.info(f"🗑️ Cleared corrupt checkpoint for session {session_id}")
                     except Exception as _clear_err:
                         logger.warning(f"⚠️ Could not clear checkpoint: {_clear_err}")
-                    # Retry without checkpoint (fresh graph run)
-                    result = await coordinator_graph.ainvoke(state_input, None)
+    
+                    #result = await coordinator_graph.ainvoke(state_input, None)
+                    # Retry with a fresh config — passing None causes LangGraph
+                    # to raise ValueError when a checkpointer is attached.
+                    fresh_config = {
+                        "configurable": {
+                            "thread_id": f"{session_id}_fresh_{uuid.uuid4().hex[:8]}",
+                            "checkpoint_ns": "",
+                        }
+                    }
+                    result = await coordinator_graph.ainvoke(state_input, fresh_config)
                 else:
                     raise
 

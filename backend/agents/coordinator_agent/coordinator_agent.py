@@ -33,6 +33,7 @@ llm = ChatGroq(
     groq_api_key=GROQ_API_KEY
 ) 
 
+
 # Initialize MongoDB checkpointer
 try:
     mongo_client = MongoClient(MONGODB_URI)
@@ -43,6 +44,20 @@ try:
         collection_name="langgraph_checkpoints"
     )
     logger.info("✅ Initialized MongoDB checkpointer for LangGraph")
+    # Clean up any corrupt checkpoints that are missing the 'step' metadata key.
+    # These cause a KeyError crash when LangGraph tries to resume the session.
+    try:
+        _cp_col = mongo_client["yusr_db"]["langgraph_checkpoints"]
+        _deleted = _cp_col.delete_many({
+            "$or": [
+                {"metadata.step": {"$exists": False}},
+                {"metadata": {"$exists": False}},
+            ]
+        })
+        if _deleted.deleted_count > 0:
+            logger.info(f"🗑️ Cleaned up {_deleted.deleted_count} corrupt checkpoints on startup")
+    except Exception as _cleanup_err:
+        logger.warning(f"⚠️ Checkpoint cleanup on startup failed (non-fatal): {_cleanup_err}")
 except Exception as e:
     logger.error(f"❌ Failed to initialize MongoDB checkpointer: {e}")
     checkpointer = None
@@ -1892,9 +1907,31 @@ async def start_coordinator_agent(broker_instance):
                 language=user_language
             )
 
-            result = await coordinator_graph.ainvoke(state_input, config)
+            try:
+                result = await coordinator_graph.ainvoke(state_input, config)
+            except KeyError as _ke:
+                if str(_ke) == "'step'":
+                    logger.warning(
+                        f"⚠️ Corrupt LangGraph checkpoint for session {session_id} "
+                        f"(missing 'step' key) — clearing checkpoint and retrying fresh"
+                    )
+                    # Clear the corrupt checkpoint from MongoDB
+                    try:
+                        if checkpointer and session_id:
+                            mongo_client["yusr_db"]["langgraph_checkpoints"].delete_many(
+                                {"thread_id": session_id}
+                            )
+                            logger.info(f"🗑️ Cleared corrupt checkpoint for session {session_id}")
+                    except Exception as _clear_err:
+                        logger.warning(f"⚠️ Could not clear checkpoint: {_clear_err}")
+                    # Retry without checkpoint (fresh graph run)
+                    result = await coordinator_graph.ainvoke(state_input, None)
+                else:
+                    raise
+
             logger.info(f"✅ Task processing complete: {result.get('status')}")
-    
+
+  
     async def handle_action_result(message: AgentMessage):
         """
         Handle result from Action/Reasoning layer (ASYNC-SAFE VERSION)

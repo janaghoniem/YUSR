@@ -39,10 +39,11 @@ function App() {
 
   
   // ✅ AUTH STATE — "app" | "login" | "onboard"
-  const [authState, setAuthState] = useState(() => {
-      if (localStorage.getItem("onboardingComplete") === "true") return "app";
-      return "login";
-  });
+  // const [authState, setAuthState] = useState(() => {
+  //     if (localStorage.getItem("onboardingComplete") === "true") return "app";
+  //     return "login";
+  // });
+  const [authState, setAuthState] = useState("login");
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
   const [sessionId, setSessionId] = useState(() => {
       const stored = localStorage.getItem("currentSessionId");

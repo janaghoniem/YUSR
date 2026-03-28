@@ -183,6 +183,7 @@ class UIAction(BaseModel):
     # Action parameters
     element_id:    Optional[int]   = None   # click / type / long_click / double_click
     text:          Optional[str]   = None   # type
+    clear_first:   bool            = False  # type: replace existing content before typing
     direction:     Optional[Literal["up", "down", "left", "right"]] = None  # scroll
     duration:      Optional[int]   = None   # wait (ms) or long_click (ms)
     global_action: Optional[Literal[
@@ -192,6 +193,10 @@ class UIAction(BaseModel):
     # ── ADD x, y for coordinate_tap ──────────────────────────────────────
     x: Optional[int] = None   # absolute pixel X (coordinate_tap only)
     y: Optional[int] = None   # absolute pixel Y (coordinate_tap only)
+    start_x_percent: Optional[int] = None
+    start_y_percent: Optional[int] = None
+    end_x_percent:   Optional[int] = None
+    end_y_percent:   Optional[int] = None
 
     # Metadata
     retry_count: int = 0

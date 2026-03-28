@@ -984,8 +984,8 @@ CHROMA_PATH  = os.path.join(_DIR, "task_memory_db")
 JSONL_PATH   = os.path.join(_DIR, "..", "..", "..", "..", "Android-Dataset", "cleaned_recipes.jsonl")
 
 # ── Retrieval thresholds ───────────────────────────────────────────────────
-THRESHOLD_EXECUTE  = 0.90   # ≥ this → run as script (many steps score 0.89–0.92)
-THRESHOLD_HINT     = 0.68   # ≥ this → inject as hint (many steps score 0.68–0.71)
+THRESHOLD_EXECUTE  = 0.85   # ≥ this → run as script
+THRESHOLD_HINT     = 0.65   # ≥ this → inject as hint
 SIGNATURE_OVERLAP  = 0.60   # minimum Jaccard for screen signature match
 FUZZY_TEXT_THRESH  = 0.80   # minimum SequenceMatcher ratio for fuzzy element text
 
@@ -1088,9 +1088,7 @@ def _build_composite_document(overall_goal: str, step_instruction: str) -> str:
     for selector resolution and LLM prompts.
     """
     g = _normalize_goal_for_embedding((overall_goal or "").strip())
-    s = (step_instruction or "").strip()
-    # Also normalize step_instruction for embedding to handle parameter variance
-    s = _normalize_step_for_overlap(s)
+    s = _normalize_step_for_overlap((step_instruction or "").strip())
     if g:
         # Step instruction twice (normalized), goal once (normalized) — step is what we match on
         return f"{s} [SEP] {s} [SEP] {g}"
@@ -1288,8 +1286,16 @@ def _keyword_rerank(self, query_step: str, recipes: List[RecipeStep], query_goal
         step_overlap = len(q_words_step & s_words_step) / max(len(q_words_step), 1)
         goal_overlap = len(q_words_goal & s_words_goal) / max(len(q_words_goal), 1) if q_words_goal else 0.0
         
-        # Blend: 0.6 raw + 0.2 step_overlap + 0.2 goal_overlap
-        blended = r.similarity * 0.6 + step_overlap * 0.2 + goal_overlap * 0.2
+        # Blend: 0.6 raw + 0.3 step_overlap + 0.1 goal_overlap
+        blended = r.similarity * 0.6 + step_overlap * 0.3 + goal_overlap * 0.1
+
+        # Goal-context penalty for dangerous wrong-purpose matches.
+        if (
+            len(q_words_goal) >= 3
+            and goal_overlap < 0.12
+            and r.similarity > 0.85
+        ):
+            blended = blended * 0.75
         
         # Hard penalty only for semantically weak zero-overlap matches
         if step_overlap == 0 and len(q_words_step) >= 2 and r.similarity < 0.82:

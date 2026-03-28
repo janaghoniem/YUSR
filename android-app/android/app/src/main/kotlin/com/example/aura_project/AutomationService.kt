@@ -1,10 +1,16 @@
 package com.example.aura_project
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.graphics.Path
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -13,6 +19,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * ✅✅✅ COMPLETE FIX - ALL BUGS RESOLVED ✅✅✅
@@ -195,6 +203,14 @@ class AutomationService : AccessibilityService() {
             "scroll" -> {
                 val direction = actionJson.optString("direction", "down")
                 performScroll(direction)
+            }
+            "swipe" -> {
+                val startX = actionJson.optInt("start_x_percent", 50)
+                val startY = actionJson.optInt("start_y_percent", 80)
+                val endX = actionJson.optInt("end_x_percent", 50)
+                val endY = actionJson.optInt("end_y_percent", 20)
+                val duration = actionJson.optInt("duration", 600)
+                performSwipeByPercent(startX, startY, endX, endY, duration)
             }
             "global_action" -> {
                 val globalAction = actionJson.optString("global_action", "")
@@ -473,19 +489,110 @@ class AutomationService : AccessibilityService() {
             val node = lastCapturedNodes[elementId - 1]
             
             if (node.isEditable || node.isFocusable) {
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 val clip = ClipData.newPlainText("text", text)
                 clipboard.setPrimaryClip(clip)
                 
                 node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
                 Thread.sleep(200)
-                val success = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                
+                // Select existing text, then clear field before typing.
+                val existingLength = node.text?.length ?: 0
+                if (existingLength > 0) {
+                    val selectionArgs = Bundle().apply {
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                        putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, existingLength)
+                    }
+                    node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectionArgs)
+                }
+
+                val clearArgs = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+                }
+                val clearSuccess = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+                Thread.sleep(120)
+
+                // Prefer direct set-text for deterministic replacement.
+                val typeArgs = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                }
+                val setTextSuccess = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, typeArgs)
+
+                // Fallback to paste if set-text is not supported.
+                val success = if (setTextSuccess) {
+                    true
+                } else {
+                    node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                }
                 Log.d(TAG, "⌨️ Type result: $success")
+                Log.d(TAG, "⌨️ Clear result: $clearSuccess | SetText result: $setTextSuccess")
                 return success
             }
         }
         
         return false
+    }
+
+    private fun performSwipeByPercent(
+        startXPercent: Int,
+        startYPercent: Int,
+        endXPercent: Int,
+        endYPercent: Int,
+        durationMs: Int,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.e(TAG, "❌ Swipe requires Android N+")
+            return false
+        }
+
+        val dm = resources.displayMetrics
+        val startX = dm.widthPixels * (startXPercent.coerceIn(0, 100) / 100f)
+        val startY = dm.heightPixels * (startYPercent.coerceIn(0, 100) / 100f)
+        val endX = dm.widthPixels * (endXPercent.coerceIn(0, 100) / 100f)
+        val endY = dm.heightPixels * (endYPercent.coerceIn(0, 100) / 100f)
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+
+        val gesture = GestureDescription.Builder()
+            .addStroke(
+                GestureDescription.StrokeDescription(
+                    path,
+                    0,
+                    durationMs.coerceAtLeast(120).toLong(),
+                )
+            )
+            .build()
+
+        val latch = CountDownLatch(1)
+        var completed = false
+
+        val dispatched = dispatchGesture(
+            gesture,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    completed = true
+                    latch.countDown()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    completed = false
+                    latch.countDown()
+                }
+            },
+            Handler(Looper.getMainLooper())
+        )
+
+        if (!dispatched) {
+            Log.e(TAG, "❌ Swipe dispatch failed")
+            return false
+        }
+
+        val done = latch.await((durationMs + 1200L).coerceAtLeast(1500L), TimeUnit.MILLISECONDS)
+        return done && completed
     }
 
     private fun performScroll(direction: String): Boolean {

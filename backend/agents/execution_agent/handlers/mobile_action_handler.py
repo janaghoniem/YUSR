@@ -75,7 +75,11 @@ class MobileActionHandler:
         if not ai_prompt:
             return _failed_result(task_id, "Missing ai_prompt")
 
-        extra       = actual_task.get("extra_params", {}) or {}
+        extra       = dict(actual_task.get("extra_params", {}) or {})
+        if not extra.get("overall_goal"):
+            extra["overall_goal"] = actual_task.get("goal") or ai_prompt
+        if not extra.get("goal") and actual_task.get("goal"):
+            extra["goal"] = actual_task.get("goal")
         device_id   = extra.get("device_id", self.device_id)
         max_steps   = int(extra.get("max_steps", 15))
         # FIX 2: compute adjusted timeout so the outer wait_for matches what the strategy uses

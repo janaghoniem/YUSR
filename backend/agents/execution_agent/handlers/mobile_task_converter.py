@@ -38,15 +38,21 @@ async def convert_coordinator_task_to_mobile(
         MobileTaskRequest for execution
     """
     
+    extra_params = dict(task.get("extra_params", {}) or {})
+    if not extra_params.get("overall_goal"):
+        extra_params["overall_goal"] = task.get("goal") or task.get("ai_prompt", "")
+    if not extra_params.get("goal") and task.get("goal"):
+        extra_params["goal"] = task.get("goal")
+
     return MobileTaskRequest(
         task_id=task.get("task_id", "unknown"),
         ai_prompt=task.get("ai_prompt", ""),
-        device_id=task.get("extra_params", {}).get("device_id", device_id),
+        device_id=extra_params.get("device_id", device_id),
         session_id=task.get("session_id", "unknown"),
-        context=task.get("extra_params", {}),
-        extra_params=task.get("extra_params", {}),
-        max_steps=task.get("extra_params", {}).get("max_steps", 15),
-        timeout_seconds=task.get("extra_params", {}).get("timeout_seconds", 30)
+        context=extra_params,
+        extra_params=extra_params,
+        max_steps=extra_params.get("max_steps", 15),
+        timeout_seconds=extra_params.get("timeout_seconds", 30)
     )
 
 

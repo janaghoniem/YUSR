@@ -1,15 +1,21 @@
 package com.example.aura_project
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.ClipboardManager
 import android.content.ClipData
 import android.content.Context
+import android.graphics.Path
+import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONObject
 import kotlin.math.abs
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * ActionExecutor - Executes atomic UI actions (primitives)
@@ -57,6 +63,7 @@ class ActionExecutor(
                 "click" -> handleClick(actionJson)
                 "type" -> handleType(actionJson)
                 "scroll" -> handleScroll(actionJson)
+                "swipe" -> handleSwipe(actionJson)
                 "wait" -> handleWait(actionJson)
                 "global_action" -> handleGlobalAction(actionJson)
                 "long_click" -> handleLongClick(actionJson)
@@ -127,6 +134,7 @@ class ActionExecutor(
     private fun handleType(actionJson: JSONObject): Boolean {
         val elementId = actionJson.optInt("element_id", -1)
         val text = actionJson.optString("text", "")
+        val clearFirst = actionJson.optBoolean("clear_first", false)
 
         if (elementId < 0 || text.isEmpty()) {
             Log.e(TAG, "Type: Invalid element ID or text")
@@ -154,6 +162,38 @@ class ActionExecutor(
         element.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         Thread.sleep(300)
 
+        var clearSuccess = true
+        if (clearFirst) {
+            // Select existing text, then clear the field.
+            val existingLength = element.text?.length ?: 0
+            if (existingLength > 0) {
+                val selectionArgs = Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, existingLength)
+                }
+                element.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selectionArgs)
+            }
+
+            val clearArgs = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+            }
+            clearSuccess = element.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+            Thread.sleep(120)
+        }
+
+        // Prefer direct set-text for deterministic replacement.
+        val setTextArgs = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        val setTextSuccess = element.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)
+        Thread.sleep(120)
+        val setApplied = verifyElementTextContains(elementId, text)
+
+        if (setTextSuccess && setApplied) {
+            Log.d(TAG, "Type: SetText action result: true (clear=$clearSuccess)")
+            return true
+        }
+
         // Copy text to clipboard
         val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText("text", text)
@@ -164,9 +204,10 @@ class ActionExecutor(
         // Paste
         val pasteSuccess = element.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         Thread.sleep(300)
+        val pasteApplied = verifyElementTextContains(elementId, text)
 
-        Log.d(TAG, "Type: Paste action result: $pasteSuccess")
-        return pasteSuccess
+        Log.d(TAG, "Type: Paste action result: $pasteSuccess (clear=$clearSuccess, setText=$setTextSuccess, setApplied=$setApplied, pasteApplied=$pasteApplied)")
+        return pasteSuccess && pasteApplied
     }
 
     /**
@@ -188,18 +229,119 @@ class ActionExecutor(
         // Find scrollable container
         val scrollableNode = findFirstScrollableNode(rootNode)
         if (scrollableNode == null) {
-            Log.w(TAG, "Scroll: No scrollable element found")
-            return false
+            Log.w(TAG, "Scroll: No scrollable element found — falling back to swipe gesture")
+            return when (direction) {
+                "up" -> performSwipeByPercent(50, 90, 50, 10, actionJson.optInt("duration", 800))
+                "down" -> performSwipeByPercent(50, 10, 50, 90, actionJson.optInt("duration", 800))
+                "left" -> performSwipeByPercent(90, 50, 10, 50, actionJson.optInt("duration", 800))
+                "right" -> performSwipeByPercent(10, 50, 90, 50, actionJson.optInt("duration", 800))
+                else -> performSwipeByPercent(50, 90, 50, 10, actionJson.optInt("duration", 800))
+            }
         }
 
+        // Accessibility direction: FORWARD usually corresponds to finger swipe up.
         val action = when (direction) {
-            "up", "left" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            "down", "right" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            "up", "left" -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            "down", "right" -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         }
 
         Log.d(TAG, "Scroll: Performing scroll action on scrollable element")
         return scrollableNode.performAction(action)
+    }
+
+    /**
+     * PRIMITIVE: Swipe
+     * Executes gesture by percentages of the display dimensions.
+     */
+    private fun handleSwipe(actionJson: JSONObject): Boolean {
+        val startXPercent = actionJson.optInt("start_x_percent", 50)
+        val startYPercent = actionJson.optInt("start_y_percent", 80)
+        val endXPercent = actionJson.optInt("end_x_percent", 50)
+        val endYPercent = actionJson.optInt("end_y_percent", 20)
+        val duration = actionJson.optInt("duration", 600)
+
+        return performSwipeByPercent(
+            startXPercent,
+            startYPercent,
+            endXPercent,
+            endYPercent,
+            duration,
+        )
+    }
+
+    private fun performSwipeByPercent(
+        startXPercent: Int,
+        startYPercent: Int,
+        endXPercent: Int,
+        endYPercent: Int,
+        durationMs: Int,
+    ): Boolean {
+        val dm = service.resources.displayMetrics
+        val startX = (dm.widthPixels * (startXPercent.coerceIn(0, 100) / 100f))
+        val startY = (dm.heightPixels * (startYPercent.coerceIn(0, 100) / 100f))
+        val endX = (dm.widthPixels * (endXPercent.coerceIn(0, 100) / 100f))
+        val endY = (dm.heightPixels * (endYPercent.coerceIn(0, 100) / 100f))
+
+        Log.d(
+            TAG,
+            "Swipe: (${startXPercent}%,${startYPercent}%) -> (${endXPercent}%,${endYPercent}%) " +
+                "| px=(${startX.toInt()},${startY.toInt()}) -> (${endX.toInt()},${endY.toInt()}) " +
+                "| duration=${durationMs}ms"
+        )
+
+        return performSwipeGesture(startX, startY, endX, endY, durationMs.toLong())
+    }
+
+    private fun performSwipeGesture(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        durationMs: Long,
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.e(TAG, "Swipe: Gesture API requires Android N+")
+            return false
+        }
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(100L)))
+            .build()
+
+        val latch = CountDownLatch(1)
+        var completed = false
+
+        val dispatched = service.dispatchGesture(
+            gesture,
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    completed = true
+                    latch.countDown()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    completed = false
+                    latch.countDown()
+                }
+            },
+            Handler(Looper.getMainLooper())
+        )
+
+        if (!dispatched) {
+            Log.e(TAG, "Swipe: dispatchGesture returned false")
+            return false
+        }
+
+        val done = latch.await((durationMs + 1200L).coerceAtLeast(1500L), TimeUnit.MILLISECONDS)
+        if (!done) {
+            Log.w(TAG, "Swipe: gesture callback timeout")
+        }
+        return done && completed
     }
 
     /**
@@ -322,6 +464,14 @@ class ActionExecutor(
         }
 
         return null
+    }
+
+    private fun verifyElementTextContains(elementId: Int, expected: String): Boolean {
+        if (expected.isEmpty()) return true
+        val rootNode = service.rootInActiveWindow ?: return false
+        val element = findElementById(rootNode, elementId) ?: return false
+        val live = (element.text?.toString() ?: "").trim()
+        return live == expected || live.contains(expected)
     }
 
     /**

@@ -229,7 +229,7 @@ class MobileReActStrategy:
         self.backend_url = "http://localhost:8000"
 
         from groq import AsyncGroq
-        self.llm_client = AsyncGroq(api_key="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")
+        self.llm_client = AsyncGroq(api_key=" ")
         self.model = "llama-3.3-70b-versatile"
 
         self.current_ui_tree:      Optional[SemanticUITree]     = None

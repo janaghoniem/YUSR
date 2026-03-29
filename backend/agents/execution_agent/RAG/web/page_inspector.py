@@ -18,6 +18,7 @@ async def get_page_semantics_fallback(page) -> str:
     """
     Enhanced fallback method to extract page elements when accessibility API unavailable.
     Uses multiple strategies to find interactive elements.
+    ✅ ENHANCED: Now detects Gmail compose modal elements (recipient field, send button)
     """
     try:
         logger.info("🔄 Using enhanced fallback method for page semantics")
@@ -25,10 +26,28 @@ async def get_page_semantics_fallback(page) -> str:
         # Extract interactive elements using comprehensive evaluate
         elements_info = await page.evaluate("""
             () => {
+        // Strategy 0: Gmail-specific elements (compose modal, recipient field, send button)
+                const gmailSendButtons = Array.from(document.querySelectorAll(
+                    'div[role="button"][data-tooltip*="Send"], ' +  // Gmail send button with tooltip
+                    'div[aria-label*="Send"], ' +  // Send button by aria-label
+                    'button[data-tooltip*="Send"], ' +  // Button version
+                    '[jsname] button' +  // Gmail uses data-jsname attributes
+                    'div[data-tooltip*="send" i]'  // Case-insensitive tooltip
+                ));
+                
+                const gmailRecipientFields = Array.from(document.querySelectorAll(
+                    'div[contenteditable="true"][aria-label*="To"], ' +  // Recipient field
+                    'div[contenteditable="true"][role="textbox"][aria-label*="recipient" i], ' +  // Recipient as textbox
+                    'input[aria-label*="To"], ' +  // Input field for recipients
+                    'input[placeholder*="To"], ' +  // Input with To placeholder
+                    'div[class*="recipient"], ' +  // div with recipient class
+                    'input[type="text"][aria-label*="recipient" i]'  // Text input for recipient
+                ));
+                
         // Strategy 1: Standard interactive elements
-                const buttons = Array.from(document.querySelectorAll('button, [role="button"], [type="button"], [type="submit"]'));
+                const buttons = Array.from(document.querySelectorAll('button, [role="button"], [type="button"], [type="submit"]')).concat(gmailSendButtons);
                 const links = Array.from(document.querySelectorAll('a[href]'));
-                const inputs = Array.from(document.querySelectorAll('input, textarea, select'));
+                const inputs = Array.from(document.querySelectorAll('input, textarea, select')).concat(gmailRecipientFields);
                 
                 // Strategy 2: Media controls (video, audio)
                 const videoElements = Array.from(document.querySelectorAll('video'));
@@ -53,7 +72,10 @@ async def get_page_semantics_fallback(page) -> str:
                     'button[title*="Skip"]'  // Skip button with title attribute
                 ));
                 
-                // Strategy 5: Common UI patterns
+                // Strategy 5: Contenteditable elements (Gmail recipient chips, rich text editors, etc.)
+                const editables = Array.from(document.querySelectorAll('div[contenteditable="true"]'));
+                
+                // Strategy 6: Common UI patterns
                 const clickableElements = Array.from(document.querySelectorAll('[onclick], [data-action]'));
                 
                 return {
@@ -68,14 +90,36 @@ async def get_page_semantics_fallback(page) -> str:
                         href: el.href,
                         id: el.id || '',
                     })),
-                    inputs: inputs.slice(0, 15).map(el => ({
-                        type: el.type || el.tagName.toLowerCase(),
-                        placeholder: el.placeholder || '',
-                        value: el.value || '',
-                        name: el.name || el.id || 'unnamed',
-                        disabled: el.disabled || el.hasAttribute('disabled'),
-                        ariaLabel: el.ariaLabel || '',
-                    })),
+                    inputs: inputs.slice(0, 20).map(el => {
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        const visible = r.width > 0 && r.height > 0
+                            && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                        
+                        // Special handling for contenteditable elements (Gmail recipients)
+                        if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
+                            return {
+                                type: 'contenteditable',
+                                placeholder: el.getAttribute('placeholder') || el.getAttribute('aria-label') || '',
+                                value: el.innerText || el.textContent || '',
+                                name: el.getAttribute('aria-label') || el.className || 'contenteditable',
+                                disabled: false,
+                                ariaLabel: el.getAttribute('aria-label') || '',
+                                visible: visible,
+                                isContentEditable: true,
+                            };
+                        }
+                        
+                        return {
+                            type: el.type || el.tagName.toLowerCase(),
+                            placeholder: el.placeholder || '',
+                            value: el.value || '',
+                            name: el.name || el.id || 'unnamed',
+                            disabled: el.disabled || el.hasAttribute('disabled'),
+                            ariaLabel: el.getAttribute('aria-label') || '',
+                            visible: visible,
+                        };
+                    }),
                     videos: videoElements.map(el => ({
                         src: el.src || el.currentSrc || '',
                         paused: el.paused,
@@ -103,6 +147,14 @@ async def get_page_semantics_fallback(page) -> str:
                         text: el.textContent?.trim() || el.ariaLabel || '',
                         action: el.getAttribute('data-action') || el.getAttribute('onclick') || '',
                     })),
+                    editables: editables.slice(0, 10).map(el => ({
+                        ariaLabel: el.getAttribute('aria-label') || '',
+                        role: el.getAttribute('role') || '',
+                        text: (el.innerText || el.textContent || '').trim().substring(0, 100),
+                        tag: el.tagName.toLowerCase(),
+                        placeholder: el.getAttribute('placeholder') || '',
+                        className: el.className || '',
+                    })),
                 };
             }
         """)
@@ -119,13 +171,20 @@ async def get_page_semantics_fallback(page) -> str:
         
         # Format inputs
         if elements_info.get('inputs'):
-            descriptions.append("\nINPUT FIELDS:")
-            for inp in elements_info['inputs']:
-                status = " (disabled)" if inp['disabled'] else ""
-                value_info = f" [current: '{inp['value']}']" if inp['value'] else ""
-                placeholder_info = f" placeholder='{inp['placeholder']}'" if inp['placeholder'] else ""
-                aria_info = f" aria-label='{inp['ariaLabel']}'" if inp['ariaLabel'] else ""
-                descriptions.append(f"  - {inp['type']} ({inp['name']}){placeholder_info}{aria_info}{value_info}{status}")
+            visible_inputs = [i for i in elements_info['inputs'] if i.get('visible', True)]
+            hidden_inputs  = [i for i in elements_info['inputs'] if not i.get('visible', True)]
+            if visible_inputs:
+                descriptions.append("\nINPUT FIELDS (visible — USE THESE):")
+                for inp in visible_inputs:
+                    status = " (disabled)" if inp['disabled'] else ""
+                    value_info = f" [current: '{inp['value']}']" if inp['value'] else ""
+                    placeholder_info = f" placeholder='{inp['placeholder']}'" if inp['placeholder'] else ""
+                    aria_info = f" aria-label='{inp['ariaLabel']}'" if inp['ariaLabel'] else ""
+                    descriptions.append(f"  - {inp['type']} ({inp['name']}){placeholder_info}{aria_info}{value_info}{status}")
+            if hidden_inputs:
+                descriptions.append("\nINPUT FIELDS (hidden — DO NOT TARGET — not yet visible on page):")
+                for inp in hidden_inputs:
+                    descriptions.append(f"  - HIDDEN: {inp['type']} ({inp['name']}) — not visible, skip this")
         
         # Format links
         if elements_info.get('links'):
@@ -165,6 +224,16 @@ async def get_page_semantics_fallback(page) -> str:
             for el in elements_info['clickables']:
                 descriptions.append(f"  - '{el['text']}' (action: {el['action'][:30]})")
         
+        # ✅ NEW: Format contenteditable fields (Gmail recipient chips, rich text editors, etc.)
+        if elements_info.get('editables'):
+            descriptions.append("\nCONTENTEDITABLE FIELDS (Gmail recipients, rich text, etc.):")
+            for ed in elements_info['editables']:
+                if ed['ariaLabel'] or ed['placeholder'] or ed['text']:
+                    label_info = f" aria-label='{ed['ariaLabel']}'" if ed['ariaLabel'] else ""
+                    placeholder_info = f" placeholder='{ed['placeholder']}'" if ed['placeholder'] else ""
+                    text_info = f" [content: '{ed['text'][:40]}...']" if ed['text'] else ""
+                    descriptions.append(f"  - <{ed['tag']}>{label_info}{placeholder_info}{text_info}")
+        
         result = "\n".join(descriptions) if descriptions else "No interactive elements found on page"
         
         logger.info(f"✅ Extracted {len(elements_info.get('buttons', []))} buttons, "
@@ -186,105 +255,11 @@ async def get_page_semantics_fallback(page) -> str:
 async def get_page_semantics(page) -> str:
     """
     Extract actionable elements from the current page.
-    Returns natural language description for RAG context.
-    
-    ✅ ENHANCED: Better fallback handling and element detection
+    BUG 8 FIX: page.accessibility.snapshot() removed — always uses DOM evaluate().
     """
-    
-    try:
-        # Try accessibility API first
-        try:
-            if not hasattr(page, 'accessibility'):
-                logger.warning("⚠️ Page object missing accessibility attribute, using fallback")
-                return await get_page_semantics_fallback(page)
-            
-            snapshot = await page.accessibility.snapshot()
-            
-            if not snapshot:
-                logger.debug("ℹ️ Accessibility tree unavailable (page uses shadow DOM or dynamic rendering), using DOM extraction fallback")
-                return await get_page_semantics_fallback(page)
-            
-        except (AttributeError, TypeError, Exception) as e:
-            logger.debug(f"ℹ️ Accessibility API unavailable ({type(e).__name__}), using DOM extraction fallback")
-            return await get_page_semantics_fallback(page)
-        
-        # Continue with original accessibility-based extraction
-        elements = []
-        
-        def extract_elements(node, depth=0):
-            """Recursively extract interactive elements from accessibility tree"""
-            if depth > 3:
-                return
-            
-            role = node.get('role', '')
-            name = node.get('name', '')
-            
-            # ✅ ENHANCED: More role types
-            interactive_roles = [
-                'button', 'link', 'textbox', 'searchbox', 'combobox',
-                'tab', 'menuitem', 'checkbox', 'radio', 'slider',
-                'switch', 'option', 'listitem', 'treeitem',
-                # Media roles
-                'application', 'document', 'main',
-            ]
-            
-            if role in interactive_roles:
-                elements.append({
-                    'role': role,
-                    'label': name,
-                    'enabled': not node.get('disabled', False),
-                    'focused': node.get('focused', False),
-                    'value': node.get('value', ''),
-                    'level': depth,
-                })
-            
-            # Recurse into children
-            for child in node.get('children', []):
-                extract_elements(child, depth + 1)
-        
-        extract_elements(snapshot)
-        
-        # Convert to natural language descriptions
-        descriptions = []
-        
-        # Group by role for better organization
-        buttons = [e for e in elements if e['role'] == 'button']
-        links = [e for e in elements if e['role'] == 'link']
-        inputs = [e for e in elements if e['role'] in ['textbox', 'searchbox', 'combobox']]
-        other_interactive = [e for e in elements if e['role'] not in ['button', 'link', 'textbox', 'searchbox', 'combobox']]
-        
-        if buttons:
-            descriptions.append("BUTTONS:")
-            for btn in buttons[:15]:  # Increased from 10
-                status = "" if btn['enabled'] else " (disabled)"
-                focus = " [FOCUSED]" if btn['focused'] else ""
-                descriptions.append(f"  - '{btn['label']}'{status}{focus}")
-        
-        if inputs:
-            descriptions.append("\nINPUT FIELDS:")
-            for inp in inputs[:15]:  # Increased from 10
-                status = "" if inp['enabled'] else " (disabled)"
-                value_info = f" [current: '{inp['value']}']" if inp['value'] else ""
-                descriptions.append(f"  - {inp['role']}: '{inp['label']}'{status}{value_info}")
-        
-        if links:
-            descriptions.append("\nLINKS:")
-            for link in links[:20]:  # Increased from 15
-                descriptions.append(f"  - '{link['label']}'")
-        
-        if other_interactive:
-            descriptions.append("\nOTHER INTERACTIVE ELEMENTS:")
-            for elem in other_interactive[:10]:
-                descriptions.append(f"  - {elem['role']}: '{elem['label']}'")
-        
-        result = "\n".join(descriptions) if descriptions else "No interactive elements found on page"
-        
-        logger.debug(f"📋 Extracted {len(elements)} page elements via accessibility API")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Unexpected error in get_page_semantics: {e}")
-        return await get_page_semantics_fallback(page)
+    return await get_page_semantics_fallback(page)
+
+
 
 # ============================================================================
 # ENHANCED PAGE CONTEXT FUNCTIONS
@@ -307,6 +282,16 @@ async def get_page_context(page) -> Dict:
         # ✅ NEW: Detect page type
         page_type = await detect_page_type(page)
         
+        # Detect auth form state if this is a login page
+        auth_state = {}
+        try:
+            from urllib.parse import urlparse
+            hostname = urlparse(url).hostname or ''
+            if any(d in hostname for d in ['accounts.google', 'login.microsoftonline', 'login.live', 'facebook.com']):
+                auth_state = await detect_auth_form_state(page)
+        except Exception:
+            pass
+
         return {
             'url': url,
             'title': title,
@@ -314,7 +299,8 @@ async def get_page_context(page) -> Dict:
             'viewport': viewport,
             'ready_state': ready_state,
             'is_loaded': ready_state == 'complete',
-            'page_type': page_type,  # ✅ NEW
+            'page_type': page_type,
+            'auth_state': auth_state,  # FIX: which fields are currently visible
         }
     
     except Exception as e:
@@ -327,9 +313,61 @@ async def get_page_context(page) -> Dict:
             'error': str(e)
         }
 
+async def detect_auth_form_state(page) -> Dict:
+    """
+    Detect the current state of a multi-step auth form.
+    Returns which fields are actually visible (not just present in DOM).
+    Google auth: email page has hiddenPassword (display:none), password page shows it.
+    """
+    try:
+        state = await page.evaluate("""
+            () => {
+                // A field is 'visible' if it has dimensions and is not hidden
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && style.opacity !== '0';
+                };
+
+                const emailInput = document.querySelector(
+                    'input[type="email"], input[name="identifier"], #identifierId'
+                );
+                const passwordInput = document.querySelector(
+                    'input[type="password"], input[name="password"], input[name="Passwd"]'
+                );
+                const nextBtn = document.querySelector(
+                    'button:contains, [jsname][id="identifierNext"], [id="passwordNext"]'
+                ) || Array.from(document.querySelectorAll('button')).find(
+                    b => b.textContent.trim().toLowerCase() === 'next'
+                );
+                const signInBtn = Array.from(document.querySelectorAll('button')).find(
+                    b => ['sign in', 'log in', 'next'].includes(b.textContent.trim().toLowerCase())
+                );
+
+                return {
+                    emailVisible:    isVisible(emailInput),
+                    passwordVisible: isVisible(passwordInput),
+                    hasNextButton:   !!nextBtn,
+                    hasSignInButton: !!signInBtn,
+                    currentPage: isVisible(passwordInput) ? 'password_page' : 'email_page',
+                };
+            }
+        """)
+        return state or {}
+    except Exception as e:
+        logger.debug(f"Could not detect auth form state: {e}")
+        return {}
+
+
 async def detect_page_type(page) -> str:
     """
     ✅ NEW: Detect what type of page this is to help with smart intent.
+    ✅ ENHANCED: Detects Gmail compose modals and multi-page auth flows
+    ✅ FIXED: Auth detection now has HIGHEST priority (before media detection)
     """
     try:
         page_info = await page.evaluate("""
@@ -337,17 +375,85 @@ async def detect_page_type(page) -> str:
                 const url = window.location.href;
                 const hostname = window.location.hostname;
                 
+                // Gmail-specific detection
+                const isGmailCompose = hostname.includes('mail.google.com') && url.includes('compose');
+                const isGmail = hostname.includes('mail.google.com');
+                
+                // Multi-page auth detection (MUST CHECK FIRST)
+                const isGoogleAuth = hostname.includes('accounts.google.com');
+                const isMicrosoftAuth = hostname.includes('login.microsoftonline.com') || hostname.includes('login.live.com');
+                const isFacebookAuth = hostname.includes('facebook.com') && (url.includes('login') || url.includes('auth'));
+                
+                // Form field detection
+                const emailInput = document.querySelector(
+                    'input[type="email"], input[name*="email" i], input[name*="identifier" i], input[aria-label*="email" i]'
+                );
+                const passwordInput = document.querySelector(
+                    'input[type="password"], input[name*="password" i], input[aria-label*="password" i]'
+                );
+                
+                // Captcha detection (blocking auth progress)
+                const hasCaptcha = !!document.querySelector(
+                    'audio[src*="Captcha"], ' +
+                    'div[data-captcha], ' +
+                    'div[aria-label*="captcha" i], ' +
+                    'iframe[src*="captcha" i], ' +
+                    '[role="dialog"] audio'
+                );
+                
+                // Gmail compose detection
+                const composeArea = document.querySelector('div[role="dialog"], div[data-tooltip*="compose" i], div[aria-label*="compose" i]');
+                const recipientField = document.querySelector('div[contenteditable="true"][aria-label*="To"]');
+                const sendButton = document.querySelector('div[role="button"][data-tooltip*="Send" i], button[aria-label*="Send"]');
+                
                 return {
                     isYouTube: hostname.includes('youtube.com'),
                     isVideo: !!document.querySelector('video'),
                     isAudio: !!document.querySelector('audio'),
                     isForm: !!document.querySelector('form'),
                     isSearch: !!document.querySelector('input[type="search"], input[placeholder*="search" i]'),
+                    // Gmail detection
+                    isGmailCompose: isGmailCompose,
+                    isGmail: isGmail,
+                    hasComposeArea: !!composeArea,
+                    hasRecipientField: !!recipientField,
+                    hasSendButton: !!sendButton,
+                    // ⚠️ PRIORITY: Multi-page auth detection (HIGHEST PRIORITY - before media)
+                    isGoogleAuth: isGoogleAuth,
+                    isMicrosoftAuth: isMicrosoftAuth,
+                    isFacebookAuth: isFacebookAuth,
+                    hasEmailField: !!emailInput,
+                    hasPasswordField: !!passwordInput,
+                    hasCaptcha: hasCaptcha,
                 };
             }
         """)
         
-        if page_info.get('isYouTube'):
+        # ⚠️ PRIORITY 0: Gmail compose detection (highest)
+        if page_info.get('isGmailCompose') or (page_info.get('isGmail') and page_info.get('hasComposeArea')):
+            return 'gmail_compose'
+        
+        # ⚠️ PRIORITY 1: Multi-page auth detection (BEFORE media detection)
+        # This MUST come before video/audio detection because auth pages may have captcha audio
+        if page_info.get('isGoogleAuth'):
+            if page_info.get('hasCaptcha'):
+                return 'google_auth_captcha_page'
+            elif page_info.get('hasPasswordField') and not page_info.get('hasEmailField'):
+                return 'google_auth_password_page'
+            elif page_info.get('hasEmailField'):
+                return 'google_auth_email_page'
+            else:
+                return 'google_auth'
+        elif page_info.get('isMicrosoftAuth'):
+            if page_info.get('hasPasswordField'):
+                return 'microsoft_auth_password_page'
+            else:
+                return 'microsoft_auth'
+        elif page_info.get('isFacebookAuth'):
+            return 'facebook_auth'
+        
+        # ⚠️ PRIORITY 2+: Media/content detection (lower priority)
+        elif page_info.get('isYouTube'):
             return 'youtube'
         elif page_info.get('isVideo'):
             return 'video'
@@ -483,7 +589,44 @@ async def build_rag_context(page, task_description: str) -> str:
     
     # ✅ NEW: Add page type specific guidance
     page_type_guidance = ""
-    if context.get('page_type') == 'youtube':
+    if context.get('page_type') == 'gmail_compose':
+        page_type_guidance = """
+✉️ GMAIL COMPOSE MODAL DETECTED - Special Guidelines:
+- This is a Gmail compose window (creating a new email)
+- Recipient field is likely a contenteditable DIV with aria-label="To"
+- Subject field should be at index 'subjectbox' 
+- Content/body is usually a rich text editor (contenteditable div)
+- Send button is typically a div with data-tooltip="Send" or aria-label="Send"
+- Try contenteditable elements first if regular inputs aren't found
+- The modal might hide elements until you interact with them
+"""
+    elif context.get('page_type') == 'google_auth_captcha_page':
+        page_type_guidance = """
+⚠️ GOOGLE AUTH - CAPTCHA CHALLENGE DETECTED:
+- Account has triggered captcha verification (security check)
+- Password field is HIDDEN until captcha is solved/skipped
+- Options:
+  1. Try clicking "Skip" or "Skip for now" button if available
+  2. Try clicking "Can't access your account?" or "Try another way"
+  3. Look for alternative verification method buttons
+  4. Solve the audio/image captcha if needed (not automated)
+- After dismissing captcha, password field will become visible
+🚨 Important: Do NOT try to fill password while on captcha page - it will fail
+"""
+    elif context.get('page_type') == 'google_auth_email_page':
+        page_type_guidance = """
+🔐 GOOGLE AUTH - EMAIL PAGE DETECTED:
+- Only email/identifier field is visible
+- Password field will appear after clicking "Next"
+- Look for "Next", "Continue`, or similar button to proceed
+"""
+    elif context.get('page_type') == 'google_auth_password_page':
+        page_type_guidance = """
+🔐 GOOGLE AUTH - PASSWORD PAGE DETECTED:
+- Only password field is visible (email was on previous page)
+- Look for "Sign in" or "Login" button
+"""
+    elif context.get('page_type') == 'youtube':
         page_type_guidance = """
 📺 YOUTUBE DETECTED - Special Guidelines:
 - For media controls, prefer keyboard shortcuts over clicking UI elements

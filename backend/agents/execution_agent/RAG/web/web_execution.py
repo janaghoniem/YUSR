@@ -9,6 +9,7 @@
 # ✅ Post-action verification
 # ✅ Smart intent handling when elements not listed
 # ✅ State-dependent command handling
+# ✅ FIX: Media validation only fires for explicit media action_types
 
 import asyncio
 import logging
@@ -458,47 +459,73 @@ async def observe_page_state(page) -> Dict[str, Any]:
         }
 
 
+# ============================================================================
+# ✅ FIX: validate_action_context — media check ONLY for explicit media actions
+# ============================================================================
+
+# Action types that are explicitly media-related.
+# navigate / fill / click / extract / unknown are NEVER media actions.
+_MEDIA_ACTION_TYPES = {
+    'play_video', 'pause_video', 'media_control',
+    'play', 'pause', 'mute', 'unmute',
+    'skip', 'next', 'previous', 'forward', 'rewind'
+}
+
 def validate_action_context(page_state: Dict, action_type: str, ai_prompt: str) -> Tuple[bool, str]:
     """
-    ✅ GENERIC context validation - works for any site.
-    Validate if action can be performed in current page context.
+    ✅ FIXED context validation.
+
+    The media guard now ONLY runs when action_type is an explicitly recognised
+    media action type.  navigate / fill / click / extract / unknown always
+    pass immediately, preventing false rejections on retry when the previous
+    error message happens to contain the word "media".
     """
-    
-    # Media control actions — but not when user is selecting a result
-    media_actions = ['pause', 'play', 'mute', 'unmute', 'skip', 'next', 'previous', 'forward', 'rewind']
+
+    # ── Gate: skip ALL media checks for non-media action types ──────────────
+    if action_type not in _MEDIA_ACTION_TYPES:
+        return True, "Context validated - can proceed"
+
+    # ── From here we know action_type IS a media action ─────────────────────
+    media_keywords = ['pause', 'play', 'mute', 'unmute', 'skip', 'next', 'previous', 'forward', 'rewind']
     selection_keywords = ['first', 'second', 'third', 'result', 'item', 'one', 'video', 'song']
+
+    # If the user is selecting a result (e.g. "play the first one") rather than
+    # controlling an already-playing media element, skip media checks.
     is_selecting = any(w in ai_prompt.lower() for w in selection_keywords)
 
-    if any(action in ai_prompt.lower() for action in media_actions) and not is_selecting:
+    if any(action in ai_prompt.lower() for action in media_keywords) and not is_selecting:
         video_state = page_state.get('video')
         audio_state = page_state.get('audio')
-        
-        # Check if media exists
-        if not ((video_state and video_state.get('exists')) or (audio_state and audio_state.get('exists'))):
+
+        # Require a media element on the page
+        has_video = isinstance(video_state, dict) and video_state.get('exists')
+        has_audio = isinstance(audio_state, dict) and audio_state.get('exists')
+
+        if not (has_video or has_audio):
             return False, "No media element found on page. Cannot perform media control."
-        
-        # Check specific media action requirements
+
+        # State-specific guards
         if 'pause' in ai_prompt.lower():
-            if video_state and video_state.get('paused'):
+            if has_video and video_state.get('paused'):
                 return False, "Media is already paused. No action needed."
-        
+
         elif 'play' in ai_prompt.lower():
-            if video_state and video_state.get('playing'):
+            if has_video and video_state.get('playing'):
                 return False, "Media is already playing. No action needed."
-        
+
         elif 'mute' in ai_prompt.lower():
-            if video_state and video_state.get('muted'):
+            if has_video and video_state.get('muted'):
                 return False, "Media is already muted. No action needed."
-        
+
         elif 'unmute' in ai_prompt.lower():
-            if video_state and not video_state.get('muted'):
+            if has_video and not video_state.get('muted'):
                 return False, "Media is already unmuted. No action needed."
-        
+
         elif any(word in ai_prompt.lower() for word in ['skip', 'next']):
             # Only warn for YouTube playlists
             if page_state.get('isYouTube') and not page_state.get('isPlaylist'):
                 return False, "No playlist detected. 'Skip/Next' only works in playlists on YouTube."
-    
+
     return True, "Context validated - can proceed"
 
 
@@ -606,7 +633,48 @@ USE THESE SHORTCUTS when UI elements are missing or unreliable!
    - Use keyboard shortcut '/' on supported sites
 """
     
-    if not smart_intent_rules:
+    # FIX: auth/login pages get specific rules including auto-Next logic
+    if platform in ('google_auth', 'microsoft_auth', 'auth') or site_type == 'form':
+        # Detect if password field is currently visible (vs hidden) from the context
+        semantics = page_context.get('semantics', '')
+        password_visible = (
+            'input[type="password"]' in semantics or
+            'password' in semantics.lower() and 'hiddenPassword' not in semantics
+        )
+        # Check if the inputs listed include a visible (non-hidden) password field
+        # The DOM shows hiddenPassword on email page, and a real password input on password page
+        has_visible_password = 'password' in semantics.lower() and 'hidden' not in semantics.lower()
+
+        smart_intent_rules = f"""
+2d) **Login / Auth Form — CRITICAL RULES**:
+
+CURRENT FORM STATE: {"PASSWORD PAGE (password field IS visible)" if has_visible_password else "EMAIL PAGE (password field is hidden/not yet visible)"}
+
+RULE 1 — FILL THEN AUTO-CLICK NEXT:
+  After filling any input field, check if a 'Next' or 'Sign in' button exists.
+  If it does, ALWAYS click it automatically WITHOUT being asked.
+  Do NOT stop after just filling — proceed to click Next.
+
+RULE 2 — HANDLE GOOGLE'S 2-PAGE FLOW:
+  Google sign-in shows email and password on SEPARATE pages (same URL, different DOM).
+  - Email page: fill email input, then click Next button
+  - Password page: wait for password input to appear, fill it, then click Next/Sign In
+
+RULE 3 — VISIBLE PASSWORD DETECTION:
+  {"✅ Password field IS visible — fill it directly with input[type='password'] or [name='password']" if has_visible_password else "⚠️ Password field is NOT yet visible (still on email page) — DO NOT try to fill password yet"}
+  {"After filling password, click the Sign In / Next button immediately." if has_visible_password else "Fill email, then click Next, then the password field will appear."}
+
+RULE 4 — SELECTOR PRIORITY for Google auth:
+  Email input:    input[type="email"], #identifierId, input[name="identifier"]
+  Password input: input[type="password"], input[name="password"], input[name="Passwd"]
+  Next button:    button:has-text("Next") → use .first to avoid strict mode
+  Sign In button: button:has-text("Sign in"), button:has-text("Next")
+
+RULE 5 — HUMAN-LIKE TIMING:
+  Add await page.wait_for_timeout(500) between fill and click.
+  Add await page.wait_for_timeout(800) after clicking Next (for page transition).
+"""
+    elif not smart_intent_rules:
         smart_intent_rules = """
 2d) **Generic Site Strategy**:
    - Try multiple selector strategies (id, class, aria-label, data attributes)
@@ -674,33 +742,39 @@ class PageContextCache:
         self.cache: Dict[str, Dict] = {}
         self.ttl = ttl_seconds
         self.last_analysis: Dict[str, float] = {}
-    
-    def should_refresh(self, session_id: str) -> bool:
-        """Check if context needs refreshing"""
+        self._last_url: Dict[str, str] = {}  # FIX: track URL so we invalidate on page change
+
+    def should_refresh(self, session_id: str, current_url: str = '') -> bool:
+        """Check if context needs refreshing — also invalidates when URL changes."""
         if session_id not in self.last_analysis:
             return True
-        
+        # Any URL change means we're on a new page (e.g. email → password step)
+        if current_url and self._last_url.get(session_id) != current_url:
+            logger.info(f"🔄 URL changed for session {session_id} — cache invalidated")
+            return True
         elapsed = datetime.now().timestamp() - self.last_analysis[session_id]
         return elapsed > self.ttl
-    
+
     async def get_or_analyze(self, session_id: str, page, force_refresh: bool = False):
         """Get cached context or analyze page if needed"""
-        
+        current_url = page.url if page else ''
+
         if not force_refresh and session_id in self.cache:
-            if not self.should_refresh(session_id):
+            if not self.should_refresh(session_id, current_url):
                 logger.info(f"📦 Using cached DOM context for session {session_id}")
                 return self.cache[session_id]
-        
+
         logger.info(f"🔍 Analyzing DOM context for session {session_id}")
-        
+
         try:
             from agents.execution_agent.RAG.web.page_inspector import get_page_context
-            
+
             context = await get_page_context(page)
-            
+
             self.cache[session_id] = context
             self.last_analysis[session_id] = datetime.now().timestamp()
-            
+            self._last_url[session_id] = current_url  # FIX: store URL
+
             logger.info(f"✅ DOM context cached for session {session_id}")
             return context
             
@@ -715,9 +789,9 @@ class PageContextCache:
     
     def invalidate(self, session_id: str):
         """Invalidate cache (e.g., after navigation)"""
-        if session_id in self.cache:
-            del self.cache[session_id]
-            logger.info(f"🗑️ Invalidated DOM cache for session {session_id}")
+        self.cache.pop(session_id, None)
+        self._last_url.pop(session_id, None)
+        logger.info(f"🗑️ Invalidated DOM cache for session {session_id}")
     
     def cleanup_closed_sessions(self, active_sessions: List[str]):
         """Remove cache for closed sessions"""
@@ -765,51 +839,86 @@ class StealthBrowser:
         """Inject comprehensive anti-detection scripts"""
         
         stealth_script = """
-        // Override navigator.webdriver
+        // ── webdriver flag ──────────────────────────────────────────────────
         Object.defineProperty(navigator, 'webdriver', {
-            get: () => undefined,
-            configurable: true
+            get: () => undefined, configurable: true
         });
-        
-        // Mock Chrome runtime
+
+        // ── Chrome runtime (needed for Google's bot checks) ─────────────────
         window.chrome = {
+            app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
             runtime: {
+                PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+                PlatformArch: { ARM: 'arm', ARM64: 'arm64', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+                RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' },
+                OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+                OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
                 connect: () => {},
                 sendMessage: () => {},
+                id: undefined,
             },
             loadTimes: function() {
                 return {
-                    commitLoadTime: Date.now() / 1000 - Math.random() * 10,
-                    connectionInfo: 'http/1.1',
-                    finishDocumentLoadTime: Date.now() / 1000 - Math.random() * 5,
-                    firstPaintTime: Date.now() / 1000 - Math.random() * 7,
+                    commitLoadTime: Date.now()/1000 - Math.random()*8,
+                    connectionInfo: 'h2',
+                    finishDocumentLoadTime: Date.now()/1000 - Math.random()*3,
+                    firstPaintTime: Date.now()/1000 - Math.random()*5,
+                    navigationType: 'Other',
+                    npnNegotiatedProtocol: 'h2',
+                    requestTime: Date.now()/1000 - Math.random()*12,
+                    startLoadTime: Date.now()/1000 - Math.random()*12,
+                    wasAlternateProtocolAvailable: false,
+                    wasFetchedViaSpdy: true,
+                    wasNpnNegotiated: true,
                 };
-            }
+            },
+            csi: function() { return { onloadT: Date.now(), pageT: Date.now() - 3000, startE: Date.now() - 5000, tran: 15 }; },
         };
-        
-        // Override permissions API
+
+        // ── Permissions API ──────────────────────────────────────────────────
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) => (
             parameters.name === 'notifications' ?
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
-        
-        // Mock plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3, 4, 5]
+
+        // ── Plugin array (realistic length + objects) ────────────────────────
+        const pluginData = [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+        ];
+        const pluginArray = pluginData.map(p => {
+            const plugin = Object.create(Plugin.prototype);
+            Object.defineProperties(plugin, {
+                name: { value: p.name, writable: false }, filename: { value: p.filename, writable: false }, description: { value: p.description, writable: false }, length: { value: 0, writable: false }
+            });
+            return plugin;
         });
-        
-        // Override languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en']
-        });
-        
-        // Hide automation properties
+        Object.defineProperty(pluginArray, 'item', { value: (i) => pluginArray[i] });
+        Object.defineProperty(pluginArray, 'namedItem', { value: (name) => pluginArray.find(p => p.name === name) || null });
+        Object.defineProperty(navigator, 'plugins', { get: () => pluginArray });
+
+        // ── Languages ────────────────────────────────────────────────────────
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+        // ── Screen/hardware ──────────────────────────────────────────────────
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+        Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+
+        // ── Conceal Playwright internals ─────────────────────────────────────
         delete window.__playwright;
         delete window.__pw_manual;
-        
-        console.log('✅ Stealth mode activated');
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+
+        // ── Fake notification permission ─────────────────────────────────────
+        window.Notification = window.Notification || {};
+        if (!window.Notification.permission) {
+            Object.defineProperty(window.Notification, 'permission', { get: () => 'default' });
+        }
         """
         
         await context.add_init_script(stealth_script)
@@ -898,7 +1007,8 @@ class WebExecutionPipeline:
                 'extra_http_headers': {
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                }
+                },
+                'accept_downloads': True
             }
             
             if user_agent:
@@ -919,6 +1029,42 @@ class WebExecutionPipeline:
         """Get existing page for session or create new one"""
         if session_id not in self.sessions or self.sessions[session_id].is_closed():
             page = await self.context.new_page()
+            
+            # ✅ Set up download handling - IMPROVED with better logging and error handling
+            def handle_download(download):
+                """Handle PDF and file downloads to user's Downloads folder"""
+                logger.info(f"🔽 DOWNLOAD TRIGGERED: {download.suggested_filename}")
+                
+                try:
+                    downloads_dir = str(Path.home() / 'Downloads')
+                    os.makedirs(downloads_dir, exist_ok=True)
+                    
+                    filename = download.suggested_filename
+                    if not filename:
+                        filename = f"download_{int(datetime.now().timestamp())}"
+                    
+                    filepath = os.path.join(downloads_dir, filename)
+                    
+                    logger.info(f"💾 Saving to: {filepath}")
+                    
+                    # Playwright's save_as is synchronous in the handler
+                    download.save_as(filepath)
+                    
+                    logger.info(f"✅ Downloaded successfully: {filepath}")
+                    
+                    # Verify file exists
+                    if os.path.exists(filepath):
+                        filesize = os.path.getsize(filepath)
+                        logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
+                    else:
+                        logger.warning(f"⚠️ File not found after save: {filepath}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Download failed: {e}", exc_info=True)
+            
+            page.on("download", handle_download)
+            logger.info(f"✅ Download handler registered for page")
+            
             self.sessions[session_id] = page
             logger.info(f"📄 Created new page for session {session_id}")
         
@@ -960,7 +1106,7 @@ class WebExecutionPipeline:
         Execute web task with FULL enhancements + GENERIC platform support:
         1. Site detection (YouTube, Amazon, Netflix, Google, ANY site)
         2. Page state observation
-        3. Context validation
+        3. Context validation (✅ FIXED: only blocks genuine media-type actions)
         4. Platform-specific keyboard shortcuts
         5. Smart intent handling
         6. Post-action verification
@@ -974,9 +1120,14 @@ class WebExecutionPipeline:
         try:
             page = await self.get_or_create_page(session_id)
             ai_prompt = task.get('ai_prompt', '')
+
+            # ── Strip any error context that was appended by the bridge on
+            #    retry so it never contaminates the original prompt.
+            # The bridge appends " | Previous errors: ..." — remove that part.
+            clean_prompt = re.split(r'\s*\|\s*Previous errors?:', ai_prompt)[0].strip()
             
             # Validation
-            if not ai_prompt:
+            if not clean_prompt:
                 return WebExecutionResult(
                     validation_passed=False,
                     security_passed=True,
@@ -989,10 +1140,10 @@ class WebExecutionPipeline:
             if self.config.enable_page_state_layer:
                 page_state_before = await observe_page_state(page)
                 
-                # Validate action context
+                # ✅ FIXED: action_type comes from web_params, never from ai_prompt
                 action_type = task.get('web_params', {}).get('action', 'unknown')
                 can_proceed, reason = validate_action_context(
-                    page_state_before, action_type, ai_prompt
+                    page_state_before, action_type, clean_prompt
                 )
                 
                 if not can_proceed:
@@ -1013,11 +1164,14 @@ class WebExecutionPipeline:
             
             # ✅ STEP 2: TRY PLATFORM-SPECIFIC KEYBOARD SHORTCUTS (GENERIC)
             media_keywords = ['pause', 'play', 'mute', 'unmute', 'skip', 'next', 'previous', 'forward', 'rewind']
-            # ✅ FIX 2: Don't intercept with shortcuts when user is selecting a result
-            # e.g. "play the first one", "open first video" should NOT trigger keyboard shortcut
             selection_keywords = ['first', 'second', 'third', 'result', 'item', 'one', 'video', 'song']
-            is_selecting = any(w in ai_prompt.lower() for w in selection_keywords)
-            is_media_action = any(keyword in ai_prompt.lower() for keyword in media_keywords) and not is_selecting
+            is_selecting = any(w in clean_prompt.lower() for w in selection_keywords)
+            # ✅ Only attempt shortcut if action_type is explicitly a media action
+            is_media_action = (
+                action_type in _MEDIA_ACTION_TYPES
+                and any(keyword in clean_prompt.lower() for keyword in media_keywords)
+                and not is_selecting
+            )
             
             if is_media_action and page_state_before:
                 platform = page_state_before.get('platform', 'unknown')
@@ -1025,7 +1179,7 @@ class WebExecutionPipeline:
                 # Determine action from prompt
                 action_word = None
                 for keyword in media_keywords:
-                    if keyword in ai_prompt.lower():
+                    if keyword in clean_prompt.lower():
                         action_word = keyword
                         break
                 
@@ -1064,19 +1218,42 @@ class WebExecutionPipeline:
                         logger.info(f"ℹ️ Keyboard shortcut not available for {action_word} on {platform}, falling back to RAG")
             
             # ✅ STEP 3: GENERATE CODE WITH SMART INTENT (PLATFORM-AWARE)
-            logger.info(f"🧠 Using RAG to generate code from: {ai_prompt}")
+            # FIX: add human-like behavior before interacting with auth pages
+            if page_state_before and page_state_before.get('platform') in ('google_auth', 'microsoft_auth', 'auth'):
+                await self._humanize_page(page)
+
+            logger.info(f"🧠 Using RAG to generate code from: {clean_prompt}")
             
             try:
                 generated_code = await self._generate_code_from_rag_smart(
-                    ai_prompt, page, task, session_id, page_state_before
+                    clean_prompt, page, task, session_id, page_state_before
                 )
                 
             except Exception as e:
                 logger.error(f"❌ RAG generation failed: {e}")
-                return WebExecutionResult(
-                    validation_passed=False,
-                    security_passed=True,
-                    error=f"RAG code generation failed: {str(e)}",
+                
+                # ✅ FIX (Message 10): FALLBACK - Generate simple code when RAG fails
+                # For "click" actions with link names, generate direct DOM manipulation
+                action_type = task.get('web_params', {}).get('action', 'unknown')
+                
+                if action_type == 'click' and 'link' in clean_prompt.lower():
+                    logger.info(f"🔧 Using FALLBACK: Direct DOM link finder for '{clean_prompt}'")
+                    generated_code = self._generate_fallback_link_click(clean_prompt)
+                    logger.info(f"✅ Generated fallback code ({len(generated_code)} chars)")
+                
+                # ✅ FIX (Message 10): For search/fill + Enter, generate combined code
+                elif action_type == 'fill' and ('search' in clean_prompt.lower() or 'find' in clean_prompt.lower()):
+                    logger.info(f"🔧 Using FALLBACK: Search field auto-enter for '{clean_prompt}'")
+                    text_to_fill = task.get('web_params', {}).get('text', '')
+                    generated_code = self._generate_fallback_search_fill(clean_prompt, text_to_fill)
+                    logger.info(f"✅ Generated fallback code ({len(generated_code)} chars)")
+                
+                else:
+                    # No fallback available
+                    return WebExecutionResult(
+                        validation_passed=False,
+                        security_passed=True,
+                        error=f"RAG code generation failed: {str(e)}",
                     execution_time=(datetime.now() - start_time).total_seconds()
                 )
             
@@ -1092,8 +1269,15 @@ class WebExecutionPipeline:
             
             # ✅ STEP 4: EXECUTE CODE
             logger.info(f"🚀 Executing RAG-generated code")
+            _url_before_exec = page.url
             result = await self._execute_generated_code(page, generated_code, task_id)
-            
+
+            # FIX: invalidate cache after ANY click/submit — Google auth keeps same URL
+            # but swaps the entire DOM (email page → password page). Force refresh.
+            if action_type in ('click', 'submit') or page.url != _url_before_exec:
+                logger.info(f"🔄 Post-exec cache invalidation (action={action_type})")
+                self.context_cache.invalidate(session_id)
+
             # ✅ STEP 5: OBSERVE STATE AFTER ACTION
             page_state_after = None
             if self.config.enable_page_state_layer:
@@ -1112,8 +1296,24 @@ class WebExecutionPipeline:
                         verification_message = f"✅ Page state changed as expected: {changes}"
                         logger.info(f"✅ Verification: State changed")
                     else:
-                        verification_message = "⚠️ No page state change detected"
-                        logger.warning(f"⚠️ Verification: No state change")
+                        # ℹ️ For click actions: no URL change could mean download, modal, or off-page action
+                        if action_type == 'click':
+                            verification_message = "✅ Click executed (no page navigation - may have triggered download, modal, or external action)"
+                            logger.info(f"✅ Verification: Click action executed (may have triggered download/modal)")
+                            # Don't retry fallback for clicks - assume they worked
+                        else:
+                            verification_message = "⚠️ No page state change detected"
+                            logger.warning(f"⚠️ Verification: No state change")
+                            
+                            # Fallback retry only for non-click actions
+                            if action_type == 'fill' and 'search' in clean_prompt.lower():
+                                logger.info(f"🔧 No state change for search, retrying with FALLBACK...")
+                                fallback_code = self._generate_fallback_search_fill(clean_prompt, task.get('web_params', {}).get('text', ''))
+                                result = await self._execute_generated_code(page, fallback_code, task_id)
+                                if result.get('success'):
+                                    page_state_after = await observe_page_state(page)
+                                    verification_message = f"✅ Fallback search succeeded!"
+                                    logger.info(f"✅ Fallback search verified")
                 
                 # Additional verification from verifiers module
                 from agents.execution_agent.RAG.web.verifiers import verify_action
@@ -1200,7 +1400,7 @@ class WebExecutionPipeline:
     
     async def _generate_code_from_rag_smart(
         self, 
-        ai_prompt: str, 
+        ai_prompt: str,      # ← already cleaned (no error suffix)
         page, 
         task: Dict[str, Any],
         session_id: str,
@@ -1213,8 +1413,9 @@ class WebExecutionPipeline:
         
         await self._initialize_rag_system()
         
-        # Get cached DOM context
-        page_context = await self.context_cache.get_or_analyze(session_id, page)
+        # ✅ FIX: Always force_refresh=True to detect manual changes user made to the page
+        # (solving captcha, clicking buttons, filling fields manually, etc.)
+        page_context = await self.context_cache.get_or_analyze(session_id, page, force_refresh=True)
         
         # ✅ Build platform-aware smart intent prompt
         if self.config.enable_page_context and page_state:
@@ -1243,6 +1444,154 @@ class WebExecutionPipeline:
             logger.error(f"❌ RAG code generation failed: {e}")
             raise
     
+    def _generate_fallback_link_click(self, ai_prompt: str) -> str:
+        """
+        ✅ FALLBACK: Generate simple code to find and click a link by text (when RAG fails).
+        Handles Google Scholar and other sites with proper scrolling.
+        """
+        
+        # Extract link name from prompt
+        # "Open the link named Ringer: web automation" → "Ringer: web automation"
+        link_name_match = re.search(r'(?:named|called|titled)\s+["\']?([^"\']+)["\']?(?:\.|$)', ai_prompt, re.IGNORECASE)
+        link_name = link_name_match.group(1) if link_name_match else ai_prompt
+        
+        # Clean it up
+        link_name = re.sub(r'\s*(and|or)\s*.*$', '', link_name).strip()
+        
+        # Escape quotes in link_name for safe embedding
+        link_name_escaped = link_name.replace("'", "\\'")
+        
+        code = f"""
+# ✅ FALLBACK: Find and click link by text (with scrolling)
+import asyncio
+
+async def main():
+    link_text = '{link_name_escaped}'
+    
+    # Strategy 1: Use Playwright locator with text matching + scroll
+    try:
+        locator = page.locator(f'a:has-text("{{link_text}}")')
+        if locator:
+            # CRITICAL: Scroll into view BEFORE clicking (handles arXiv, long pages, etc.)
+            await locator.first.scroll_into_view()
+            await page.wait_for_timeout(300)
+            await locator.first.click()
+            print('EXECUTION_SUCCESS')
+            return
+    except Exception as e:
+        logger.debug(f"Strategy 1 failed: {{e}}")
+        pass
+    
+    # Strategy 2: Partial text match with scrolling (case-insensitive)
+    try:
+        links = await page.query_selector_all('a')
+        for link in links:
+            text = await link.text_content()
+            if text and link_text.lower() in text.lower():
+                # Scroll into view
+                await page.evaluate('el => el.scrollIntoView(true)', link)
+                await page.wait_for_timeout(300)
+                await link.click()
+                print('EXECUTION_SUCCESS')
+                return
+    except Exception as e:
+        logger.debug(f"Strategy 2 failed: {{e}}")
+        pass
+    
+    # Strategy 3: Search for text in any element, then find parent link with scrolling
+    try:
+        elements = await page.query_selector_all('*')
+        for elem in elements:
+            text = await elem.text_content()
+            if text and link_text.lower() in text.lower():
+                # Find parent link
+                try:
+                    parent_link = await elem.evaluate_handle('el => el.closest("a")')
+                    if parent_link:
+                        # Scroll parent link into view
+                        await page.evaluate('el => el.scrollIntoView(true)', parent_link)
+                        await page.wait_for_timeout(300)
+                        await parent_link.click()
+                        print('EXECUTION_SUCCESS')
+                        return
+                except Exception as e:
+                    logger.debug(f"Strategy 3 link click failed: {{e}}")
+                    pass
+    except Exception as e:
+        logger.debug(f"Strategy 3 failed: {{e}}")
+        pass
+    
+    print(f'FAILED: Could not find link with text "{{link_text}}"')
+
+await main()
+"""
+        return code.strip()
+    
+    def _generate_fallback_search_fill(self, ai_prompt: str, text_to_fill: str) -> str:
+        """
+        ✅ FALLBACK: Fill search field and press Enter automatically (when RAG fails).
+        Handles Google Scholar and other search sites.
+        """
+        
+        # Escape quotes in text for safe embedding
+        text_escaped = text_to_fill.replace("'", "\\'")
+        
+        code = f"""
+# ✅ FALLBACK: Fill search field and press Enter
+import asyncio
+
+async def main():
+    text = '{text_escaped}'
+    
+    # Strategy 1: Find search input by type
+    try:
+        search_input = await page.query_selector('input[type="search"]')
+        if search_input:
+            await search_input.fill(text)
+            print(f'Filled search: {{text}}')
+            await page.wait_for_timeout(500)  # Human-like delay
+            await search_input.press('Enter')
+            await page.wait_for_timeout(1000)  # Wait for search results
+            print('EXECUTION_SUCCESS')
+            return
+    except:
+        pass
+    
+    # Strategy 2: Find search by placeholder
+    try:
+        search_input = await page.query_selector('input[placeholder*="search" i]')
+        if search_input:
+            await search_input.fill(text)
+            print(f'Filled search: {{text}}')
+            await page.wait_for_timeout(500)
+            await search_input.press('Enter')
+            await page.wait_for_timeout(1000)
+            print('EXECUTION_SUCCESS')
+            return
+    except:
+        pass
+    
+    # Strategy 3: Find any input and try Enter
+    try:
+        inputs = await page.query_selector_all('input[type="text"], textarea, input:not([type])')
+        if inputs:
+            search_input = inputs[0]
+            await search_input.fill(text)
+            print(f'Filled search: {{text}}')
+            await page.wait_for_timeout(500)
+            await search_input.press('Enter')
+            await page.wait_for_timeout(1000)
+            print('EXECUTION_SUCCESS')
+            return
+    except:
+        pass
+    
+    print(f'FAILED: Could not find search field')
+
+await main()
+"""
+        return code.strip()
+    
     async def _execute_generated_code(
         self,
         page,
@@ -1269,8 +1618,6 @@ class WebExecutionPipeline:
             code = re.sub(r'context\.close\(\)', 'pass  # Context kept open', code)
             code = re.sub(r'await\s+playwright\.stop\(\)', 'pass  # Playwright kept running', code)
             # ✅ FIX 3: .first/.last are Locator properties, not coroutines
-            # The LLM often writes `await locator.first` which crashes with
-            # "object Locator can't be used in 'await' expression"
             code = re.sub(r'await\s+([\w.()\[\]]+)\.first\b', r'\1.first', code)
             code = re.sub(r'await\s+([\w.()\[\]]+)\.last\b', r'\1.last', code)
             
@@ -1385,6 +1732,24 @@ async def __rag_step__(page):
             'violations': violations
         }
     
+    async def _humanize_page(self, page):
+        """
+        Add human-like behavior to avoid bot detection on auth pages.
+        Moves mouse randomly, adds small delays — makes automation look real.
+        """
+        import random
+        try:
+            vw = page.viewport_size.get('width', 1366) if page.viewport_size else 1366
+            vh = page.viewport_size.get('height', 768) if page.viewport_size else 768
+            # Random mouse movements
+            for _ in range(random.randint(2, 4)):
+                x = random.randint(100, vw - 100)
+                y = random.randint(100, vh - 100)
+                await page.mouse.move(x, y)
+                await page.wait_for_timeout(random.randint(50, 150))
+        except Exception:
+            pass  # non-fatal
+
     async def cleanup(self):
         """Clean up browser resources"""
         logger.info("🧹 Cleaning up Playwright resources...")
@@ -1560,16 +1925,22 @@ class CoordinatorWebBridge:
             )
         
         attempt = 0
+        last_error = ""
         
         while attempt < max_retries:
             attempt += 1
             logger.info(f"🔄 Attempt {attempt}/{max_retries} for task {task.task_id}")
             
             try:
+                # ✅ FIX: Always pass the original clean ai_prompt to execute_web_task.
+                # Error context from previous attempts is NOT appended to the prompt
+                # because doing so caused validate_action_context to trigger the media
+                # guard when the word "media" appeared in the error string.
+                # The web pipeline handles retries internally with a clean slate.
                 task_dict = {
                     'task_id': task.task_id,
-                    'ai_prompt': task.ai_prompt,
-                    'web_params': task.web_params
+                    'ai_prompt': task.ai_prompt,   # ← always the original, no suffix
+                    'web_params': task.web_params,
                 }
                 
                 exec_result = await self.web.execute_web_task(task_dict, session_id)
@@ -1578,18 +1949,20 @@ class CoordinatorWebBridge:
                     logger.info(f"✅ Task {task.task_id} completed successfully")
                     return self.adapter.execution_result_to_task_result(task, exec_result)
                 
-                logger.warning(f"⚠️ Execution failed (attempt {attempt})")
+                last_error = exec_result.error or 'Unknown error'
+                logger.warning(f"⚠️ Web execution failed (attempt {attempt}): {last_error[:120]}")
                 
             except Exception as e:
+                last_error = str(e)
                 logger.error(f"❌ Exception during web execution: {e}")
                 if attempt == max_retries:
                     break
         
-        logger.error(f"❌ Task {task.task_id} failed after {max_retries} attempts")
+        logger.error(f"❌ Web task {task.task_id} failed after {max_retries} attempts")
         return TaskResult(
             task_id=task.task_id,
             status="failed",
-            error=f"Failed after {max_retries} attempts"
+            error=f"Failed after {max_retries} attempts: {last_error}"
         )
 
 # ============================================================================
@@ -1662,6 +2035,7 @@ async def start_web_execution_agent_with_rag(broker_instance, rag_system, web_pi
     logger.info("   ✅ Post-action verification")
     logger.info("   ✅ Smart intent handling")
     logger.info("   ✅ Persistent context (separate from mem0)")
+    logger.info("   ✅ Media validation gated on explicit media action_type")
     
     while True:
         await asyncio.sleep(1)

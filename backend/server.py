@@ -184,7 +184,7 @@ app.include_router(device_router)
 app.include_router(memory_router)
 logger.info("✅ Memory API routes registered at /api/memory")
 
-# CORS for Electron
+# CORS for Electron and WebSocket (allow local network)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -193,12 +193,18 @@ app.add_middleware(
         "http://localhost:8080",  # Alternative
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "http://192.168.1.18:3000",  # Local network dev machine
+        "http://192.168.1.18:5173",
+        "http://192.168.1.18:8080",
+        "ws://localhost:3000",  # WebSocket
+        "ws://127.0.0.1:3000",
+        "ws://192.168.1.18:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-logger.info("✅ CORS middleware configured")
+logger.info("✅ CORS middleware configured for local network connections")
 
 
 # ============================================================================

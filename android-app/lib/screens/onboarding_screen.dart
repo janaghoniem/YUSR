@@ -36,6 +36,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   late stt.SpeechToText _speech;
   bool _isListening = false;
+  bool _isHandlingNext = false;
   late VideoPlayerController _bgVideoController;
 
   final TextEditingController _textCtrl = TextEditingController();
@@ -182,10 +183,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             });
           }
 
-          if (hasNextWord) {
+          if (hasNextWord && !_isHandlingNext) {
+            _isHandlingNext = true;
             _stopListening();
-            Future.delayed(const Duration(milliseconds: 400), () {
-              if (mounted && _step < _currentQuestions.length) _nextStep();
+            Future.delayed(const Duration(milliseconds: 500), () {
+              if (mounted && _step < _currentQuestions.length) {
+                _nextStep();
+                _isHandlingNext = false;
+              }
             });
           }
         },

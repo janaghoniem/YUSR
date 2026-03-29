@@ -1061,8 +1061,8 @@ class _AutomationDemoState extends State<AutomationDemo>
                   const SizedBox(height: 16),
 
                   // Waveform and Record Button
-                  SizedBox(
-                    height: 140,
+                  Expanded(
+                    flex: 3,
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [

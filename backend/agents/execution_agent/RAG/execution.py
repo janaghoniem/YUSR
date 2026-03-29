@@ -22,6 +22,7 @@ import ast
 import sys
 from enum import Enum
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ class SecurityValidator:
     def __init__(self):
         # Dangerous operations to block
         self.blocked_imports = {
-            # 'os.system',
+            'os.system',
             'subprocess.Popen', 'subprocess.call',
             'eval', 'exec', '__import__',
             'socket', 'urllib', 'requests',  # Block network (except in allowed context)
@@ -446,7 +447,7 @@ class LocalSandbox:
         start_time = time.time()
         
         # Create temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
             f.write(code)
             temp_file = f.name
         
@@ -797,7 +798,17 @@ class ActionCache:
 
 class SandboxExecutionPipeline:
     """Complete pipeline for safe code execution with optional caching"""
-    
+
+    # Whitelist of allowed packages for dynamic installation
+    ALLOWED_PACKAGES = {
+        'docx': 'python-docx',           # Word files
+        'openpyxl': 'openpyxl',          # Excel files
+        'pptx': 'python-pptx',           # PowerPoint files
+        'selenium': 'selenium',          # Browser automation
+        'requests': 'requests',          # HTTP requests
+        'bs4': 'beautifulsoup4',         # Web scraping
+    }
+
     def __init__(self, config: SandboxConfig = None, enable_cache: bool = True):
         """
         Initialize sandbox pipeline
@@ -824,7 +835,126 @@ class SandboxExecutionPipeline:
         
         # Execution history
         self.execution_history = []
-    
+
+    def _extract_imports(self, code: str) -> List[str]:
+        """
+        Extract module names from Python import statements.
+
+        Returns list of top-level module names (deduplicated).
+        """
+        imports = set()
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            # If code has syntax errors, try regex fallback
+            logger.warning("Failed to parse code with ast, using regex fallback")
+            return self._extract_imports_regex(code)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    # Get the top-level module name
+                    module_name = alias.name.split('.')[0]
+                    imports.add(module_name)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    # Get the top-level module name
+                    module_name = node.module.split('.')[0]
+                    imports.add(module_name)
+
+        return list(imports)
+
+    def _extract_imports_regex(self, code: str) -> List[str]:
+        """Fallback regex-based import extraction"""
+        imports = set()
+
+        # Match: import x, import x.y, import x as y
+        import_pattern = r'^\s*import\s+(\w+)'
+        # Match: from x import y, from x.y import z
+        from_pattern = r'^\s*from\s+(\w+)'
+
+        for line in code.split('\n'):
+            import_match = re.match(import_pattern, line)
+            if import_match:
+                imports.add(import_match.group(1))
+
+            from_match = re.match(from_pattern, line)
+            if from_match:
+                imports.add(from_match.group(1))
+
+        return list(imports)
+
+    def _get_package_name(self, module_name: str) -> Optional[str]:
+        """
+        Map a module name to its pip package name.
+
+        Returns package name if whitelisted, None otherwise.
+        """
+        return self.ALLOWED_PACKAGES.get(module_name)
+
+    def _install_dependencies(self, code: str) -> bool:
+        """
+        Dynamically install required packages based on imports in code.
+
+        Only installs packages that are in the whitelist.
+        Silent on failure - let execution reveal import errors.
+
+        Returns True if all installs succeeded or no installs needed.
+        """
+        imports = self._extract_imports(code)
+
+        if not imports:
+            logger.debug("No imports detected, skipping dependency installation")
+            return True
+
+        # Map module names to package names (only whitelisted)
+        packages_to_install = []
+        for module_name in imports:
+            package_name = self._get_package_name(module_name)
+            if package_name:
+                packages_to_install.append(package_name)
+
+        if not packages_to_install:
+            logger.debug(f"No whitelisted packages needed. Detected modules: {imports}")
+            return True
+
+        # Remove duplicates while preserving install-time consistency
+        packages_to_install = list(set(packages_to_install))
+
+        logger.info(f"🔧 Installing {len(packages_to_install)} package(s): {packages_to_install}")
+
+        all_success = True
+        for package in packages_to_install:
+            try:
+                logger.debug(f"   Installing: {package}...")
+                result = subprocess.run(
+                    [sys.executable, '-m', 'pip', 'install', '--quiet', package],
+                    timeout=30,
+                    capture_output=True,
+                    text=True
+                )
+
+                if result.returncode == 0:
+                    logger.debug(f"   ✅ {package} installed successfully")
+                else:
+                    logger.warning(f"   ⚠️ {package} installation failed: {result.stderr[:100]}")
+                    all_success = False
+
+            except subprocess.TimeoutExpired:
+                logger.warning(f"   ⚠️ {package} installation timed out")
+                all_success = False
+            except Exception as e:
+                logger.warning(f"   ⚠️ {package} installation error: {e}")
+                all_success = False
+
+        if all_success:
+            logger.info(f"✅ All dependencies installed successfully")
+        else:
+            logger.info(f"⚠️ Some dependencies failed to install (continuing anyway)")
+
+        return all_success
+
     def execute_code(self, code: str, 
                     use_docker: bool = False,
                     expected_output: Optional[str] = None,
@@ -838,7 +968,7 @@ class SandboxExecutionPipeline:
         print("="*80)
         
         # Step 1: Security validation
-        print("\n[1/4] Security Validation...")
+        print("\n[1/5] Security Validation...")
         is_safe, violations = self.security_validator.validate_code(code)
         
         if not is_safe:
@@ -861,23 +991,27 @@ class SandboxExecutionPipeline:
             )
         
         print("✅ Security validation passed")
-        
+
         # Step 2: Prepare code
-        print("\n[2/4] Preparing code for execution...")
+        print("\n[2/5] Preparing code for execution...")
         wrapped_code = self._prepare_code(code)
-        
-        # Step 3: Execute in LOCAL sandbox (Docker disabled)
-        print("\n[3/4] Executing in sandbox...")
+
+        # Step 3: Install dependencies
+        print("\n[3/5] Installing dependencies...")
+        self._install_dependencies(code)
+
+        # Step 4: Execute in LOCAL sandbox (Docker disabled)
+        print("\n[4/5] Executing in sandbox...")
         print("  📍 Using LOCAL subprocess sandbox (Docker disabled)")
-        
+
         result = self.local_sandbox.execute_local(wrapped_code)
         
         print(f"  Status: {result.status.value}")
         print(f"  Execution time: {result.execution_time:.3f}s")
         print(f"  Exit code: {result.exit_code}")
         
-        # Step 4: Validate result
-        print("\n[4/4] Validating result...")
+        # Step 5: Validate result
+        print("\n[5/5] Validating result...")
         result = self.execution_validator.validate_result(result, expected_output)
         
         if result.validation_passed:
@@ -886,6 +1020,29 @@ class SandboxExecutionPipeline:
             print("⚠️ Validation failed:")
             for error in result.validation_errors:
                 print(f"  - {error}")
+                
+        # if expected_app and result.validation_passed:
+        #     print("\n[5/5] Window validation...")
+        #     try:
+        #         from validation.fast_window_detector import get_current_window
+                
+        #         actual_window = get_current_window()
+                
+        #         if expected_app.lower() not in actual_window.process_name.lower():
+        #             print(f"❌ Wrong window active!")
+        #             print(f"   Expected: {expected_app}")
+        #             print(f"   Got: {actual_window.process_name}")
+                    
+        #             result.status = ExecutionStatus.FAILED
+        #             result.validation_passed = False
+        #             result.validation_errors.append(
+        #                 f"Expected {expected_app}, but {actual_window.process_name} is active"
+        #             )
+        #         else:
+        #             print(f"✅ Correct window active: {actual_window.process_name}")
+            
+        #     except Exception as e:
+        #         print(f"⚠️ Window validation skipped: {e}")
         
         # Store in history
         self.execution_history.append(result)
@@ -958,6 +1115,7 @@ class RAGWithSandbox:
     def __init__(self, rag_system, sandbox_pipeline: SandboxExecutionPipeline):
         self.rag = rag_system
         self.sandbox = sandbox_pipeline
+        self.last_file_path = None  # Tracks active file across sequential tasks
     
     def generate_and_execute(self, user_query: str, 
                             max_retries: int = 1,
@@ -1062,15 +1220,21 @@ class RAGWithSandbox:
         attempt = 0
         error_context = ""
         start_context_index = 0
-        
+
+        # Inject active file context so consecutive tasks work on the same file
+        base_query = user_query
+        if self.last_file_path:
+            base_query = f"[ACTIVE FILE: {self.last_file_path}]\n\n{user_query}"
+            print(f"[FILE CONTEXT] Active file: {self.last_file_path}")
+
         while attempt < max_retries:
             attempt += 1
             print(f"\n--- Attempt {attempt}/{max_retries} ---")
-            
+
             # Step 1: Generate code using RAG
             print("\n[RAG] Generating code...")
-            
-            enhanced_query = user_query
+
+            enhanced_query = base_query
             if error_context:
                 enhanced_query += f"\n\nPrevious attempt failed with: {error_context}"
                 enhanced_query += "\nPlease provide an alternative approach."
@@ -1127,6 +1291,14 @@ class RAGWithSandbox:
                 #         execution_result=exec_result
                 #     )
                 
+                # Parse [FILE]: output to track active file for next task
+                if exec_result.stdout:
+                    for line in exec_result.stdout.splitlines():
+                        if line.startswith('[FILE]:'):
+                            self.last_file_path = line[7:].strip()
+                            print(f"[FILE CONTEXT] Captured: {self.last_file_path}")
+                            break
+
                 return {
                     'success': True,
                     'query': user_query,
@@ -1134,7 +1306,8 @@ class RAGWithSandbox:
                     'execution_result': exec_result.to_dict(),
                     'rag_context': rag_result,
                     'attempts': attempt,
-                    'cache_hit': False
+                    'cache_hit': False,
+                    'last_file_path': self.last_file_path
                 }
             
             # Failed - prepare for retry

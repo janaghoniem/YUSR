@@ -1,263 +1,224 @@
 """
-Mobile Action Handler
-Routes mobile tasks to ReAct strategy ONLY
+mobile_action_handler.py
 
-This sits between:
-- Coordinator (sends ActionTask with device="mobile")
-- MobileStrategy (ReAct loop with Groq LLM for ALL mobile tasks)
-- Android Device (HTTP API endpoints)
+Routes mobile tasks to the MobileReActStrategy.
 
-Strategy:
-- Use ReAct loop for ALL mobile tasks (dynamic, flexible)
-- No hardcoded task detection or app-specific automation
+Sits between:
+  - Coordinator (sends ActionTask with device="mobile")
+  - MobileStrategy (3-tier ReAct loop)
+  - Android Device (HTTP API at localhost:8000)
 """
 
-import logging
 import asyncio
-from typing import Dict, Any, Optional
+import logging
+from datetime import datetime
+from typing import Any, Dict, Optional
 
-from agents.utils.protocol import (
-    ExecutionResult, MessageType, AgentType, Channels
+from agents.execution_agent.core.exec_agent_models import ExecutionResult
+from agents.execution_agent.strategies.mobile_strategy import (
+    MobileStrategy, MobileTaskRequest, compute_smart_timeout,
 )
 from agents.utils.broker import broker
-from agents.execution_agent.strategies.mobile_strategy import (
-    execute_mobile_task, MobileStrategy, MobileTaskRequest
-)
+from agents.utils.protocol import AgentType, Channels, MessageType
 
 logger = logging.getLogger(__name__)
 
 
+def _failed_result(task_id: str, error: str, duration: float = 0.0) -> ExecutionResult:
+    """
+    Convenience builder so every failed path fills all required dataclass fields.
+    """
+    return ExecutionResult(
+        status="failed",
+        task_id=task_id,
+        context="mobile",
+        action="react_loop",
+        details="",
+        logs=[],
+        timestamp=datetime.now().isoformat(),
+        duration=duration,
+        error=error,
+    )
+
+
 class MobileActionHandler:
-    """Handles execution of mobile tasks with ReAct loop ONLY"""
-    
+    """Handles execution of mobile tasks via the 3-tier ReAct loop."""
+
     def __init__(self, device_id: str = "default_device"):
-        """
-        Initialize mobile handler
-        
-        Args:
-            device_id: Android device to target (can be configured per session)
-        """
-        self.device_id = device_id
+        self.device_id       = device_id
         self.mobile_strategy = MobileStrategy(device_id)
-        # NOTE: AccessibilityAutomationHandler removed - use ReAct loop for ALL mobile tasks
-        logger.info(f"✅ Initialized MobileActionHandler for device {device_id} (ReAct loop only)")
-    
+        logger.info(f"✅ MobileActionHandler ready | device={device_id}")
+
     async def handle_action_task(
         self,
-        task_id: str,
+        task_id:    str,
         session_id: str,
-        task: Optional[Dict[str, Any]] = None,
-        **kwargs
+        task:       Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> ExecutionResult:
         """
-        Handle a single action task. 
-        Uses **kwargs to safely capture 'task_data' or 'task' from Coordinator.
+        Execute one atomic mobile task.
+
+        Parameters
+        ----------
+        task_id    : str — coordinator task identifier
+        session_id : str — current session
+        task       : dict — the ActionTask payload (ai_prompt, extra_params, …)
         """
-        # Resolve which variable contains the task info
         actual_task = task or kwargs.get("task_data")
-        
+
         if not actual_task:
             logger.error(f"❌ No task data provided for {task_id}")
-            return ExecutionResult(
-                task_id=task_id,
-                status="failed",
-                error="Task data missing in request"
+            return _failed_result(task_id, "Task data missing in request")
+
+        ai_prompt = actual_task.get("ai_prompt", "").strip()
+        if not ai_prompt:
+            return _failed_result(task_id, "Missing ai_prompt")
+
+        extra       = dict(actual_task.get("extra_params", {}) or {})
+        if not extra.get("overall_goal"):
+            extra["overall_goal"] = actual_task.get("goal") or ai_prompt
+        if not extra.get("goal") and actual_task.get("goal"):
+            extra["goal"] = actual_task.get("goal")
+        device_id   = extra.get("device_id", self.device_id)
+        max_steps   = int(extra.get("max_steps", 15))
+        # FIX 2: compute adjusted timeout so the outer wait_for matches what the strategy uses
+        timeout_sec = compute_smart_timeout(ai_prompt, int(extra.get("timeout_seconds", 30)))
+
+        logger.info(f"📱 Mobile task {task_id}: '{ai_prompt}'")
+        _ic = extra.get("input_content", "")
+        if _ic:
+            logger.info(
+                f"   input_content ({len(_ic)} chars): "
+                f"{_ic[:200]}{'...' if len(_ic) > 200 else ''}"
             )
 
-        logger.info(f"📱 Handling mobile task: {task_id}")
-        logger.info(f"   Prompt: {actual_task.get('ai_prompt')}")
-        
+        mobile_task = MobileTaskRequest(
+            task_id         = task_id,
+            ai_prompt       = ai_prompt,
+            device_id       = device_id,
+            session_id      = session_id or "default_session",
+            context         = extra,
+            extra_params    = extra,
+            max_steps       = max_steps,
+            timeout_seconds = timeout_sec,
+        )
+
+        t_start = asyncio.get_event_loop().time()
+
         try:
-            # Validate task
-            ai_prompt = actual_task.get("ai_prompt")
-            if not ai_prompt:
-                return ExecutionResult(
-                    task_id=task_id,
-                    status="failed",
-                    error="Missing ai_prompt"
-                )
-            
-            # Extract device-specific settings
-            extra = actual_task.get("extra_params", {})
-            device_id = extra.get("device_id", self.device_id)
-            
-            # ====================================================================
-            # ALWAYS USE REACT LOOP FOR MOBILE TASKS
-            # ====================================================================
-            logger.info(f"🤖 Using ReAct loop for mobile task: {ai_prompt}")
-            
-            max_steps = extra.get("max_steps", 15)
-            timeout_seconds = extra.get("timeout_seconds", 30)
-            
-            # Build mobile task request
-            mobile_task = MobileTaskRequest(
-                task_id=task_id,
-                ai_prompt=ai_prompt,
-                device_id=device_id,
-                session_id=session_id or "default_session",  # Handle None
-                context=extra,
-                extra_params=extra,
-                max_steps=max_steps,
-                timeout_seconds=timeout_seconds
+            result = await asyncio.wait_for(
+                self.mobile_strategy.execute_task(mobile_task),
+                timeout=float(timeout_sec),
             )
-            
-            # Execute with timeout
-            try:
-                result = await asyncio.wait_for(
-                    self.mobile_strategy.execute_task(mobile_task),
-                    timeout=float(timeout_seconds)
-                )
-            except asyncio.TimeoutError:
-                # Pull whatever metrics the strategy accumulated before timeout
-                strat = self.mobile_strategy
-                logger.warning(
-                    f"⏱️ Task timed out after {timeout_seconds}s — "
-                    f"steps: {len(strat.action_history)}, "
-                    f"LLM calls: {strat.total_llm_calls}, "
-                    f"tiers: {dict(strat.tier_stats)}"
-                )
-                return ExecutionResult(
-                    task_id=task_id,
-                    status="failed",
-                    error=f"Task timed out after {timeout_seconds}s",
-                    metadata={
-                        "token_usage": dict(strat.token_usage),
-                        "llm_calls": strat.total_llm_calls,
-                        "steps_taken": len(strat.action_history),
-                        "execution_time_ms": int(timeout_seconds * 1000),
-                        "tier_stats": dict(strat.tier_stats),
-                    }
-                )
-            
-            success = result.status == "success"
+        except asyncio.TimeoutError:
+            strat   = self.mobile_strategy
+            elapsed = asyncio.get_event_loop().time() - t_start
+            logger.warning(
+                f"⏱️ Task {task_id} timed out after {timeout_sec}s — "
+                f"steps={len(strat.action_history)} "
+                f"llm_calls={strat.total_llm_calls} "
+                f"tiers={dict(strat.tier_stats)}"
+            )
             return ExecutionResult(
-                status="success" if success else "failed",
-                details=result.completion_reason or "Mobile task executed",
-                error=result.error,
-                metadata={
-                    "token_usage": result.token_usage or {},
-                    "llm_calls": result.llm_calls,
-                    "steps_taken": result.steps_taken,
-                    "execution_time_ms": result.execution_time_ms,
-                    "tier_stats": dict(self.mobile_strategy.tier_stats),
-                }
+                status    = "failed",
+                task_id   = task_id,
+                context   = "mobile",
+                action    = "react_loop",
+                details   = f"Timed out after {timeout_sec}s",
+                logs      = [],
+                timestamp = datetime.now().isoformat(),
+                duration  = elapsed,
+                error     = f"Task timed out after {timeout_sec}s",
+                metadata  = {
+                    "token_usage": dict(strat.token_usage),
+                    "llm_calls":   strat.total_llm_calls,
+                    "steps_taken": len(strat.action_history),
+                    "tier_stats":  dict(strat.tier_stats),
+                },
             )
-        
         except Exception as e:
-            logger.error(f"❌ Error handling mobile task: {e}", exc_info=True)
+            elapsed = asyncio.get_event_loop().time() - t_start
+            logger.error(f"❌ Mobile task {task_id} raised: {e}", exc_info=True)
             return ExecutionResult(
-                task_id=task_id,
-                status="failed",
-                error=str(e)
+                status    = "failed",
+                task_id   = task_id,
+                context   = "mobile",
+                action    = "react_loop",
+                details   = "",
+                logs      = [],
+                timestamp = datetime.now().isoformat(),
+                duration  = elapsed,
+                error     = str(e),
             )
-        
-# ============================================================================
-# GLOBAL HANDLER INSTANCE
-# ============================================================================
 
-mobile_handler: Optional[MobileActionHandler] = None
+        elapsed = result.execution_time_ms / 1000.0
+        success = result.status == "success"
+        return ExecutionResult(
+            status    = "success" if success else "failed",
+            task_id   = task_id,
+            context   = "mobile",
+            action    = "react_loop",
+            details   = result.completion_reason or result.error or "Mobile task executed",
+            logs      = [],
+            timestamp = datetime.now().isoformat(),
+            duration  = elapsed,
+            error     = result.error,
+            metadata  = {
+                "token_usage": result.token_usage or {},
+                "llm_calls":   result.llm_calls,
+                "steps_taken": result.steps_taken,
+                "tier_stats":  dict(self.mobile_strategy.tier_stats),
+            },
+        )
+
+
+# ── Singleton ───────────────────────────────────────────────────────────────
+
+_mobile_handler: Optional[MobileActionHandler] = None
 
 
 def initialize_mobile_handler(device_id: str = "default_device"):
-    """Initialize the global mobile handler"""
-    global mobile_handler
-    mobile_handler = MobileActionHandler(device_id)
+    global _mobile_handler
+    _mobile_handler = MobileActionHandler(device_id)
     logger.info("✅ Mobile handler initialized")
 
 
 async def get_mobile_handler() -> MobileActionHandler:
-    """Get or create the mobile handler"""
-    global mobile_handler
-    if mobile_handler is None:
+    global _mobile_handler
+    if _mobile_handler is None:
         initialize_mobile_handler()
-    return mobile_handler
+    return _mobile_handler
 
 
-# ============================================================================
-# MESSAGE BROKER INTEGRATION
-# ============================================================================
+# ── Message broker integration ──────────────────────────────────────────────
 
 async def handle_mobile_action_task(message: Dict[str, Any]):
-    """
-    Callback for handling mobile action tasks from the message broker
-    
-    Called when coordinator publishes a task with device="mobile"
-    """
+    """Callback for mobile tasks arriving via the message broker."""
     try:
-        payload = message.get("payload", {})
-        task_id = payload.get("task_id")
-        session_id = payload.get("session_id")
-        task_data = payload.get("task", {})
-        
-        logger.info(f"📬 Received mobile task from broker: {task_id}")
-        
-        # Get handler
+        payload    = message.get("payload", {})
+        task_id    = payload.get("task_id", "unknown")
+        session_id = payload.get("session_id", "default")
+        task_data  = payload.get("task", {})
+
+        logger.info(f"📬 Broker mobile task: {task_id}")
         handler = await get_mobile_handler()
-        
-        # Execute task
-        result = await handler.handle_action_task(task_data, task_id, session_id)
-        
-        # Publish result back to coordinator
-        logger.info(f"📤 Publishing result for task {task_id}: {result.status}")
+        result  = await handler.handle_action_task(
+            task_id=task_id, session_id=session_id, task=task_data,
+        )
+
         await broker.publish(
             Channels.EXECUTION_TO_COORDINATOR,
             {
-                "type": MessageType.TASK_RESULT,
+                "type":  MessageType.TASK_RESULT,
                 "agent": AgentType.EXECUTION,
                 "payload": {
                     "task_id": task_id,
-                    "status": result.status,
-                    "content": result.content,
-                    "error": result.error
-                }
-            }
+                    "status":  result.status,
+                    "content": result.details,
+                    "error":   result.error,
+                },
+            },
         )
-    
     except Exception as e:
-        logger.error(f"❌ Error in handle_mobile_action_task: {e}", exc_info=True)
-
-
-async def subscribe_to_mobile_tasks():
-    """Subscribe to mobile action tasks from the coordinator"""
-    
-    # TODO: This needs to be integrated into the main execution agent
-    # For now, this shows how tasks would be routed
-    
-    logger.info("🔔 Subscribing to mobile action tasks...")
-    # In practice, this would be called in the execution agent's startup
-    # broker.subscribe(Channels.COORDINATOR_TO_EXECUTION, handle_mobile_action_task)
-
-
-# ============================================================================
-# DIAGNOSTIC/TESTING
-# ============================================================================
-
-async def test_mobile_task():
-    """Test the mobile handler with a sample task"""
-    
-    logger.info("🧪 Testing mobile handler...")
-    
-    initialize_mobile_handler(device_id="test_device")
-    handler = await get_mobile_handler()
-    
-    # Sample task
-    test_task = {
-        "ai_prompt": "Click the Send button",
-        "device": "mobile",
-        "context": "local",
-        "extra_params": {
-            "device_id": "test_device",
-            "max_steps": 5,
-            "timeout_seconds": 30
-        }
-    }
-    
-    result = await handler.handle_action_task(test_task, "test_task_1", "test_session")
-    
-    logger.info(f"Test result: {result.dict()}")
-    return result
-
-
-if __name__ == "__main__":
-    # Run test
-    asyncio.run(test_mobile_task())
+        logger.error(f"❌ handle_mobile_action_task: {e}", exc_info=True)

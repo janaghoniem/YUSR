@@ -65,7 +65,7 @@ class RAGConfig:
 
     similarity_threshold: float = 0.3  # Minimum similarity score
     similarity_threshold: float = 0.3  # Minimum similarity scor
-    retrieval_mode: str = "api"
+    retrieval_mode: str = "API"
     
     
     
@@ -98,6 +98,8 @@ print(f"Model: {config.llm_model}")
 # ============================================================================
 # CELL 2: Vector Database Interface
 # ============================================================================
+
+from  agents.execution_agent.RAG.module_selector import ModuleSelector
 
 class VectorDBInterface:
     """Interface to interact with the vector database"""
@@ -384,22 +386,41 @@ class LLMInterface:
 
 class RAGSystem:
     """Complete RAG system for code generation"""
-    
-    def __init__(self, config: RAGConfig, mode: RetrievalMode = RetrievalMode.API):
+
+    def __init__(self, config: RAGConfig, mode: RetrievalMode = None):
         self.config = config
         self.vectordb = None
-        self.mode = mode  # ← ADD THIS LINE
+
+        # Read mode from config if not explicitly provided
+        if mode is None:
+            # Convert config string to enum
+            if config.retrieval_mode == "local":
+                self.mode = RetrievalMode.LOCAL
+            elif config.retrieval_mode == "api":
+                self.mode = RetrievalMode.API
+            else:
+                # Default to API for team compatibility
+                self.mode = RetrievalMode.API
+        else:
+            self.mode = mode
+
         self.llm = LLMInterface(config)
+        self.module_selector = ModuleSelector()  # ← ADD THIS LINE
         self.conversation_history = []
-        
+
     def initialize(self):
         """Initialize RAG system"""
+        # Skip initialization if RAG is disabled
+        if not self.config.use_rag:
+            print("RAG disabled - skipping vector database initialization")
+            print("RAG System ready! (API mode)")
+            return
+
         print("Initializing RAG System...")
-                # ✅ Step 2: Initialize Vector Database Interface
+        # ✅ Step 2: Initialize Vector Database Interface
         # YOU ALREADY HAVE VectorDBInterface - just use it!
-        self.vectordb = VectorDBInterface(self.config,mode=self.mode)
-        if self.mode == RetrievalMode.LOCAL:  # ← ADD THIS CHECK
-            self.vectordb._initialize_local()
+        self.vectordb = VectorDBInterface(self.config, mode=self.mode)
+        # Remove duplicate initialization - VectorDBInterface already handles this in __init__
         print("RAG System ready!")
 
     def generate_code(self, user_query: str, cache_key: str = None,
@@ -407,7 +428,7 @@ class RAGSystem:
                     conversation_context: List[Dict] = None,
                     start_context_index: int = 0,
                     num_contexts: int = None,
-                    use_rag: bool = None) -> Dict:  # ← ADD use_rag parameter
+                    use_rag: bool = None, screen_state: Dict = None ) -> Dict:  # ← ADD use_rag parameter
         """
         Generate code based on user query using RAG
         
@@ -499,12 +520,32 @@ class RAGSystem:
             print(f"       Including {len(contexts)} RAG contexts in prompt")
         else:
             print(f"       Using zero-shot prompt (no RAG contexts)")
+            
+        print(f"screen_state: {screen_state}")
+
         
-        prompt = self._build_prompt(user_query, contexts, conversation_context)
-        
+        prompt = self._build_prompt(user_query, contexts, conversation_context, screen_state)
+
+        # ============================================================================
+        # STEP 2.5: ENRICH PROMPT WITH MODULE SELECTOR
+        # ============================================================================
+        print(f"\n[ENRICH] 🎯 Applying module selector guidance...")
+        # FIXED: Use user_query for module selection, not the full prompt
+        module_guidance = self.module_selector.select_module(user_query)
+
+        if module_guidance:
+            enriched_prompt = self.module_selector.inject_override(prompt, module_guidance)
+        else:
+            enriched_prompt = prompt
+
+        if enriched_prompt != prompt:
+            print(f"       ✅ Module override injected")
+        else:
+            print(f"       ➡️  No module override needed")
+
         print("-" * 80)
         print("📝 PROMPT PREVIEW:")
-        print(prompt[:500] + "..." if len(prompt) > 500 else prompt)
+        print(enriched_prompt[:500] + "..." if len(enriched_prompt) > 500 else enriched_prompt)
         print("-" * 80)
 
         # ============================================================================
@@ -512,7 +553,7 @@ class RAGSystem:
         # ============================================================================
         print(f"\n[{'4/3' if use_rag else '3/3'}] 🤖 Generating code with LLM...")
         response = self.llm.generate(
-            prompt=prompt,
+            prompt=enriched_prompt,  # ← USE enriched_prompt INSTEAD OF prompt
             system_prompt=self._get_system_prompt()
         )
         
@@ -540,14 +581,29 @@ class RAGSystem:
         
         return result   
     
-    def _build_prompt(self, query: str, contexts: List[Dict], 
+    def _build_prompt(self, query: str, contexts: List[Dict], screen_state: Dict = None,
                      conversation_context: List[Dict] = None) -> str:
         """Build the prompt for the LLM"""
         
         prompt_parts = []
         
+         # Add screen state if available
+        if screen_state:
+                    prompt_parts.append(f"""
+            CURRENT SCREEN STATE:
+            - Active Window: {screen_state['active_window']}
+            - Process: {screen_state['process']}
+            - Visible Controls: {', '.join(screen_state.get('controls', []))}
+
+            ADAPTIVE BEHAVIOR REQUIRED:
+            1. If unexpected popup detected: Close it first (Alt+F4 or Escape)
+            2. If target app not active: Activate it (Win key + search)
+            3. If controls not visible: Wait up to 5 seconds for them to appear
+            4. Try multiple approaches if primary fails
+            """)
+        
         # # Add conversation context if available
-        if conversation_context:
+        if conversation_context and isinstance(conversation_context, list):
             prompt_parts.append("## Previous Conversation:")
             for msg in conversation_context[-3:]:  # Last 3 messages
                 prompt_parts.append(f"User: {msg.get('query', '')}")
@@ -576,8 +632,8 @@ class RAGSystem:
                 
                 if total_length >= self.config.max_context_length:
                     break
-        else:
-            prompt_parts.append("## Note: No similar examples found, using general knowledge")
+        # else:
+        #     prompt_parts.append("## Note: No similar examples found, using general knowledge")
         
         # Add user query
         # prompt_parts.append("## User Request:")
@@ -858,6 +914,26 @@ If something must be opened or interacted with:
 Any violation will fail validation.
 
 ================================================================================
+AVAILABLE LIBRARIES (STRICT - DO NOT HALLUCINATE)
+================================================================================
+
+ALLOWED LIBRARIES ONLY:
+- pyautogui (mouse/keyboard automation)
+- pyperclip (clipboard operations)
+- time (delays)
+- os (file operations)
+- json, csv (data parsing)
+
+FORBIDDEN - DO NOT USE:
+uiautomation (does not exist)
+pywinauto (blocked for security)
+keyboard (not installed)
+subprocess (security violation)
+
+If you need UI automation: USE ONLY pyautogui
+If task requires unavailable library: print("FAILED: Library not available")
+
+================================================================================
 AUTOMATION INTERACTION GUIDANCE
 ================================================================================
 
@@ -920,7 +996,11 @@ OUTPUT FORMAT (STRICT)
             parts = response.split("```python")
             if len(parts) > 1:
                 code_part = parts[1].split("```")[0].strip()
-                code = code_part
+                # Add UTF-8 encoding header for Unicode characters support
+                if code_part and not code_part.startswith("# -*- coding:"):
+                    code = f"# -*- coding: utf-8 -*-\n{code_part}"
+                else:
+                    code = code_part
                 
                 # Get explanation (text after code block)
                 remaining = parts[1].split("```", 1)
@@ -980,6 +1060,7 @@ class CodeExecutor:
     
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
+        self.module_selector = ModuleSelector()
     
     def execute(self, code: str, test_mode: bool = True) -> Dict:
         """

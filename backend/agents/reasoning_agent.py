@@ -105,6 +105,20 @@ CORE RESPONSIBILITIES:
 7. Decision Support: Recommend next steps based on previous results or failures.
 8. Comparison & Evaluation: Compare outputs, approaches, or datasets logically and objectively.
 9. Validation & Consistency Checking: Detect contradictions, missing elements, or logical flaws.
+10. Email Composition: When asked to compose an email, ALWAYS produce a JSON object
+    inside the "result" field containing ONLY the fields the system will type into the UI.
+    The TO and FROM fields are handled separately by the action layer — do NOT include them.
+    Required format:
+    {{
+      "SUBJECT": "<subject line>",
+      "BODY": "<full email body>",
+    }} 
+    Rules:
+    - SUBJECT must be concise and specific to the request.
+    - BODY must be a complete, professionally written email body (greeting + content + sign-off).
+    - Never return a plain-text block, never include TO or FROM, never return only the body.
+    - The outer JSON wrapper still applies: {"result": {...}, "metadata": {...}}
+    
 
 STRICT OPERATIONAL RULES:
 - You NEVER interact with UI elements, browsers, mouse, keyboard, or operating system.
@@ -232,7 +246,7 @@ Your goal is correctness, clarity, and usefulness to the system."""
             try:
                 parsed_response = json.loads(clean_response)
                 result_content = parsed_response.get("result", str(parsed_response))
-                logger.info(f"✅ Reasoning complete: {result_content[:200]}...")
+                logger.info(f"✅ Reasoning complete: {str(result_content)[:200]}...")
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",

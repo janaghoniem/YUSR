@@ -62,7 +62,7 @@ class TaskMessage(BaseModel):
     priority: str = "normal"
     timeout: int = 30
     retry_count: int = 3
-    depends_on: Optional[str] = None
+    depends_on: Optional[List[str]] = None
 
 class ClarificationMessage(BaseModel):
     """Clarification request/response"""

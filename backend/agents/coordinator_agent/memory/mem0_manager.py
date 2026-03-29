@@ -8,6 +8,9 @@ from typing import List, Dict, Optional
 from mem0 import Memory
 from dotenv import load_dotenv
 import logging
+import hashlib
+from datetime import datetime
+from pymongo import MongoClient
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -72,6 +75,57 @@ class Mem0PreferenceManager:
             logger.error(f"❌ Failed to store preference: {e}")
             return None
 
+    def add_preference_zero_token(self, preference: str, metadata: Optional[Dict] = None) -> str:
+        """
+        Store preference WITHOUT Mem0's internal LLM call.
+        Uses local embeddings. 0 tokens per write!
+        
+        This bypasses Mem0's internal Groq call that normally costs ~951 tokens.
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            
+            # Get or create embedder (reuse across calls to avoid reloading)
+            if not hasattr(self, '_zero_token_embedder'):
+                self._zero_token_embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+                logger.info("✅ Loaded zero-token embedder")
+            
+            # Generate embedding locally (0 tokens!)
+            embedding = self._zero_token_embedder.encode([preference])[0].tolist()
+            
+            # Create Mem0-compatible document for direct insert
+            doc = {
+                "embedding": embedding,
+                "payload": {
+                    "data": preference,
+                    "user_id": self.user_id,
+                    "memory": preference,
+                    "metadata": metadata or {},
+                    "hash": hashlib.md5(preference.encode()).hexdigest(),
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                }
+            }
+            
+            # Direct MongoDB connection (bypass Mem0's internal client)
+            mongo_uri = os.getenv("MONGODB_URI")
+            client = MongoClient(mongo_uri)
+            db = client["yusr_db"]
+            collection = db["mem0_preferences"]
+            
+            # Insert directly
+            result = collection.insert_one(doc)
+            client.close()
+            
+            logger.info(f"✅ Stored (0 tokens): {preference[:50]}...")
+            return str(result.inserted_id)
+            
+        except Exception as e:
+            logger.error(f"❌ Zero-token storage failed: {e}")
+            # Fallback to Mem0's method if direct insert fails
+            logger.info("↻ Falling back to Mem0's add_preference (will cost tokens)")
+            return self.add_preference(preference, metadata)
+   
     def add_preference_safe(self, preference: str, metadata: Optional[Dict] = None, 
                         similarity_threshold: float = 0.85) -> Optional[str]:
         """
@@ -167,6 +221,7 @@ class Mem0PreferenceManager:
 
 
 
+
     def get_relevant_preferences(
         self,
         query: str,
@@ -174,18 +229,81 @@ class Mem0PreferenceManager:
         min_score: float = 0.25
     ) -> List[Dict]:
         """
-        Get preferences relevant to query.
-        Single Atlas ANN search (was 3x with query expansion).
+        Get preferences relevant to query with hybrid search for identity queries.
+        Fixed: Identity queries (name, who am I) now work via exact match + vector search.
+        Includes: TTL cache, retry logic, and fallback personal_info retrieval.
         """
+        import time
+        
         try:
-            # ONE search call — no expansion loop
-            memories = self.memory.search(
-                query=query,
-                user_id=self.user_id,
-                limit=limit * 2
-            )
+            query_lower = query.lower().strip()
+            
+            # ── CACHE CHECK ─────────────────────────────────────────────────────
+            cache_key = f"{self.user_id}:{query[:80]}:{limit}:{min_score}"
+            if hasattr(self, '_search_cache') and cache_key in self._search_cache:
+                cached_result, cached_time = self._search_cache[cache_key]
+                if time.time() - cached_time < self._CACHE_TTL:
+                    logger.info(f"✅ Cache hit for query: {query[:50]}...")
+                    return cached_result
+            
+            # ── STEP 1: IDENTITY QUERY DETECTION (EXPANDED) ─────────────────────
+            identity_keywords = [
+                "name", "who am i", "my name", "what's my name", "what is my name",
+                "write my name", "type my name", "show my name", "display my name",
+                "say my name", "tell me my name", "what is my username", "my username",
+                "what is my user name", "user name", "what is my name called"
+            ]
+            is_identity_query = any(keyword in query_lower for keyword in identity_keywords)
+            
+            # Also detect if query contains "my name" even if not at start
+            if not is_identity_query:
+                is_identity_query = "my name" in query_lower
+            
+            # ── STEP 2: EXACT MATCH SEARCH for identity queries ─────────────────
+            exact_matches = []
+            if is_identity_query:
+                logger.info(f"🔍 Identity query detected: '{query}' — using exact match")
+                try:
+                    all_prefs = self.get_all_preferences()
+                    for pref in all_prefs:
+                        category = pref.get('metadata', {}).get('category', '')
+                        if category == 'personal_info':
+                            memory_text = pref.get('memory', '').lower()
+                            # Check for name-related content (supports Arabic and English)
+                            name_keywords = ['name', 'سارة', 'salma', 'sara', 'ahmed', 'mohamed', 'user', 'username']
+                            if any(keyword in memory_text for keyword in name_keywords):
+                                exact_matches.append({
+                                    'memory': pref.get('memory', ''),
+                                    'score': 1.0,
+                                    'metadata': pref.get('metadata', {})
+                                })
+                                logger.info(f"  ✅ Exact match found: {pref.get('memory', '')[:60]}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Exact match search failed: {e}")
+            
+            # ── STEP 3: VECTOR SEARCH with retry logic ─────────────────────────
+            memories = None
+            max_retries = 3
+            retry_delay = 0.5
+            
+            for attempt in range(max_retries):
+                try:
+                    memories = self.memory.search(
+                        query=query,
+                        user_id=self.user_id,
+                        limit=limit * 2
+                    )
+                    break
+                except Exception as search_error:
+                    error_msg = str(search_error).lower()
+                    if any(keyword in error_msg for keyword in ["connection reset", "connection refused", "hostunreachable"]):
+                        logger.warning(f"⚠️ MongoDB connection error (attempt {attempt+1}/{max_retries}): {search_error}")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay * (attempt + 1))
+                            continue
+                    raise
 
-            # Normalise response format (Mem0 returns dict or list depending on version)
+            # Normalise response format
             if isinstance(memories, dict):
                 if 'results' in memories:
                     memories = memories['results']
@@ -200,7 +318,7 @@ class Mem0PreferenceManager:
                 memories = []
 
             # Filter by score threshold
-            relevant_memories = []
+            vector_matches = []
             for mem in memories:
                 if mem is None:
                     continue
@@ -208,26 +326,62 @@ class Mem0PreferenceManager:
                 memory_text = mem.get('memory', mem.get('text', 'Unknown'))
 
                 if score >= min_score:
-                    relevant_memories.append(mem)
-                    logger.info(f"  ✅ [Score: {score:.2f}] {memory_text[:60]}")
+                    vector_matches.append(mem)
+                    logger.info(f"  ✅ [Vector Score: {score:.2f}] {memory_text[:60]}")
                 else:
                     logger.debug(f"  ⤷ Filtered out (score {score:.2f} < {min_score})")
 
-            # Sort by score descending and cap at limit
-            relevant_memories.sort(key=lambda x: x.get('score', 0), reverse=True)
-            relevant_memories = relevant_memories[:limit]
+            # ── STEP 4: MERGE AND DEDUPLICATE RESULTS ────────────────────────────
+            formatted_exact = []
+            for exact in exact_matches:
+                if not any(v.get('memory') == exact.get('memory') for v in vector_matches):
+                    formatted_exact.append({
+                        'memory': exact.get('memory'),
+                        'score': exact.get('score', 1.0),
+                        'metadata': exact.get('metadata', {})
+                    })
+            
+            # Combine: exact matches first (priority), then vector matches
+            combined_results = formatted_exact + vector_matches
+            
+            # Sort by score descending
+            combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+            
+            # ── STEP 5: FALLBACK - Always try to get personal_info if none found ──
+            if not combined_results:
+                try:
+                    all_prefs = self.get_all_preferences()
+                    for pref in all_prefs:
+                        category = pref.get('metadata', {}).get('category', '')
+                        if category == 'personal_info':
+                            combined_results.append({
+                                'memory': pref.get('memory', ''),
+                                'score': 0.9,
+                                'metadata': pref.get('metadata', {})
+                            })
+                            logger.info(f"  ✅ Fallback: Added personal info: {pref.get('memory', '')[:60]}")
+                            break  # Only add one personal info as fallback
+                except Exception as e:
+                    logger.debug(f"Fallback personal_info fetch failed: {e}")
+            
+            combined_results = combined_results[:limit]
 
             logger.info(
-                f"✅ Found {len(relevant_memories)} relevant preferences "
-                f"(threshold: {min_score}) for query: {query[:50]}..."
+                f"✅ Found {len(combined_results)} relevant preferences "
+                f"({len(formatted_exact)} exact, {len(vector_matches)} vector) "
+                f"for query: {query[:50]}..."
             )
 
-            return relevant_memories
+            # ── STORE IN CACHE ──────────────────────────────────────────────────
+            if hasattr(self, '_search_cache'):
+                self._search_cache[cache_key] = (combined_results, time.time())
+
+            return combined_results
 
         except Exception as e:
             logger.error(f"❌ Failed to retrieve preferences: {e}", exc_info=True)
             return []
-    
+
     def get_conversation_history(self, limit: int = 5) -> List:
         """Get recent conversation history"""
         try:

@@ -2,7 +2,7 @@
 import React from "react";
 import { Settings, Menu, X, SquarePen } from "lucide-react";
 
-const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, currentSessionId }) => {
+const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, onViewChat, currentSessionId }) => {
   return (
     <>
       <aside className={`sidebar ${collapsed ? "collapsed" : ""}`} role="navigation" aria-label="Main sidebar">
@@ -39,17 +39,46 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                     );
                   }
 
+                  const isActive = currentSessionId === sid;
+
                   return (
                     <li
                       key={sid}
-                      className={`chat-item ${currentSessionId === sid ? "active" : ""}`}
-                      onClick={() => onSwitchChat && onSwitchChat(sid, title)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') onSwitchChat && onSwitchChat(sid, title); }}
+                      className={`chat-item ${isActive ? "active" : ""}`}
                       role="button"
                       tabIndex={0}
                       title={title}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          isActive
+                            ? onViewChat && onViewChat(sid, title)
+                            : onSwitchChat && onSwitchChat(sid, title);
+                        }
+                      }}
                     >
-                      <span className="chat-title">{title}</span>
+                      <span
+                        className="chat-title"
+                        onClick={() => {
+                          isActive
+                            ? onViewChat && onViewChat(sid, title)
+                            : onSwitchChat && onSwitchChat(sid, title);
+                        }}
+                        style={{ flex: 1 }}
+                      >
+                        {title}
+                      </span>
+                      {/* Eye icon to view history of any chat */}
+                      <button
+                        className="chat-view-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onViewChat && onViewChat(sid, title);
+                        }}
+                        title="View chat history"
+                        aria-label="View chat history"
+                      >
+                        👁
+                      </button>
                     </li>
                   );
                 })}

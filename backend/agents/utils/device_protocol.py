@@ -1,4 +1,5 @@
 """
+device_protocol.py
 Device Communication Protocol
 Defines request/response models for mobile-backend communication
 Handles Android ↔ Backend interaction for UI automation
@@ -146,32 +147,61 @@ class SemanticUITree(BaseModel):
 # ACTION MODELS (Backend → Android)
 # ============================================================================
 
+"""
+PATCH for device_protocol.py — replace only the UIAction class.
+
+Two changes from the original:
+  1. action_type Literal gains "coordinate_tap"
+  2. Two new optional fields: x, y (for coordinate_tap only)
+
+Everything else in device_protocol.py stays identical.
+"""
+
 class UIAction(BaseModel):
     """Atomic UI action to execute on device"""
+
     model_config = ConfigDict(json_schema_extra={
         "example": {
-            "action_id": "action_1234567890",
+            "action_id":   "action_1234567890",
             "action_type": "click",
-            "element_id": 1,
-            "max_retries": 3
+            "element_id":  1,
+            "max_retries": 3,
         }
     })
-    
-    action_id: str = Field(default_factory=lambda: f"action_{datetime.now().timestamp()}")
-    action_type: Literal["click", "type", "scroll", "wait", "global_action", "long_click", "double_click"]
-    
+
+    action_id: str = Field(
+        default_factory=lambda: f"action_{datetime.now().timestamp()}"
+    )
+
+    # ── ADD "coordinate_tap" to the Literal ──────────────────────────────
+    action_type: Literal[
+        "click", "type", "scroll", "wait",
+        "global_action", "long_click", "double_click",
+        "coordinate_tap", "swipe"          # ← new: absolute pixel tap (interstitials)
+    ]
+
     # Action parameters
-    element_id: Optional[int] = None  # For click, type, long_click, double_click
-    text: Optional[str] = None  # For type action
-    direction: Optional[Literal["up", "down", "left", "right"]] = None  # For scroll
-    duration: Optional[int] = None  # For wait (ms) or long_click (ms)
-    global_action: Optional[Literal["HOME", "BACK", "RECENTS", "POWER", "VOLUME_UP", "VOLUME_DOWN"]] = None
-    
+    element_id:    Optional[int]   = None   # click / type / long_click / double_click
+    text:          Optional[str]   = None   # type
+    clear_first:   bool            = False  # type: replace existing content before typing
+    direction:     Optional[Literal["up", "down", "left", "right"]] = None  # scroll
+    duration:      Optional[int]   = None   # wait (ms) or long_click (ms)
+    global_action: Optional[Literal[
+        "HOME", "BACK", "RECENTS", "POWER", "VOLUME_UP", "VOLUME_DOWN"
+    ]] = None
+
+    # ── ADD x, y for coordinate_tap ──────────────────────────────────────
+    x: Optional[int] = None   # absolute pixel X (coordinate_tap only)
+    y: Optional[int] = None   # absolute pixel Y (coordinate_tap only)
+    start_x_percent: Optional[int] = None
+    start_y_percent: Optional[int] = None
+    end_x_percent:   Optional[int] = None
+    end_y_percent:   Optional[int] = None
+
     # Metadata
     retry_count: int = 0
     max_retries: int = 3
-    timeout_ms: int = 5000
-
+    timeout_ms:  int = 5000
 
 class ActionResult(BaseModel):
     """Result of executing an action"""

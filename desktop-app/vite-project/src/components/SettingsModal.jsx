@@ -1,8 +1,8 @@
 // SettingsModal.jsx
 import React, { useState, useEffect } from "react";
-import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff, LogOut } from "lucide-react";
 
-const SettingsModal = ({ onClose, onSave, initialName = "User", initialVoice = "Gacrux" }) => {
+const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initialVoice = "Gacrux" }) => {
   const [activeSection, setActiveSection] = useState("profile");
   const [profileData, setProfileData] = useState({
     username: initialName,
@@ -169,6 +169,16 @@ const SettingsModal = ({ onClose, onSave, initialName = "User", initialVoice = "
                 <span>Long-Term Memory</span>
               </button>
             </nav>
+
+            {/* Logout at bottom of sidebar */}
+            <button
+              className="settings-nav-item"
+              onClick={onLogout}
+              style={{ marginTop: "auto", color: "#ff4d6d", borderColor: "rgba(255,77,109,0.3)" }}
+            >
+              <LogOut size={16} />
+              <span>Log Out</span>
+            </button>
           </div>
 
           {/* Right Content */}

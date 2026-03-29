@@ -1022,8 +1022,13 @@ async def start_language_agent(broker):
                             break
                 else:
                     preferences.append(memory_text)
-
+           
+            #here
             context_parts = []
+            if profile_snippets:
+                context_parts.append("# USER PROFILE")
+                for snippet in profile_snippets[:2]:
+                    context_parts.append(f"- {snippet}")
             if preferences:
                 context_parts.append("# USER PREFERENCES")
                 for i, pref in enumerate(preferences[:3], 1):

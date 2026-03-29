@@ -430,6 +430,9 @@ coordinator_processing_lock = asyncio.Lock()
 
 # Track pending results
 pending_results: Dict[str, asyncio.Future] = {}
+#hala edit ashan el web 
+_session_browser_state: Dict[str, Dict] = {}
+
 
 # Helper function for guarded futures
 def create_guarded_future(task_id: str) -> asyncio.Future:
@@ -471,7 +474,8 @@ async def decompose_task_to_actions(
     device_type: str = "desktop",
     conversation_history: List[Dict] = None,  # ✅ FIX 3: Add history parameter
     session_id: str = None,  # ✅ FIX 5: Add this
-    http_request_id: str = None  # ✅ FIX 5: Add this
+    http_request_id: str = None,  # ✅ FIX 5: Add this
+    current_page_url: str = None  # ✅ BROWSER STATE: current browser URL hala edit ll web
 ) -> Dict[str, Any]:
     """Decompose user request into ActionTask queue - URLs resolved by execution layer"""
     
@@ -483,28 +487,42 @@ async def decompose_task_to_actions(
     if is_login_task:
         credentials = extract_credentials_from_request(user_request)
         
-        if not credentials.get('email'):
-            logger.error("❌ No email found in request")
+        # ✅ FIX: Allow email-only OR password-only for multi-page flows
+        # Scenario 1: User gives only email first → fill email, click next → later provide password on page 2
+        # Scenario 2: User gives both email+password → fill both in sequence (handling multi-page auto)
+        if not credentials.get('email') and not credentials.get('password'):
+            logger.error("❌ No email or password found in request")
             return {
-                'error': 'Please provide an email address in your request (e.g., "login with user@example.com and password mypass123")',
+                'error': 'Please provide at least an email address or password (e.g., "login with user@example.com" or "use password mypass123")',
                 'tasks': []
             }
         
-        if not credentials.get('password'):
-            logger.error("❌ No password found in request")
-            return {
-                'error': 'Please provide a password in your request (e.g., "login with user@example.com and password mypass123")',
-                'tasks': []
-            }
+        if credentials.get('email'):
+            logger.info(f"📧 Extracted email: {credentials['email']}")
+        if credentials.get('password'):
+            logger.info(f"🔑 Password extracted (length: {len(credentials['password'])})")
         
-        logger.info(f"📧 Extracted email: {credentials['email']}")
-        logger.info(f"🔑 Password extracted (length: {len(credentials['password'])})")
+        # Log which fields are available
+        if credentials.get('email') and not credentials.get('password'):
+            logger.info("📍 Only email provided - will fill email field on current page")
+        elif credentials.get('password') and not credentials.get('email'):
+            logger.info("📍 Only password provided - will fill password field on current page or after navigation")
+        else:
+            logger.info("📍 Both email and password provided - will handle multi-page auth flow")
     
     # Remove the decomposition-level thinking step entirely.
     # The coordinator already shows "preparing_tasks" before calling ainvoke.
     # Adding another one here just doubles the indicator on screen.
     
     device_hint = f"The user is on a {device_type} device. Tailor task recommendations accordingly.\n\n"
+    #hala edit ashan el web
+    if current_page_url:
+         device_hint += f"The browser is currently open on: {current_page_url}\n"
+         device_hint += (
+             "If the user refers to content on the current page "
+             "(e.g. 'open first video', 'click the button', 'play it', 'play the first one'), "
+             "do NOT add a navigate task — act directly on the current page using context: \"web\".\n\n"
+         )
     
     # ✅ FIX 3: Build conversation history context
     history_context = ""
@@ -528,20 +546,32 @@ async def decompose_task_to_actions(
     if credentials:
         prompt += f"""
         
-# EXTRACTED CREDENTIALS (USE THESE EXACT VALUES):
-Email: {credentials['email']}
-Password: {credentials['password']}
+# EXTRACTED CREDENTIALS (MULTI-PAGE AUTH AWARE):
+"""
+        
+        if credentials.get('email'):
+            prompt += f"""Email: {credentials['email']}
+**RULE**: For email field: {{"action": "fill", "text": "{credentials['email']}"}}
+"""
+        
+        if credentials.get('password'):
+            prompt += f"""Password: {credentials['password']}
+**RULE**: For password field: {{"action": "fill", "text": "{credentials['password']}"}}
+"""
+        
+        # ✅ NEW: Multi-page auth awareness
+        prompt += f"""
+**CRITICAL FOR MULTI-PAGE FORMS** (e.g., Google, Facebook, Microsoft):
+- If user provides ONLY email: Create ONE task to fill the email field, then click "Next"
+- If user provides ONLY password: Create tasks to fill the password field and submit
+- If user provides BOTH email+password: Create tasks in THIS ORDER:
+  1. Fill email field with {credentials.get('email', 'N/A')}
+  2. Click "Next" / "Continue" button
+  3. Wait for password field to appear (may be new page or revealed form)
+  4. Fill password field with {credentials.get('password', 'N/A')}
+  5. Click "Sign in" / "Login" / "Submit" button
 
-**CRITICAL**: When creating fill tasks for login/signup, use these EXACT values in web_params:
-- For email field: {{"action": "fill", "text": "{credentials['email']}"}}
-- For password field: {{"action": "fill", "text": "{credentials['password']}"}}
-
-DO NOT use placeholder values like "test_user_email" or "test_password".
-# OUTPUT RULES
-
-**FOR LOGIN TASKS**: When you see "Fill email field", you MUST use the actual email from above: "{credentials['email']}"
-**FOR PASSWORD TASKS**: When you see "Fill password field", you MUST use the actual password from above: "{credentials['password']}"
-
+**IMPORTANT**: After filling the email field, ALWAYS check if there's a "Next", "Continue", or "Submit" button to proceed to the next step.
 """
     
     prompt += f"""
@@ -1068,6 +1098,10 @@ def create_coordinator_graph():
             preferences_context = f"{preferences_context}{execution_context}"
 
         # Decompose task
+        # hala edit ashan el web
+        saved_browser = _session_browser_state.get(session_id, {})
+        current_page_url = saved_browser.get("current_page_url")
+        
         # ✅ FIX 3: Pass conversation history to decomposition
         plan_result = await decompose_task_to_actions(
             raw_task, 
@@ -1075,7 +1109,8 @@ def create_coordinator_graph():
             device_type,
             conversation_history=state.get("conversation_history", []),
             session_id=session_id,  # ✅ FIX 5: Pass these parameters
-            http_request_id=original_message_id  # ✅ FIX 5: Pass these parameters
+            http_request_id=original_message_id,  # ✅ FIX 5: Pass these parameters
+            current_page_url=current_page_url  # ✅ BROWSER STATE hala edit ll web
         )
         
         # Surface decomposition errors when present
@@ -1147,12 +1182,21 @@ def create_coordinator_graph():
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
+<<<<<<< Updated upstream
                 #edit here
                 # await save_checkpoint_compat(
                 #     session_id,
                 #     {"execution_state": execution_state},
                 #     {"type": "task_progress"}
                 # )
+=======
+                await checkpointer.aput(
+                    config={"configurable": {"thread_id": session_id}},
+                    checkpoint={"execution_state": execution_state},
+                    metadata={"type": "task_progress"},
+                    new_versions=[]
+                )    
+>>>>>>> Stashed changes
                 await save_checkpoint_compat(
                     session_id,
                     {
@@ -1265,8 +1309,20 @@ def create_coordinator_graph():
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
             
+            if current_task.context == "web" and session_id:
+                url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
+                if url_match:
+                    extracted_url = url_match.group(1).strip()
+                    _session_browser_state[session_id] = {
+                        "current_page_url": extracted_url,
+                        "last_web_task": current_task.ai_prompt
+                    }
+                    logger.info(f"📍 Browser state saved: {extracted_url}")
+            
             if result.content:
                 cleaned_content = result.content.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
+                #hala edit ashan el web
+                cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
                 # task_outputs[current_task.task_id] = result.content
                             # Only store if there's actual content
                 if cleaned_content:
@@ -1650,6 +1706,7 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
+<<<<<<< Updated upstream
                             pref_mgr.add_preference_zero_token(
                                 pref_obj["preference"],
                                 metadata={
@@ -1690,9 +1747,39 @@ Extract now:"""
                         "original_request": task_summary["original_request"]
                     }
                 )
+=======
+                            try:
+                                pref_mgr.add_preference(
+                                    pref_obj["preference"],
+                                    metadata={
+                                        "category": pref_obj.get("category", "general"),
+                                        "confidence": pref_obj.get("confidence", "medium"),
+                                        "extracted_from": task_summary["original_request"]
+                                    }
+                                )
+                                logger.info(f"💾 Stored preference: {pref_obj['preference']}")
+                            except Exception as pref_err:
+                                logger.debug(f"⚠️ Could not store individual preference: {pref_err}")
+                    
+                    try:
+                        conversation_context = f"User requested: {task_summary['original_request']}. "
+                        conversation_context += f"Successfully completed {success_count} steps."
+                        
+                        pref_mgr.add_preference(
+                            conversation_context,
+                            metadata={
+                                "category": "conversation_history",
+                                "session_id": session_id,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                        )
+                        logger.info(f"💾 Stored conversation context")
+                    except Exception as ctx_err:
+                        logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
+>>>>>>> Stashed changes
                 
             except Exception as e:
-                logger.error(f"❌ Failed to store preferences: {e}")
+                logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
         
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")

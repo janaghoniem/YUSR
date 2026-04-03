@@ -220,3 +220,5 @@ app.*.symbols
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
 .venv/
+*.bin
+backend/agents/execution_agent/strategies/task_memory_db/26dd199e-ccc3-453d-a914-19052bd06a45/index_metadata.pickle

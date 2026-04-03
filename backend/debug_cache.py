@@ -297,7 +297,7 @@ CASES: List[Case] = [
          "Download the Talabat app", "play_store", "hint"),
     Case("store-03 install button",
          "Click on the Install button",
-         "Download the Talabat app", "play_store", "hint"),
+            "Download the Talabat app", "play_store", "execute"),
     Case("store-04 accept permissions",
          "Click Accept to accept the app permissions",
          "Download and install Talabat", "play_store", "hint"),

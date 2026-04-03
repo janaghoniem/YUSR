@@ -474,6 +474,14 @@ async def execute_action_on_device(
             "execution_time_ms": 0
         }
     
+    # Normalize global_action payloads for Android action server
+    if action_data.get("action_type") == "global_action":
+        ga = (action_data.get("global_action") or "").upper()
+        if ga == "HOME":
+            action_data["action_type"] = "navigate_home"
+        elif ga == "BACK":
+            action_data["action_type"] = "navigate_back"
+
     # Convert navigate_home to goToHome for the action server
     if action_data.get("action_type") == "navigate_home":
         logger.debug(f"🏠 navigate_home request - queueing as goToHome for device: {device_id}")

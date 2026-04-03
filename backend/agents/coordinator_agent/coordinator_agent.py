@@ -1182,21 +1182,18 @@ def create_coordinator_graph():
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
-<<<<<<< Updated upstream
                 #edit here
                 # await save_checkpoint_compat(
                 #     session_id,
                 #     {"execution_state": execution_state},
                 #     {"type": "task_progress"}
                 # )
-=======
                 await checkpointer.aput(
                     config={"configurable": {"thread_id": session_id}},
                     checkpoint={"execution_state": execution_state},
                     metadata={"type": "task_progress"},
                     new_versions=[]
                 )    
->>>>>>> Stashed changes
                 await save_checkpoint_compat(
                     session_id,
                     {
@@ -1706,7 +1703,6 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-<<<<<<< Updated upstream
                             pref_mgr.add_preference_zero_token(
                                 pref_obj["preference"],
                                 metadata={
@@ -1747,36 +1743,6 @@ Extract now:"""
                         "original_request": task_summary["original_request"]
                     }
                 )
-=======
-                            try:
-                                pref_mgr.add_preference(
-                                    pref_obj["preference"],
-                                    metadata={
-                                        "category": pref_obj.get("category", "general"),
-                                        "confidence": pref_obj.get("confidence", "medium"),
-                                        "extracted_from": task_summary["original_request"]
-                                    }
-                                )
-                                logger.info(f"💾 Stored preference: {pref_obj['preference']}")
-                            except Exception as pref_err:
-                                logger.debug(f"⚠️ Could not store individual preference: {pref_err}")
-                    
-                    try:
-                        conversation_context = f"User requested: {task_summary['original_request']}. "
-                        conversation_context += f"Successfully completed {success_count} steps."
-                        
-                        pref_mgr.add_preference(
-                            conversation_context,
-                            metadata={
-                                "category": "conversation_history",
-                                "session_id": session_id,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        )
-                        logger.info(f"💾 Stored conversation context")
-                    except Exception as ctx_err:
-                        logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
->>>>>>> Stashed changes
                 
             except Exception as e:
                 logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")

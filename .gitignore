@@ -227,3 +227,6 @@ app.*.symbols
 
 backend/agents/execution_agent/RAG/analysis
 .venv/
+*.bin
+*.sqlite3-journal
+*.pickle

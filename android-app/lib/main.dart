@@ -208,10 +208,23 @@ class HomeWrapper extends StatelessWidget {
   const HomeWrapper({super.key});
   @override
   Widget build(BuildContext context) => const AutomationDemo();
+  // AutomationDemo defaults keep working for the existing OnboardingScreen flow
 }
 
 class AutomationDemo extends StatefulWidget {
-  const AutomationDemo({super.key});
+  final String userId;
+  final String username;
+  final String sessionId;
+  final String language;
+
+  const AutomationDemo({
+    super.key,
+    this.userId = 'flutter_user',   // fallback for HomeWrapper direct usage
+    this.username = 'User',
+    this.sessionId = '',
+    this.language = 'en',
+  });
+
   @override
   State<AutomationDemo> createState() => _AutomationDemoState();
 }
@@ -221,6 +234,8 @@ class _AutomationDemoState extends State<AutomationDemo>
   static const _platform = MethodChannel('com.example.automation/service');
 
   // ignore: unused_field
+  late String _activeUserId;
+  late String _activeSessionId;
   String _status = 'Waiting...';
   bool _serviceEnabled = false;
   bool _isLoading = false;
@@ -234,7 +249,8 @@ class _AutomationDemoState extends State<AutomationDemo>
   String _responseText = '';
   String _transcribedText = '';
   bool _isThinking = false;
-  final String _userName = 'User';
+  // final String _userName = 'User';
+  late String _userName;
 
   HttpServer? _actionServer;
   late AnimationController _pulseCtrl;
@@ -242,9 +258,14 @@ class _AutomationDemoState extends State<AutomationDemo>
   late VideoPlayerController _videoCtrl;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  @override
+@override
   void initState() {
     super.initState();
+    _activeUserId = widget.userId;
+    _activeSessionId = widget.sessionId.isEmpty
+        ? 'flutter_${DateTime.now().millisecondsSinceEpoch}'
+        : widget.sessionId;
+    _userName = widget.username.isNotEmpty ? widget.username : 'User';
     _setupMethodChannelListener();
     _checkServiceStatus();
     _registerWithBackend();
@@ -408,9 +429,10 @@ class _AutomationDemoState extends State<AutomationDemo>
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'input': text,
-          'session_id': 'flutter_${DateTime.now().millisecondsSinceEpoch}',
-          'user_id': 'flutter_user',
+          'session_id': _activeSessionId,
+          'user_id': _activeUserId,
           'device_type': 'mobile',
+          'user_language': widget.language,
         }),
       );
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -1295,7 +1317,7 @@ class _AutomationDemoState extends State<AutomationDemo>
     ),
   );
 
-  //  Settings modal
+  // ── Settings modal ─────────────────────────────────────────────────────────
 
   Widget _buildSettingsModal() {
     return Stack(

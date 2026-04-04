@@ -809,22 +809,17 @@ async def handle_ws_output(message):
 # Interrupt command mapping (English + Arabic)
 INTERRUPT_COMMANDS = {
     # English
-    "stop": "stop", "cancel": "stop", "abort": "stop",
-    "aura stop": "stop", "aura cancel": "stop",
-    "pause": "pause", "wait": "pause", "hold on": "pause",
-    "aura pause": "pause", "aura wait": "pause",
-    "continue": "resume", "go on": "resume", "resume": "resume",
-    "aura continue": "resume", "aura resume": "resume",
-    "undo": "undo", "undo that": "undo", "go back": "undo",
-    "aura undo": "undo",
-    "redo": "retry", "try again": "retry",
-    "aura redo": "retry",
+    "aura stop": "stop", "aura cancel": "stop", "aura abort": "stop",
+    "aura pause": "pause", "aura wait": "pause", "aura hold on": "pause",
+    "aura continue": "resume", "aura go on": "resume", "aura resume": "resume",
+    "aura undo": "undo", "aura go back": "undo",
+    "aura redo": "retry", "aura try again": "retry",
     # Arabic
-    "أورا وقف": "stop", "وقف": "stop", "أوقف": "stop", "إلغاء": "stop",
-    "أورا انتظر": "pause", "انتظر": "pause",
-    "أورا استمر": "resume", "استمر": "resume",
-    "أورا تراجع": "undo", "تراجع": "undo",
-    "أورا أعد": "retry", "أعد": "retry",
+    "أورا وقف": "stop", "أورا توقف": "stop", "أورا إيقاف": "stop", "أورا إلغاء": "stop",
+    "أورا انتظر": "pause", "أورا لحظة": "pause",
+    "أورا استمر": "resume", "أورا كمل": "resume",
+    "أورا تراجع": "undo", "أورا ارجع": "undo",
+    "أورا أعد": "retry", "أورا حاول مجددا": "retry",
 }
 
 def detect_interrupt(text: str):

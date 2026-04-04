@@ -1,247 +1,213 @@
-// SettingsModal.jsx
-import React, { useState, useEffect } from "react";
-import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff, LogOut } from "lucide-react";
+// SettingsModal.jsx — Claude-inspired settings, ARIA-first
+import React, { useState, useEffect, useRef } from "react";
+import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff } from "lucide-react";
 
-const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initialVoice = "Gacrux" }) => {
+const API_BASE_URL = "";
+
+const SettingsModal = ({
+  onClose,
+  onSave,
+  initialName = "User",
+  initialVoice = "Gacrux",
+}) => {
   const [activeSection, setActiveSection] = useState("profile");
   const [profileData, setProfileData] = useState({
     username: initialName,
-    email: "user@example.com",
+    email: "",
     theme: "dark",
     language: "en",
     voice: initialVoice,
   });
-  
-  // ✅ Long-term memory (preferences) stats
+
   const [memoryStats, setMemoryStats] = useState({
     total_preferences: 0,
     personal_info_count: 0,
     app_preferences_count: 0,
     storage_size_mb: 0,
   });
-  
-  // ✅ Actual stored preferences (for viewing)
   const [preferences, setPreferences] = useState([]);
   const [showPreferences, setShowPreferences] = useState(false);
-  
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
-  // Fetch memory stats when Memory tab is opened
+  // Trap focus inside modal
+  const modalRef = useRef(null);
+  const closeBtnRef = useRef(null);
+
   useEffect(() => {
-    if (activeSection === "memory") {
-      fetchMemoryStats();
-    }
+    // Focus close button on mount
+    closeBtnRef.current?.focus();
+
+    // Escape closes
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (activeSection === "memory") fetchMemoryStats();
   }, [activeSection]);
 
-  // ✅ ADD THIS AT THE TOP OF THE FILE (after imports, before component)
-  const API_BASE_URL = "";
-
-  // ✅ THEN UPDATE THE fetchMemoryStats FUNCTION
   const fetchMemoryStats = async () => {
     try {
       setLoading(true);
-      setStatusMessage(""); // Clear previous messages
-      
+      setStatusMessage("");
       const userId = localStorage.getItem("userId") || "test_user";
-      
-      console.log("📡 Fetching preferences from:", `${API_BASE_URL}/api/memory/preferences`);
-      
-      // Get preference stats
       const response = await fetch(
-        `${API_BASE_URL}/api/memory/preferences?user_id=${userId}&limit=100`,
-        {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
+        `${API_BASE_URL}/api/memory/preferences?user_id=${userId}&limit=100`
       );
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
-      console.log("✅ Received data:", data);
-      
-      // Calculate stats
       const prefs = data.preferences || [];
-      const personalInfo = prefs.filter(p => p.category === "personal_info");
-      const appPrefs = prefs.filter(p => p.category === "app_usage");
-      
       setMemoryStats({
         total_preferences: prefs.length,
-        personal_info_count: personalInfo.length,
-        app_preferences_count: appPrefs.length,
-        storage_size_mb: ((JSON.stringify(prefs).length) / (1024 * 1024)).toFixed(2)
+        personal_info_count: prefs.filter((p) => p.category === "personal_info").length,
+        app_preferences_count: prefs.filter((p) => p.category === "app_usage").length,
+        storage_size_mb: (JSON.stringify(prefs).length / (1024 * 1024)).toFixed(2),
       });
-      
       setPreferences(prefs);
-      setStatusMessage("✅ Memory stats loaded successfully");
-      
-    } catch (error) {
-      console.error("❌ Failed to fetch memory stats:", error);
-      setStatusMessage(`❌ Failed to load memory: ${error.message}`);
+      setStatusMessage("Memory loaded successfully.");
+    } catch (err) {
+      setStatusMessage(`Could not load memory: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleClearLongTermMemory = async () => {
-    if (!window.confirm("🚨 WARNING: This will DELETE ALL your learned preferences and personal information permanently. Your conversation history will remain. Are you sure?")) {
+  const handleClearMemory = async () => {
+    if (
+      !window.confirm(
+        "This will permanently delete all learned preferences. Your conversation history will stay. Continue?"
+      )
+    )
       return;
-    }
-
     try {
       setLoading(true);
-      setStatusMessage("🗑️ Clearing long-term memory...");
-      
+      setStatusMessage("Clearing memory…");
       const userId = localStorage.getItem("userId") || "test_user";
-      
-      console.log("📡 Clearing preferences for user:", userId);
-      
-      const response = await fetch(
+      const res = await fetch(
         `${API_BASE_URL}/api/memory/clear-preferences?user_id=${userId}`,
-        {
-          method: "DELETE",
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
+        { method: "DELETE" }
       );
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log("✅ Clear result:", result);
-      
-      setStatusMessage(`✅ Long-term memory cleared! Deleted ${result.preferences_deleted} preferences.`);
-      
-      // Refresh stats
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result = await res.json();
+      setStatusMessage(`Cleared ${result.preferences_deleted} preferences.`);
       await fetchMemoryStats();
-      
-    } catch (error) {
-      console.error("❌ Clear memory failed:", error);
-      setStatusMessage(`❌ Failed to clear memory: ${error.message}`);
+    } catch (err) {
+      setStatusMessage(`Failed: ${err.message}`);
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleProfileChange = (field, value) => {
-    setProfileData({ ...profileData, [field]: value });
   };
 
   const handleSave = () => {
-    console.log("Settings saved:", { profileData });
     onSave(profileData);
     onClose();
   };
 
+  const navItems = [
+    { id: "profile", label: "Profile", icon: <User size={15} aria-hidden="true" /> },
+    { id: "memory",  label: "Memory",  icon: <Brain size={15} aria-hidden="true" /> },
+  ];
+
+  const statCards = [
+    { label: "Total preferences",   value: memoryStats.total_preferences,    color: "var(--pink-400)" },
+    { label: "Personal info",        value: memoryStats.personal_info_count,  color: "var(--pink-300)" },
+    { label: "App preferences",      value: memoryStats.app_preferences_count, color: "var(--pink-200)" },
+    { label: "Storage used",         value: `${memoryStats.storage_size_mb} MB`, color: "var(--text-secondary)" },
+  ];
+
   return (
-    <div className="settings-overlay" role="presentation">
-      <div className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <button className="settings-close-btn" onClick={onClose} aria-label="Close settings">
-          <X size={22} />
+    <div
+      className="settings-overlay"
+      role="presentation"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={modalRef}
+        className="settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+      >
+        <button
+          ref={closeBtnRef}
+          className="settings-close-btn"
+          onClick={onClose}
+          aria-label="Close settings"
+          title="Close"
+        >
+          <X size={16} aria-hidden="true" />
         </button>
 
         <div className="settings-container">
-          {/* Left Sidebar */}
-          <div className="settings-sidebar">
-            <h2 className="settings-title">Settings</h2>
-            <nav className="settings-nav">
-              <button
-                className={`settings-nav-item ${activeSection === "profile" ? "active" : ""}`}
-                onClick={() => setActiveSection("profile")}
-              >
-                <User size={16} />
-                <span>Profile</span>
-              </button>
-
-              <button
-                className={`settings-nav-item ${activeSection === "memory" ? "active" : ""}`}
-                onClick={() => setActiveSection("memory")}
-              >
-                <Brain size={16} />
-                <span>Long-Term Memory</span>
-              </button>
+          {/* ── Left nav ─────────────────────────── */}
+          <div className="settings-sidebar" role="navigation" aria-label="Settings sections">
+            <p className="settings-title" id="settings-dialog-title">Settings</p>
+            <nav className="settings-nav" aria-label="Settings navigation">
+              {navItems.map(({ id, label, icon }) => (
+                <button
+                  key={id}
+                  className={`settings-nav-item ${activeSection === id ? "active" : ""}`}
+                  onClick={() => setActiveSection(id)}
+                  aria-current={activeSection === id ? "page" : undefined}
+                  aria-label={`${label} settings`}
+                >
+                  {icon}
+                  <span>{label}</span>
+                </button>
+              ))}
             </nav>
-
-            {/* Logout at bottom of sidebar */}
-            <button
-              className="settings-nav-item"
-              onClick={onLogout}
-              style={{ marginTop: "auto", color: "#ff4d6d", borderColor: "rgba(255,77,109,0.3)" }}
-            >
-              <LogOut size={16} />
-              <span>Log Out</span>
-            </button>
           </div>
 
-          {/* Right Content */}
+          {/* ── Right content ────────────────────── */}
           <div className="settings-content">
+            {/* ── PROFILE ── */}
             {activeSection === "profile" && (
-              <div className="settings-section">
-                <h3 className="section-title" id="settings-title">Profile Settings</h3>
+              <section className="settings-section" aria-labelledby="profile-heading">
+                <h2 className="section-title" id="profile-heading">Profile</h2>
                 <div className="settings-group">
-                  <label className="settings-label">
-                    Username
+                  <label className="settings-label" htmlFor="settings-username">
+                    Display name
                     <input
                       id="settings-username"
                       type="text"
                       className="settings-input"
-                      aria-label="Username"
                       autoFocus
+                      autoComplete="name"
                       value={profileData.username}
-                      onChange={(e) => handleProfileChange("username", e.target.value)}
+                      onChange={(e) =>
+                        setProfileData({ ...profileData, username: e.target.value })
+                      }
                     />
                   </label>
 
-                  <label className="settings-label">
-                    Email
-                    <input
-                      type="email"
-                      className="settings-input"
-                      value={profileData.email}
-                      onChange={(e) => handleProfileChange("email", e.target.value)}
-                    />
-                  </label>
-
-                  <label className="settings-label">
-                    Theme
-                    <select
-                      className="settings-select"
-                      value={profileData.theme}
-                      onChange={(e) => handleProfileChange("theme", e.target.value)}
-                    >
-                      <option value="dark">Dark</option>
-                      <option value="light">Light</option>
-                      <option value="auto">Auto</option>
-                    </select>
-                  </label>
-
-                  <label className="settings-label">
+                  <label className="settings-label" htmlFor="settings-language">
                     Language
                     <select
+                      id="settings-language"
                       className="settings-select"
                       value={profileData.language}
-                      onChange={(e) => handleProfileChange("language", e.target.value)}
+                      onChange={(e) =>
+                        setProfileData({ ...profileData, language: e.target.value })
+                      }
                     >
                       <option value="en">English</option>
                       <option value="ar">العربية</option>
-                      <option value="es">Español</option>
                     </select>
                   </label>
 
-                  <label className="settings-label">
-                    TTS Voice
+                  <label className="settings-label" htmlFor="settings-voice">
+                    Voice
                     <select
+                      id="settings-voice"
                       className="settings-select"
                       value={profileData.voice}
-                      onChange={(e) => handleProfileChange("voice", e.target.value)}
+                      onChange={(e) =>
+                        setProfileData({ ...profileData, voice: e.target.value })
+                      }
                     >
                       <option value="Gacrux">Gacrux (default)</option>
                       <option value="orpheus-english">Orpheus English</option>
@@ -249,150 +215,137 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
                     </select>
                   </label>
                 </div>
-              </div>
+              </section>
             )}
 
+            {/* ── MEMORY ── */}
             {activeSection === "memory" && (
-              <div className="settings-section">
-                <h3 className="section-title">Long-Term Memory</h3>
-                <p style={{ fontSize: "14px", color: "rgba(255,255,255,0.7)", marginBottom: "20px" }}>
-                  Your AI learns your preferences over time. This includes your name, app choices, and work patterns.
+              <section className="settings-section" aria-labelledby="memory-heading">
+                <h2 className="section-title" id="memory-heading">Long-term memory</h2>
+                <p style={{ fontSize: "14px", color: "var(--text-secondary)", marginBottom: "24px", lineHeight: "1.6" }}>
+                  AURA learns your preferences over time — your name, app choices, and work patterns.
                 </p>
-                
-                {/* ✅ Memory Statistics */}
-                <div className="memory-stats-card">
-                  <h4 style={{ fontSize: "16px", marginBottom: "12px", color: "rgba(255,255,255,0.9)" }}>
-                    Stored Preferences
-                  </h4>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                    <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px" }}>
-                      <div style={{ fontSize: "24px", fontWeight: "bold", color: "#ff4d6d" }}>
-                        {memoryStats.total_preferences}
+
+                {/* Stats grid */}
+                <div className="memory-stats-card" aria-label="Memory statistics">
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
+                    {statCards.map(({ label, value, color }) => (
+                      <div
+                        key={label}
+                        style={{
+                          background: "var(--bg-overlay)",
+                          padding: "14px",
+                          borderRadius: "var(--r-md)",
+                          border: "1px solid rgba(255,255,255,0.05)",
+                        }}
+                        role="group"
+                        aria-label={`${label}: ${value}`}
+                      >
+                        <div style={{ fontSize: "22px", fontWeight: "600", color }}>{value}</div>
+                        <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "3px" }}>{label}</div>
                       </div>
-                      <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.6)" }}>
-                        Total Preferences
-                      </div>
-                    </div>
-                    <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px" }}>
-                      <div style={{ fontSize: "24px", fontWeight: "bold", color: "#7a1fa2" }}>
-                        {memoryStats.personal_info_count}
-                      </div>
-                      <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.6)" }}>
-                        Personal Info
-                      </div>
-                    </div>
-                    <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px" }}>
-                      <div style={{ fontSize: "24px", fontWeight: "bold", color: "#38bdf8" }}>
-                        {memoryStats.app_preferences_count}
-                      </div>
-                      <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.6)" }}>
-                        App Preferences
-                      </div>
-                    </div>
-                    <div style={{ background: "rgba(255,255,255,0.05)", padding: "12px", borderRadius: "8px" }}>
-                      <div style={{ fontSize: "24px", fontWeight: "bold", color: "#fbbf24" }}>
-                        {memoryStats.storage_size_mb} MB
-                      </div>
-                      <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.6)" }}>
-                        Storage Used
-                      </div>
-                    </div>
+                    ))}
                   </div>
                   <button
                     onClick={fetchMemoryStats}
                     disabled={loading}
+                    aria-label="Refresh memory statistics"
                     style={{
-                      marginTop: "12px",
-                      padding: "8px 16px",
-                      background: "rgba(255,255,255,0.08)",
-                      border: "1px solid rgba(255,255,255,0.2)",
-                      borderRadius: "8px",
-                      color: "white",
+                      padding: "8px 14px",
+                      background: "var(--bg-overlay)",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "var(--r-md)",
+                      color: "var(--text-secondary)",
                       cursor: loading ? "not-allowed" : "pointer",
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
-                      fontSize: "13px"
+                      gap: "7px",
+                      fontSize: "13px",
+                      fontFamily: "inherit",
                     }}
                   >
-                    <RefreshCw size={14} />
-                    Refresh Stats
+                    <RefreshCw size={13} aria-hidden="true" />
+                    Refresh
                   </button>
                 </div>
 
-                {/* ✅ View Preference Examples */}
-                <div style={{ marginTop: "24px" }}>
+                {/* View preferences */}
+                <div style={{ marginTop: "20px" }}>
                   <button
                     onClick={() => setShowPreferences(!showPreferences)}
+                    aria-expanded={showPreferences}
+                    aria-controls="preferences-list"
                     style={{
                       width: "100%",
                       padding: "12px",
-                      background: "rgba(255,255,255,0.05)",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: "10px",
-                      color: "white",
+                      background: "var(--bg-overlay)",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: "var(--r-md)",
+                      color: "var(--text-secondary)",
                       cursor: "pointer",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "space-between",
                       fontSize: "14px",
-                      fontWeight: "500"
+                      fontFamily: "inherit",
                     }}
                   >
                     <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      {showPreferences ? <EyeOff size={16} /> : <Eye size={16} />}
-                      {showPreferences ? "Hide" : "View"} Stored Preferences
+                      {showPreferences
+                        ? <EyeOff size={15} aria-hidden="true" />
+                        : <Eye size={15} aria-hidden="true" />}
+                      {showPreferences ? "Hide" : "View"} stored preferences
                     </span>
-                    <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.6)" }}>
+                    <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
                       {preferences.length} items
                     </span>
                   </button>
 
                   {showPreferences && (
-                    <div style={{
-                      marginTop: "12px",
-                      maxHeight: "300px",
-                      overflowY: "auto",
-                      background: "rgba(0,0,0,0.2)",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      borderRadius: "10px",
-                      padding: "12px"
-                    }}>
+                    <div
+                      id="preferences-list"
+                      role="list"
+                      aria-label="Stored preferences"
+                      style={{
+                        marginTop: "10px",
+                        maxHeight: "280px",
+                        overflowY: "auto",
+                        background: "var(--bg-overlay)",
+                        border: "1px solid rgba(255,255,255,0.06)",
+                        borderRadius: "var(--r-md)",
+                        padding: "12px",
+                      }}
+                    >
                       {preferences.length === 0 ? (
-                        <p style={{ fontSize: "13px", color: "rgba(255,255,255,0.5)", textAlign: "center", padding: "20px" }}>
-                          No preferences stored yet. Use the system and it will learn your habits!
+                        <p style={{ fontSize: "13px", color: "var(--text-muted)", textAlign: "center", padding: "20px 0" }}>
+                          No preferences stored yet. Use AURA and it will learn from you.
                         </p>
                       ) : (
                         preferences.map((pref, idx) => (
-                          <div 
+                          <div
                             key={idx}
+                            role="listitem"
                             style={{
                               padding: "10px 12px",
-                              background: "rgba(255,255,255,0.03)",
-                              borderRadius: "6px",
-                              marginBottom: "8px",
-                              borderLeft: `3px solid ${
-                                pref.category === "personal_info" ? "#ff4d6d" :
-                                pref.category === "app_usage" ? "#7a1fa2" :
-                                "#38bdf8"
-                              }`
+                              background: "rgba(255,255,255,0.02)",
+                              borderRadius: "var(--r-sm)",
+                              marginBottom: "6px",
+                              borderLeft: `2px solid ${
+                                pref.category === "personal_info"
+                                  ? "var(--pink-400)"
+                                  : pref.category === "app_usage"
+                                  ? "var(--pink-600)"
+                                  : "var(--bg-muted)"
+                              }`,
                             }}
                           >
-                            <div style={{ fontSize: "13px", color: "rgba(255,255,255,0.9)" }}>
+                            <p style={{ fontSize: "13px", color: "var(--text-primary)", margin: "0 0 4px" }}>
                               {pref.text}
-                            </div>
-                            <div style={{ 
-                              fontSize: "11px", 
-                              color: "rgba(255,255,255,0.5)", 
-                              marginTop: "4px",
-                              display: "flex",
-                              gap: "12px"
-                            }}>
-                              <span>📁 {pref.category}</span>
-                              {pref.timestamp && (
-                                <span>🕒 {new Date(pref.timestamp).toLocaleDateString()}</span>
-                              )}
-                            </div>
+                            </p>
+                            <p style={{ fontSize: "11px", color: "var(--text-muted)", margin: 0 }}>
+                              {pref.category}
+                              {pref.timestamp && ` · ${new Date(pref.timestamp).toLocaleDateString()}`}
+                            </p>
                           </div>
                         ))
                       )}
@@ -400,83 +353,76 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
                   )}
                 </div>
 
-                {/* ✅ Clear Memory Action */}
+                {/* Danger zone */}
                 <div style={{ marginTop: "24px" }}>
-                  <div style={{
-                    background: "rgba(220, 38, 38, 0.1)",
-                    border: "1px solid rgba(220, 38, 38, 0.3)",
-                    borderRadius: "10px",
-                    padding: "16px",
-                    marginBottom: "12px"
-                  }}>
-                    <h4 style={{ fontSize: "14px", color: "#ef4444", marginBottom: "8px", fontWeight: "600" }}>
-                      ⚠️ Danger Zone
-                    </h4>
-                    <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.7)", marginBottom: "12px" }}>
-                      Clear all learned preferences. This will make the AI forget your name, app choices, and work patterns. 
-                      <strong> Your conversation history will NOT be deleted.</strong>
+                  <div
+                    style={{
+                      background: "rgba(224, 88, 88, 0.07)",
+                      border: "1px solid rgba(224, 88, 88, 0.2)",
+                      borderRadius: "var(--r-md)",
+                      padding: "16px",
+                      marginBottom: "12px",
+                    }}
+                    role="group"
+                    aria-labelledby="danger-zone-label"
+                  >
+                    <p
+                      id="danger-zone-label"
+                      style={{ fontSize: "13px", color: "#e05858", marginBottom: "6px", fontWeight: "600" }}
+                    >
+                      Danger zone
+                    </p>
+                    <p style={{ fontSize: "12.5px", color: "var(--text-muted)", marginBottom: "14px", lineHeight: "1.5" }}>
+                      Permanently deletes all learned preferences. Conversation history is kept.
                     </p>
                     <button
-                      onClick={handleClearLongTermMemory}
+                      onClick={handleClearMemory}
                       disabled={loading}
+                      aria-label="Clear all learned preferences permanently"
                       style={{
-                        padding: "10px 20px",
-                        background: "rgba(220, 38, 38, 0.2)",
-                        border: "1px solid rgba(220, 38, 38, 0.5)",
-                        borderRadius: "8px",
-                        color: "#ef4444",
+                        padding: "9px 18px",
+                        background: "rgba(224, 88, 88, 0.12)",
+                        border: "1px solid rgba(224, 88, 88, 0.35)",
+                        borderRadius: "var(--r-md)",
+                        color: "#e05858",
                         cursor: loading ? "not-allowed" : "pointer",
                         display: "flex",
                         alignItems: "center",
-                        gap: "8px",
+                        gap: "7px",
                         fontSize: "13px",
-                        fontWeight: "500"
+                        fontFamily: "inherit",
+                        fontWeight: "500",
                       }}
                     >
-                      <Trash2 size={16} />
-                      {loading ? "Clearing..." : "Clear Long-Term Memory"}
+                      <Trash2 size={14} aria-hidden="true" />
+                      {loading ? "Clearing…" : "Clear memory"}
                     </button>
                   </div>
 
-                  {/* Status Message */}
                   {statusMessage && (
-                    <div style={{
-                      padding: "12px",
-                      background: "rgba(255, 255, 255, 0.05)",
-                      border: "1px solid rgba(255, 255, 255, 0.1)",
-                      borderRadius: "8px",
-                      fontSize: "13px",
-                      color: "rgba(255, 255, 255, 0.9)"
-                    }}>
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      style={{
+                        padding: "10px 14px",
+                        background: "var(--bg-overlay)",
+                        border: "1px solid rgba(255,255,255,0.07)",
+                        borderRadius: "var(--r-md)",
+                        fontSize: "13px",
+                        color: "var(--text-secondary)",
+                      }}
+                    >
                       {statusMessage}
-                    </div>
+                    </p>
                   )}
                 </div>
-
-                {/* Info Box */}
-                <div style={{
-                  marginTop: "20px",
-                  padding: "12px",
-                  background: "rgba(56, 189, 248, 0.1)",
-                  border: "1px solid rgba(56, 189, 248, 0.3)",
-                  borderRadius: "8px",
-                  fontSize: "12px",
-                  color: "rgba(255,255,255,0.8)"
-                }}>
-                  <strong>💡 How Long-Term Memory Works:</strong>
-                  <ul style={{ marginTop: "8px", paddingLeft: "20px" }}>
-                    <li>Learns from successful tasks (e.g., "User prefers Chrome")</li>
-                    <li>Stores personal info when mentioned (e.g., your name)</li>
-                    <li>Remembers across sessions (permanent until cleared)</li>
-                    <li>Separate from conversation history (chat messages)</li>
-                  </ul>
-                </div>
-              </div>
+              </section>
             )}
 
+            {/* ── Actions ── */}
             <div className="settings-actions">
               <button className="settings-btn-save" onClick={handleSave}>
-                Save Changes
+                Save changes
               </button>
               <button className="settings-btn-cancel" onClick={onClose}>
                 Cancel

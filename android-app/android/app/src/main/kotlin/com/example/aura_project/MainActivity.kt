@@ -17,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import java.io.File
 import android.media.MediaPlayer
 import android.content.pm.PackageManager
@@ -38,8 +40,9 @@ import java.util.Base64
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.automation/service"
     private val TAG = "AutomationApp"
-    private val BACKEND_URL = "http://10.0.2.2:8000"
+    private val BACKEND_URL = "http://192.168.68.56:8000"
     private val SESSION_ID = UUID.randomUUID().toString()
+    private var methodChannel: MethodChannel? = null
     private val NETWORK_TIMEOUT = 30000
     
     private var mediaRecorder: MediaRecorder? = null
@@ -56,8 +59,8 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel?.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isServiceEnabled" -> {
                         val isEnabled = AutomationService.isServiceEnabled(this)
@@ -294,33 +297,67 @@ class MainActivity: FlutterActivity() {
         }
         
         try {
-            val audioFile = File(cacheDir, "recording_${System.currentTimeMillis()}.m4a")
+            val audioFile = File(cacheDir, "recording_.m4a")
             audioFilePath = audioFile.absolutePath
-            
+
             mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(this)
             } else {
                 @Suppress("DEPRECATION")
                 MediaRecorder()
             }
-            
+
             mediaRecorder?.apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioSamplingRate(16000)
-                setAudioEncodingBitRate(128000)
-                setAudioChannels(1)
                 setOutputFile(audioFilePath)
+                
+                // Set high quality
+                setAudioEncodingBitRate(128000)
+                setAudioSamplingRate(44100)
+                
+                prepare()
+                start()
             }
-            
-            mediaRecorder?.prepare()
-            mediaRecorder?.start()
-            recordingStartTime = System.currentTimeMillis()
+
             isRecording = true
+            recordingStartTime = System.currentTimeMillis()
             
-            Log.d(TAG, "✅ Recording started")
-            result.success(mapOf("status" to "recording", "message" to "Recording..."))
+            // Silence detection
+            val handler = Handler(Looper.getMainLooper())
+            var silenceStartTime = System.currentTimeMillis()
+            val SILENCE_THRESHOLD = 500 // Adjust based on maxAmplitude range (usually 0 to 32767)
+            val SILENCE_TIMEOUT = 5000L // 5 seconds
+            
+            val checkSilenceRunnable = object : Runnable {
+                override fun run() {
+                    if (!isRecording) return
+                    val amplitude = mediaRecorder?.maxAmplitude ?: 0
+                    if (amplitude > SILENCE_THRESHOLD) {
+                        silenceStartTime = System.currentTimeMillis() // Reset timer
+                    } else if (System.currentTimeMillis() - silenceStartTime > SILENCE_TIMEOUT) {
+                        Log.d(TAG, "5 seconds of silence detected, stopping recording")
+                        val stopResult = object : MethodChannel.Result {
+                            override fun success(res: Any?) {
+                                Log.d(TAG, "Auto-stopped recording successfully")
+                                // Notify flutter
+                                handler.post {
+                                    methodChannel?.invokeMethod("onRecordAutoStop", res)
+                                }
+                            }
+                            override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
+                            override fun notImplemented() {}
+                        }
+                        stopAudioRecording(stopResult)
+                        return
+                    }
+                    handler.postDelayed(this, 100) // check every 100ms
+                }
+            }
+            handler.postDelayed(checkSilenceRunnable, 1000) // Start checking after 1 second
+
+            result.success(true)
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error starting recording: ${e.message}", e)
             result.error("RECORDING_ERROR", e.message, null)

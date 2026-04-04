@@ -7,43 +7,32 @@ import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
-import LoginPage from "./components/onboarding/LoginPage";
-import ChatHistory from "./components/ChatHistory";
+import SplashScreen from "./components/splash/SplashScreen";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
 function App() {
   /* ---------- STATE ---------- */
+  const [showSplash, setShowSplash] = useState(true);
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
-  // user ID
-
-// App.jsx - Fix userId initialization
-  const [userId, setUserId] = useState(() => {
-      // Only use stored userId if onboarding is NOT complete
-      // If we're logged out, we need a new ID for new accounts
-      const onboardingComplete = localStorage.getItem("onboardingComplete") === "true";
+  const [userId] = useState(() => {
       const stored = localStorage.getItem("userId");
-      
-      if (onboardingComplete && stored) {
+      if (stored) {
           console.log("[Auth] Using existing user ID:", stored);
           return stored;
       }
-      
-      // Generate new user ID for new accounts
       const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      console.log("[Auth] Created new user ID for new account:", newUserId);
+      localStorage.setItem("userId", newUserId);
+      console.log("[Auth] Created new user ID:", newUserId);
       return newUserId;
   });
 
-  
-  // ✅ AUTH STATE — "app" | "login" | "onboard"
-  // const [authState, setAuthState] = useState(() => {
-  //     if (localStorage.getItem("onboardingComplete") === "true") return "app";
-  //     return "login";
-  // });
-  const [authState, setAuthState] = useState("login");
+  // ✅ ONBOARDING GATE — true = show onboarding, false = go straight to app
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+      return localStorage.getItem("onboardingComplete") !== "true";
+  });
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
   const [sessionId, setSessionId] = useState(() => {
       const stored = localStorage.getItem("currentSessionId");
@@ -72,8 +61,6 @@ function App() {
   const [sseConnected, setSseConnected] = useState(false);
   const [chats, setChats] = useState([]);
   const [chatTitle, setChatTitle] = useState("New Chat");
-  const [viewingChat, setViewingChat] = useState(null); // { sessionId, title, messages }
-  const [loadingHistory, setLoadingHistory] = useState(false);
 
   // WebSocket state
   const wsRef = useRef(null);
@@ -375,16 +362,15 @@ function App() {
   }, []);
 
   /* ---------- LOAD USERNAME FROM LOCALSTORAGE ---------- */
-  // useEffect(() => {
-  //   const savedName = localStorage.getItem("userName");
-  //   if (savedName) {
-  //     setUserName(savedName);
-  //   }
-  // }, []);
+  useEffect(() => {
+    const savedName = localStorage.getItem("userName");
+    if (savedName) {
+      setUserName(savedName);
+    }
+  }, []);
 
   /* ---------- LOAD CHAT LIST ---------- */
   useEffect(() => {
-    if (authState !== "app") return; // don't load before login
     const loadChats = async () => {
       try {
         const response = await fetch(`http://localhost:8000/chats/${userId}`);
@@ -399,7 +385,7 @@ function App() {
     };
     
     loadChats();
-  }, [userId, authState]);
+  }, [userId]);
 
     /* ---------- CONNECT TO THINKING STREAM ---------- */
     /* ---------- CONNECT TO WEBSOCKET (primary) + SSE FALLBACK ---------- */
@@ -687,29 +673,6 @@ function App() {
     console.log("[Session] Switched to:", chatSessionId);
   };
 
-  /* ---------- VIEW CHAT HISTORY ---------- */
-    const handleViewChat = async (chatSessionId, title) => {
-      setLoadingHistory(true);
-      try {
-        const res = await fetch(
-          `http://localhost:8000/chat-messages/${chatSessionId}?user_id=${userId}`
-        );
-        if (!res.ok) throw new Error("Failed to fetch messages");
-        const data = await res.json();
-        setViewingChat({
-          sessionId: chatSessionId,
-          title: title,
-          messages: data.messages || [],
-        });
-      } catch (err) {
-        console.error("[ChatHistory] Failed to load:", err);
-      } finally {
-        setLoadingHistory(false);
-      }
-    };
-
-    // const handleNewChat = async () => {
-
   // const handleNewChat = () => {
   //   console.log("[UI] New chat started");
   //   setUserMessage("");
@@ -733,7 +696,6 @@ function App() {
     setThinkingSteps([]);
     setIsThinking(false);
     setChatMode(false);
-    setChatTitle("New Chat");
     
     // ✅ Notify backend to initialize new session
     try {
@@ -1019,33 +981,7 @@ function App() {
   const handleOnboardingComplete = ({ username, preferences }) => {
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
-      setAuthState("app");
-  };
-
-  /* ---------- LOGOUT ---------- */
-  // In App.jsx, update the handleLogout function
-  const handleLogout = () => {
-      // Clear auth state
-      localStorage.removeItem("onboardingComplete");
-      localStorage.removeItem("currentSessionId");
-      localStorage.removeItem("userName");
-      localStorage.removeItem("ttsVoice");
-      localStorage.removeItem("authMethod");
-      
-      // IMPORTANT: Clear the userId so a new one is generated for next account
-      // But don't remove it completely - we'll let the useState generate a new one
-      // Actually, let's remove it so the next signup gets a fresh ID
-      localStorage.removeItem("userId");
-      
-      // Reset userId state to a new value
-      const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      setUserId(newUserId);
-      
-      // Reset other states
-      setUserName("User");
-      setAuthState("login");
-      
-      console.log("[Auth] Logged out, new user ID generated for next signup:", newUserId);
+      setShowOnboarding(false);
   };
   /* ---------- INTERRUPT COMMANDS ---------- */
   const sendInterrupt = useCallback((command) => {
@@ -1226,6 +1162,9 @@ function App() {
         return;
       }
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
+
+      // Enter transparent execution mode during processing — but keep widget mode if already in it
+      setExecutionMode(prev => prev === "widget" ? "widget" : "transparent");
 
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1441,8 +1380,6 @@ function App() {
   }, [orbState, isThinking, executionMode]);
 
   /* ---------- RENDER ---------- */
-
-/* ---------- RENDER ---------- */
   const isExecuting = orbState === "processing" || orbState === "speaking" || isThinking;
   const appClassName = [
     "app-root",
@@ -1452,212 +1389,191 @@ function App() {
 
   return (
     <>
-      {authState === "login" && (
-        <LoginPage
-          onLogin={({ userId: realId, username, preferences }) => {
-            localStorage.setItem("userId", realId);
-            localStorage.setItem("userName", username);
-            setUserId(realId);
-            setUserName(username);
-            if (preferences?.voice) setTtsVoice(preferences.voice);
-            setAuthState("app");
-          }}
-          onSignUp={() => setAuthState("onboard")}
+      {showSplash && <SplashScreen onFinish={() => setShowSplash(false)} />}
+      
+      {showOnboarding ? (
+        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+      ) : (
+        <div className={appClassName}>
+      {/* ===== Title bar (custom — frameless window) ===== */}
+      {executionMode !== "widget" && (
+        <div className="titlebar">
+          <div className="titlebar-drag">
+            <span className="titlebar-title">AURA</span>
+          </div>
+          <div className="titlebar-buttons">
+            {isExecuting && (
+              <button
+                className="titlebar-btn titlebar-mode"
+                onClick={toggleExecutionMode}
+                title={executionMode === "normal" ? "Go transparent" : "Back to normal"}
+              >
+                {executionMode === "normal" ? <Eye size={14} /> : <Maximize2 size={14} />}
+              </button>
+            )}
+            <button className="titlebar-btn" onClick={enterWidgetMode} title="Minimize to widget">
+              <PictureInPicture2 size={14} />
+            </button>
+            <button className="titlebar-btn" onClick={() => window.electronAPI?.minimizeWindow?.()} title="Minimize">
+              <Minus size={14} />
+            </button>
+            <button className="titlebar-btn" onClick={() => window.electronAPI?.maximizeWindow?.()} title="Maximize">
+              <Maximize size={14} />
+            </button>
+            <button className="titlebar-btn titlebar-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Widget mini-player ===== */}
+      {executionMode === "widget" && (
+        <div className="widget-player">
+          {/* Drag handle */}
+          <div className="widget-drag-strip" />
+
+          {/* Left: Orb + Status */}
+          <div className="widget-left">
+            <div className={`widget-orb orb-${orbState}`}>
+              {orbState === "processing" ? "⚡" : orbState === "speaking" ? "🔊" : "●"}
+            </div>
+            <div className="widget-status-text">
+              {isExecuting
+                ? (isThinking
+                    ? (thinkingSteps.length > 0 ? thinkingSteps[thinkingSteps.length - 1] : t("Thinking...", "جاري التفكير..."))
+                    : assistantMessage
+                      ? (assistantMessage.length > 40 ? assistantMessage.slice(0, 40) + "…" : assistantMessage)
+                      : t("Processing...", "جاري المعالجة..."))
+                : "AURA"}
+            </div>
+          </div>
+
+          {/* Center: Input area */}
+          <div className="widget-input-area">
+            {!isExecuting ? (
+              <>
+                <input
+                  className="widget-text-input"
+                  type="text"
+                  placeholder={t("Ask AURA...", "اسأل أورا...")}
+                  value={widgetText}
+                  onChange={(e) => setWidgetText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && widgetText.trim()) {
+                      handleTextSubmit(widgetText);
+                      setWidgetText("");
+                    }
+                  }}
+                />
+                <button
+                  className="widget-mic-btn"
+                  onClick={handleMicClick}
+                  title={isRecording ? "Stop recording" : "Voice input"}
+                >
+                  <Mic size={16} />
+                </button>
+              </>
+            ) : (
+              <div className="widget-exec-controls">
+                <button
+                  className="widget-action-btn widget-pause"
+                  onClick={() => sendInterrupt("pause")}
+                  title="Pause"
+                >
+                  <Pause size={14} />
+                </button>
+                <button
+                  className="widget-action-btn widget-stop"
+                  onClick={() => sendInterrupt("stop")}
+                  title="Stop"
+                >
+                  <Square size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Right: Window controls */}
+          <div className="widget-window-controls">
+            <button className="widget-win-btn" onClick={exitWidgetMode} title="Expand">
+              <ArrowUpRight size={14} />
+            </button>
+            <button className="widget-win-btn widget-win-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
+              <X size={14} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <Sidebar
+        collapsed={isSidebarCollapsed || executionMode === "widget"}
+        onToggle={() => {
+          console.log("[UI] Sidebar toggled");
+          setIsSidebarCollapsed((p) => !p);
+        }}
+        onSettingsClick={handleSettingsClick}
+        onNewChat={handleNewChat}
+        chats={chats}
+        onSwitchChat={handleSwitchChat}
+        currentSessionId={sessionId}
+      />
+
+      <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
+        {/* <video autoPlay muted loop playsInline>
+          <source src="/Background3.mp4" type="video/mp4" />
+        </video> */}
+        
+        <div className="main-overlay">
+          <HeaderContent userName={userName} />
+
+          {/* Thinking Indicator */}
+          {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
+
+          {/* Response Display Area */}
+          {assistantMessage && !isThinking && (
+            <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
+              <div className="response-message">
+                {assistantMessage}
+              </div>
+              {/* Read Aloud offer */}
+              {offerReadAloud && structuredResponse?.full_content && (
+                <button 
+                  className="read-aloud-btn"
+                  onClick={handleReadAloud}
+                  title={t("Read full content aloud", "قراءة المحتوى كاملًا بصوت عالٍ")}
+                >
+                  {t("🔊 Read Aloud", "🔊 قراءة بصوت عالٍ")}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* VoiceControls stay at the bottom */}
+          <VoiceControls
+            isRecording={isRecording}
+            orbState={orbState}
+            onMicClick={handleMicClick}
+            onCancel={handleCancel}
+            chatMode={chatMode}
+            setChatMode={setChatMode}
+            onSendText={handleTextSubmit}
+            onSettingsClick={handleSettingsClick}
+            isExecuting={isExecuting}
+            onInterrupt={sendInterrupt}
+          />
+        </div>
+      </main>
+
+      {showSettings && (
+        <SettingsModal 
+          onClose={() => setShowSettings(false)} 
+          onSave={handleSettingsSave}
+          initialName={userName}
+          initialVoice={ttsVoice}
         />
       )}
-
-      {authState === "onboard" && (
-        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
-      )}
-
-      {authState === "app" && (
-        <div className={appClassName}>
-
-          {/* ===== Title bar (custom — frameless window) ===== */}
-          {executionMode !== "widget" && (
-            <div className="titlebar">
-              <div className="titlebar-drag">
-                <span className="titlebar-title">AURA</span>
-              </div>
-              <div className="titlebar-buttons">
-                {isExecuting && (
-                  <button
-                    className="titlebar-btn titlebar-mode"
-                    onClick={toggleExecutionMode}
-                    title={executionMode === "normal" ? "Go transparent" : "Back to normal"}
-                  >
-                    {executionMode === "normal" ? <Eye size={14} /> : <Maximize2 size={14} />}
-                  </button>
-                )}
-                <button className="titlebar-btn" onClick={enterWidgetMode} title="Minimize to widget">
-                  <PictureInPicture2 size={14} />
-                </button>
-                <button className="titlebar-btn" onClick={() => window.electronAPI?.minimizeWindow?.()} title="Minimize">
-                  <Minus size={14} />
-                </button>
-                <button className="titlebar-btn" onClick={() => window.electronAPI?.maximizeWindow?.()} title="Maximize">
-                  <Maximize size={14} />
-                </button>
-                <button className="titlebar-btn titlebar-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ===== Widget mini-player ===== */}
-          {executionMode === "widget" && (
-            <div className="widget-player">
-              <div className="widget-drag-strip" />
-
-              <div className="widget-left">
-                <div className={`widget-orb orb-${orbState}`}>
-                  {orbState === "processing" ? "⚡" : orbState === "speaking" ? "🔊" : "●"}
-                </div>
-                <div className="widget-status-text">
-                  {isExecuting
-                    ? (isThinking
-                        ? (thinkingSteps.length > 0 ? thinkingSteps[thinkingSteps.length - 1] : "Thinking...")
-                        : assistantMessage
-                          ? (assistantMessage.length > 40 ? assistantMessage.slice(0, 40) + "…" : assistantMessage)
-                          : "Processing...")
-                    : "AURA"}
-                </div>
-              </div>
-
-              <div className="widget-input-area">
-                {!isExecuting ? (
-                  <>
-                    <input
-                      className="widget-text-input"
-                      type="text"
-                      placeholder="Ask AURA..."
-                      value={widgetText}
-                      onChange={(e) => setWidgetText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && widgetText.trim()) {
-                          handleTextSubmit(widgetText);
-                          setWidgetText("");
-                        }
-                      }}
-                    />
-                    <button
-                      className="widget-mic-btn"
-                      onClick={handleMicClick}
-                      title={isRecording ? "Stop recording" : "Voice input"}
-                    >
-                      <Mic size={16} />
-                    </button>
-                  </>
-                ) : (
-                  <div className="widget-exec-controls">
-                    <button
-                      className="widget-action-btn widget-pause"
-                      onClick={() => sendInterrupt("pause")}
-                      title="Pause"
-                    >
-                      <Pause size={14} />
-                    </button>
-                    <button
-                      className="widget-action-btn widget-stop"
-                      onClick={() => sendInterrupt("stop")}
-                      title="Stop"
-                    >
-                      <Square size={14} />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div className="widget-window-controls">
-                <button className="widget-win-btn" onClick={exitWidgetMode} title="Expand">
-                  <ArrowUpRight size={14} />
-                </button>
-                <button className="widget-win-btn widget-win-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          <Sidebar
-            collapsed={isSidebarCollapsed || executionMode === "widget"}
-            onToggle={() => {
-              console.log("[UI] Sidebar toggled");
-              setIsSidebarCollapsed((p) => !p);
-            }}
-            onSettingsClick={handleSettingsClick}
-            onNewChat={handleNewChat}
-            chats={chats}
-            onSwitchChat={handleSwitchChat}
-            onViewChat={handleViewChat}
-            currentSessionId={sessionId}
-          />
-
-          <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-            <video autoPlay muted loop playsInline>
-              <source src="/Background3.mp4" type="video/mp4" />
-            </video>
-
-            <div className="main-overlay">
-              <HeaderContent userName={userName} chatTitle={chatTitle} />
-
-              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-              {assistantMessage && !isThinking && (
-                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-                  <div className="response-message">
-                    {assistantMessage}
-                  </div>
-                </div>
-              )}
-
-              <VoiceControls
-                isRecording={isRecording}
-                orbState={orbState}
-                onMicClick={handleMicClick}
-                onCancel={handleCancel}
-                chatMode={chatMode}
-                setChatMode={setChatMode}
-                onSendText={handleTextSubmit}
-                onSettingsClick={handleSettingsClick}
-                isExecuting={isExecuting}
-                onInterrupt={sendInterrupt}
-              />
-            </div>
-          </main>
-
-          {showSettings && (
-            <SettingsModal
-              onClose={() => setShowSettings(false)}
-              onSave={handleSettingsSave}
-              onLogout={handleLogout}
-              initialName={userName}
-              initialVoice={ttsVoice}
-            />
-          )}
-
-          {viewingChat && (
-            <ChatHistory
-              messages={viewingChat.messages}
-              chatTitle={viewingChat.title}
-              onClose={() => setViewingChat(null)}
-            />
-          )}
-
-          {loadingHistory && (
-            <div style={{
-              position: "fixed", inset: 0, zIndex: 2999,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)"
-            }}>
-              <div style={{ color: "white", fontSize: "14px", opacity: 0.7 }}>
-                Loading chat...
-              </div>
-            </div>
-          )}
-
-        </div>
+    </div>
       )}
     </>
   );

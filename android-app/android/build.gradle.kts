@@ -21,7 +21,18 @@ subprojects {
                 if (android.namespace == null && project.name.contains("move_to_background")) {
                     android.namespace = "com.s10h.move_to_background"
                 }
+
+                android.compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_17
+                    targetCompatibility = JavaVersion.VERSION_17
+                }
             }
+        }
+    }
+    
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        kotlinOptions {
+            jvmTarget = "17"
         }
     }
 }

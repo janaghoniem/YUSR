@@ -230,3 +230,4 @@ backend/agents/execution_agent/RAG/analysis
 *.bin
 *.sqlite3-journal
 *.pickle
+backend/agents/execution_agent/strategies/task_memory_db/26dd199e-ccc3-453d-a914-19052bd06a45/index_metadata.pickle

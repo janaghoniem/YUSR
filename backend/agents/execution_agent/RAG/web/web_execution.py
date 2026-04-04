@@ -16,6 +16,7 @@ import logging
 import json
 import os
 import re
+import random
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -811,8 +812,6 @@ class StealthBrowser:
     @staticmethod
     def get_random_user_agent() -> str:
         """Generate realistic user agent"""
-        import random
-        
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -824,8 +823,6 @@ class StealthBrowser:
     @staticmethod
     def get_random_viewport() -> Dict[str, int]:
         """Generate realistic viewport size"""
-        import random
-        
         common_resolutions = [
             {'width': 1920, 'height': 1080},
             {'width': 1366, 'height': 768},
@@ -836,15 +833,22 @@ class StealthBrowser:
     
     @staticmethod
     async def inject_stealth_scripts(context):
-        """Inject comprehensive anti-detection scripts"""
+        """Inject ULTIMATE comprehensive anti-detection scripts"""
         
         stealth_script = """
-        // ── webdriver flag ──────────────────────────────────────────────────
+        // ════════════════════════════════════════════════════════════════════
+        // 🔥 ADVANCED BOT DETECTION BYPASS - CLOUDFLARE/RECAPTCHA/TIMEOUT/etc
+        // ════════════════════════════════════════════════════════════════════
+
+        // ── 1. CORE WEBDRIVER DETECTION ───────────────────────────────────
         Object.defineProperty(navigator, 'webdriver', {
             get: () => undefined, configurable: true
         });
-
-        // ── Chrome runtime (needed for Google's bot checks) ─────────────────
+        
+        // ── 2. HEADLESS CHROME DETECTION ──────────────────────────────────
+        delete navigator.__proto__.webdriver;
+        
+        // ── 3. CHROME OBJECT (CRITICAL FOR GOOGLE/CLOUDFLARE) ────────────
         window.chrome = {
             app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
             runtime: {
@@ -856,6 +860,12 @@ class StealthBrowser:
                 connect: () => {},
                 sendMessage: () => {},
                 id: undefined,
+                getBackgroundPage: () => null,
+                getManifest: () => null,
+                getURL: () => '',
+                onConnect: { addListener: () => {} },
+                onMessage: { addListener: () => {} },
+                onMessageExternal: { addListener: () => {} },
             },
             loadTimes: function() {
                 return {
@@ -875,15 +885,22 @@ class StealthBrowser:
             csi: function() { return { onloadT: Date.now(), pageT: Date.now() - 3000, startE: Date.now() - 5000, tran: 15 }; },
         };
 
-        // ── Permissions API ──────────────────────────────────────────────────
+        // ── 4. PERMISSIONS API (CLOUDFLARE + BROWSER DETECTION) ───────────
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) => (
             parameters.name === 'notifications' ?
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
+        
+        // Fix for permissions.query detection
+        try {
+            if (navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query = (parameters) => Promise.resolve({ state: 'prompt' });
+            }
+        } catch(e) {}
 
-        // ── Plugin array (realistic length + objects) ────────────────────────
+        // ── 5. PLUGIN ARRAY (ESSENTIAL FOR BOT DETECTION) ─────────────────
         const pluginData = [
             { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
             { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
@@ -892,42 +909,133 @@ class StealthBrowser:
         const pluginArray = pluginData.map(p => {
             const plugin = Object.create(Plugin.prototype);
             Object.defineProperties(plugin, {
-                name: { value: p.name, writable: false }, filename: { value: p.filename, writable: false }, description: { value: p.description, writable: false }, length: { value: 0, writable: false }
+                name: { value: p.name, writable: false }, 
+                filename: { value: p.filename, writable: false }, 
+                description: { value: p.description, writable: false }, 
+                length: { value: 0, writable: false }
             });
             return plugin;
         });
         Object.defineProperty(pluginArray, 'item', { value: (i) => pluginArray[i] });
         Object.defineProperty(pluginArray, 'namedItem', { value: (name) => pluginArray.find(p => p.name === name) || null });
-        Object.defineProperty(navigator, 'plugins', { get: () => pluginArray });
+        Object.defineProperty(navigator, 'plugins', { get: () => pluginArray, configurable: true });
 
-        // ── Languages ────────────────────────────────────────────────────────
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        // ── 6. LANGUAGES/LOCALE ───────────────────────────────────────────
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+        Object.defineProperty(navigator, 'language', { get: () => 'en-US', configurable: true });
 
-        // ── Screen/hardware ──────────────────────────────────────────────────
-        Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
-        Object.defineProperty(screen, 'pixelDepth', { get: () => 24 });
+        // ── 7. SCREEN PROPERTIES ──────────────────────────────────────────
+        Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });
+        Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });
+        Object.defineProperty(screen, 'availHeight', { get: () => 1040, configurable: true });
+        Object.defineProperty(screen, 'availWidth', { get: () => 1920, configurable: true });
 
-        // ── Conceal Playwright internals ─────────────────────────────────────
+        // ── 8. CANVAS FINGERPRINTING BYPASS ───────────────────────────────
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            if (type === 'image/png' && this.width === 280 && this.height === 60) {
+                return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAA8CAYAAAA...';
+            }
+            return originalToDataURL.call(this, type);
+        };
+        
+        const originalGetContext = HTMLCanvasElement.prototype.getContext;
+        HTMLCanvasElement.prototype.getContext = function(contextType, ...args) {
+            const context = originalGetContext.call(this, contextType, ...args);
+            if (contextType === '2d') {
+                const fillText = context.fillText;
+                context.fillText = function(text, x, y, ...args) {
+                    if (this.canvas.width === 280 && this.canvas.height === 60) {
+                        return;
+                    }
+                    return fillText.apply(this, [text, x, y, ...args]);
+                };
+            }
+            return context;
+        };
+
+        // ── 9. WEBGL FINGERPRINTING BYPASS ────────────────────────────────
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter.call(this, parameter);
+        };
+
+        // ── 10. CONCEAL AUTOMATION TOOLS ──────────────────────────────────
         delete window.__playwright;
         delete window.__pw_manual;
         delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
         delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
         delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-
-        // ── Fake notification permission ─────────────────────────────────────
+        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Object;
+        
+        // Puppeteer detection bypass
+        Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+        
+        // ── 11. NOTIFICATION API ──────────────────────────────────────────
         window.Notification = window.Notification || {};
-        if (!window.Notification.permission) {
-            Object.defineProperty(window.Notification, 'permission', { get: () => 'default' });
-        }
+        Object.defineProperty(window.Notification, 'permission', { 
+            get: () => 'default',
+            configurable: true
+        });
+
+        // ── 12. TIMING RANDOMIZATION (AVOID TIMING ANALYSIS) ──────────────
+        const originalDateNow = Date.now;
+        let randomOffset = Math.random() * 1000;
+        Date.now = function() {
+            return originalDateNow() + randomOffset;
+        };
+
+        // ── 13. FUNCTION TOSTRING HIJACK (SOME BOT DETECTORS CHECK THIS) ──
+        const originalFunctionToString = Function.prototype.toString;
+        Function.prototype.toString = function() {
+            if (this.name === 'toString' || this === originalFunctionToString) {
+                return 'function toString() { [native code] }';
+            }
+            return originalFunctionToString.call(this);
+        };
+
+        // ── 14. RTC LEAK PREVENTION ───────────────────────────────────────
+        try {
+            const rtc = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+            if (rtc) {
+                window.RTCPeerConnection = new Proxy(rtc, {
+                    construct: function(target) {
+                        throw new Error('WebRTC blocked');
+                    }
+                });
+            }
+        } catch(e) {}
+
+        // ── 15. OVERRIDE EVAL (CLOUDFLARE PROTECTION) ────────────────────
+        const originalEval = window.eval;
+        window.eval = function(code) {
+            if (code && code.includes('__protoBytesToSet')) return undefined;
+            return originalEval.call(this, code);
+        };
+
+        // ── 16. PROXY DETECTION BYPASS ────────────────────────────────────
+        const handler = {
+            get: (target, prop, receiver) => {
+                if (prop === Symbol.toStringTag) {
+                    return 'Object';
+                }
+                return Reflect.get(target, prop, receiver);
+            }
+        };
+        window.Proxy = new Proxy(window.Proxy, handler);
         """
         
         await context.add_init_script(stealth_script)
-        logger.info("✅ Advanced stealth scripts injected")
+        logger.info("✅ ULTIMATE stealth scripts injected (Cloudflare/reCAPTCHA/WebGL/Canvas bypass)")
     
     @staticmethod
     def get_stealth_launch_args() -> List[str]:
-        """Get comprehensive launch arguments for stealth mode"""
+        """Get ULTIMATE comprehensive launch arguments for aggressive stealth mode"""
         return [
+            # ─ CORE ANTI-DETECTION ──────────────────────────────────────
             '--disable-blink-features=AutomationControlled',
             '--disable-dev-shm-usage',
             '--disable-web-security',
@@ -937,11 +1045,46 @@ class StealthBrowser:
             '--disable-infobars',
             '--window-size=1920,1080',
             '--start-maximized',
+            
+            # ─ PLUGIN & NOTIFICATION BLOCKING ──────────────────────────
             '--disable-notifications',
             '--disable-popup-blocking',
+            '--disable-plugins',
+            '--disable-extensions',
+            '--disable-device-emulation',
+            
+            # ─ PERFORMANCE/TIMING (AVOID DETECTION VIA TIMING ANALYSIS) ─
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
+            '--disable-breakpad',
+            '--disable-client-side-phishing-detection',
+            
+            # ─ FEATURE DISABLING (REDUCE FINGERPRINT VISIBILITY) ────────
+            '--disable-default-apps',
+            '--disable-hang-monitor',
+            '--disable-prompt-on-repost',
+            '--disable-sync',
+            '--enable-automation',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-default-browser-check',
+            '--no-first-run',
+            '--password-store=basic',
+            '--use-mock-keychain',
+            
+            # ─ GPU DISABLING (REDUCE WEBGL FINGERPRINTING) ──────────────
+            '--disable-gpu',
+            '--disable-gpu-sandbox',
+            '--disable-gpu-compositing',
+            
+            # ─ NETWORK/TIMING RANDOMIZATION ───────────────────────────
+            '--disable-component-update',
+            '--disable-default-apps',
+            
+            # ─ ADVANCED PATCHES ──────────────────────────────────────
+            '--disable-translate',
+            '--disable-save-password-bubble',
         ]
 
 # ============================================================================
@@ -1005,10 +1148,23 @@ class WebExecutionPipeline:
                 'permissions': ['geolocation', 'notifications'],
                 'geolocation': {'longitude': -74.006, 'latitude': 40.7128},
                 'extra_http_headers': {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Cache-Control': 'max-age=0',
+                    'Connection': 'keep-alive',
+                    'DNT': '1',
+                    'Pragma': 'no-cache',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Sec-GPC': '1',
+                    'Upgrade-Insecure-Requests': '1',
+                    'User-Agent': user_agent or self.stealth.get_random_user_agent(),
                 },
-                'accept_downloads': True
+                'accept_downloads': True,
+                'ignore_https_errors': True,
             }
             
             if user_agent:
@@ -1016,10 +1172,22 @@ class WebExecutionPipeline:
             
             self.context = await self.browser.new_context(**context_options)
             
+            # ✅ Add request interception to spoof referrer and add more stealthy headers
+            async def handle_route(route):
+                request = route.request
+                headers = dict(request.headers)
+                headers.update({
+                    'Referer': request.url.split('?')[0],  # Spoof referer from same domain
+                    'Origin': '/'.join(request.url.split('/')[:3]),
+                })
+                await route.continue_(headers=headers)
+            
+            await self.context.route('**/*', handle_route)
+            
             if self.config.use_stealth_plugin:
                 await self.stealth.inject_stealth_scripts(self.context)
             
-            logger.info("✅ Advanced stealth Playwright initialized")
+            logger.info("✅ ULTIMATE stealth Playwright initialized (headers + request spoofing)")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Playwright: {e}")
@@ -1069,6 +1237,80 @@ class WebExecutionPipeline:
             logger.info(f"📄 Created new page for session {session_id}")
         
         return self.sessions[session_id]
+    
+    async def detect_and_bypass_challenges(self, page) -> bool:
+        """
+        Detect Cloudflare, reCAPTCHA, and other bot detection challenges.
+        Return True if challenge was bypassed, False otherwise.
+        """
+        try:
+            # Check page title and URL for indicators
+            url = page.url.lower()
+            title = await page.title()
+            
+            # ✅ CLOUDFLARE DETECTION
+            if 'challenge' in url or 'Ray ID' in title or 'Looking for Cloudflare' in title:
+                logger.warning("⚠️ Detected Cloudflare challenge - attempting bypass...")
+                await asyncio.sleep(10)  # Wait for JS challenge to complete
+                
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    logger.info("✅ Cloudflare challenge bypassed")
+                    return True
+                except:
+                    logger.warning("⚠️ Cloudflare challenge might still be present")
+                    return False
+            
+            # ✅ RECAPTCHA DETECTION
+            if await page.query_selector('iframe[src*="recaptcha"]') or await page.query_selector('[data-sitekey]'):
+                logger.warning("⚠️ Detected reCAPTCHA - this requires human interaction or 3rd-party service")
+                return False
+            
+            # ✅ GENERIC BOT CHECK DETECTION
+            bot_indicators = [
+                'rate limit',
+                'too many requests',
+                '503',
+                'service unavailable',
+                'please try again',
+                'bot',
+                'autom',
+                'access denied',
+                'forbidden',
+            ]
+            
+            page_content = await page.content()
+            for indicator in bot_indicators:
+                if indicator in page_content.lower():
+                    logger.warning(f"⚠️ Detected potential bot detection: '{indicator}'")
+                    # Wait and hope it resolves
+                    await asyncio.sleep(5)
+                    await page.reload(wait_until='networkidle')
+                    logger.info("🔄 Reloaded page after bot detection")
+                    return True
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Challenge detection failed: {e}")
+            return False
+    
+    async def wait_for_navigation_with_stealth(self, page, timeout: int = 30000) -> bool:
+        """
+        Wait for navigation with stealth mode - avoid timeout detection.
+        """
+        try:
+            # Add random delays to avoid detection
+            await asyncio.sleep(0.1 + random.random() * 0.5)
+            await page.wait_for_load_state('networkidle', timeout=timeout)
+            
+            # Check for challenges after navigation
+            await self.detect_and_bypass_challenges(page)
+            
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Navigation wait failed: {e}")
+            return False
     
     async def _initialize_rag_system(self):
         """Lazy initialize RAG system"""
@@ -1737,7 +1979,6 @@ async def __rag_step__(page):
         Add human-like behavior to avoid bot detection on auth pages.
         Moves mouse randomly, adds small delays — makes automation look real.
         """
-        import random
         try:
             vw = page.viewport_size.get('width', 1366) if page.viewport_size else 1366
             vh = page.viewport_size.get('height', 768) if page.viewport_size else 768

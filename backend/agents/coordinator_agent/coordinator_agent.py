@@ -913,6 +913,7 @@ Examples of ACTION tasks:
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
 11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
+12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results and formats them into a natural, helpful conversational response.
 
 ============================
 OUTPUT RULES
@@ -1042,6 +1043,64 @@ Generate the task decomposition now:"""
             t["goal"] = shared_goal
 
         action_tasks = [ActionTask(**task) for task in task_dicts]
+
+        # ── LLM VALIDATION PASS ────────────────────────────────────────────────
+        validation_prompt = f"""You are the AURA Task Decomposition Validator. Review this proposed decomposition for the user request.
+        
+USER REQUEST:
+{json.dumps(user_request, indent=2)}
+
+PROPOSED DECOMPOSITION:
+{json.dumps(task_dicts, indent=2)}
+
+Your job is to act as a rigorous validator:
+1. Ensure no intermediate steps are skipped or assumed. However, DO NOT add tasks to explicitly "open browser" - web tasks automatically handle browser opening.
+2. Ensure dependencies (depends_on) are correctly linked so tasks wait for required data.
+3. CRITICAL: For research/informational tasks, ensure there is a final step (target_agent: "reasoning") to format and communicate the content back to the disabled user.
+
+Return ONLY a valid JSON array of the reviewed and potentially corrected tasks. Do not include markdown formatting or explanations.
+"""
+        try:
+            val_response = await llm.ainvoke(validation_prompt)
+            val_text = val_response.content if hasattr(val_response, 'content') else str(val_response)
+            val_text = val_text.strip()
+            
+            # Step A: strip markdown fences
+            if "```" in val_text:
+                parts = val_text.split("```")
+                if len(parts) > 1:
+                    inner = parts[1].strip()
+                    if inner.startswith("json"):
+                        inner = inner[4:].strip()
+                    val_text = inner
+
+            # Step B: extract JSON array
+            val_json_str = _extract_first_json_array(val_text)
+            val_parsed = None
+            if val_json_str:
+                try:
+                    val_parsed = json.loads(val_json_str)
+                except json.JSONDecodeError:
+                    pass
+
+            if val_parsed is None:
+                try:
+                    candidate = json.loads(val_text.strip())
+                    if isinstance(candidate, dict) and "tasks" in candidate:
+                        val_parsed = candidate["tasks"]
+                    elif isinstance(candidate, list):
+                        val_parsed = candidate
+                except json.JSONDecodeError:
+                    pass
+            
+            if isinstance(val_parsed, list) and len(val_parsed) > 0:
+                validated_tasks_dicts = [t for t in val_parsed if isinstance(t, dict)]
+                for t in validated_tasks_dicts:
+                    t["goal"] = shared_goal  # Enforce shared goal
+                action_tasks = [ActionTask(**t) for t in validated_tasks_dicts]
+                logger.info(f"✅ Validation pass applied. Final tasks: {len(action_tasks)}")
+        except Exception as ve:
+            logger.warning(f"⚠️ Validation pass failed: {ve}. Using original decomposition.")
 
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
         return {"tasks": action_tasks}
@@ -1183,17 +1242,6 @@ def create_coordinator_graph():
                     "timestamp": datetime.now().isoformat()
                 }
                 #edit here
-                # await save_checkpoint_compat(
-                #     session_id,
-                #     {"execution_state": execution_state},
-                #     {"type": "task_progress"}
-                # )
-                await checkpointer.aput(
-                    config={"configurable": {"thread_id": session_id}},
-                    checkpoint={"execution_state": execution_state},
-                    metadata={"type": "task_progress"},
-                    new_versions=[]
-                )    
                 await save_checkpoint_compat(
                     session_id,
                     {
@@ -1228,10 +1276,10 @@ def create_coordinator_graph():
                 dep_ids = current_task.depends_on
                 dependencies_met = all(
                    results.get(dep_id.strip()) 
-                   and results.get(dep_id.strip()).status == "success"
+                   and results.get(dep_id.strip()).status in {"success", "awaiting_confirmation"}
                    for dep_id in dep_ids
                 )
-                
+
                 if not dependencies_met:
                     logger.warning(f"⏭️ Skipping {current_task.task_id} - dependencies not met")
                     results[current_task.task_id] = TaskResult(
@@ -1275,6 +1323,16 @@ def create_coordinator_graph():
                             except Exception:
                                 pass
                         raw_dep_output = stripped
+                    
+                    if not raw_dep_output or (isinstance(raw_dep_output, str) and not raw_dep_output.strip()):
+                        logger.warning(f"Warning: Reasoning task {dep_id} produced empty output")
+                        results[current_task.task_id] = TaskResult(
+                            task_id=current_task.task_id,
+                            status="failed",
+                            error=f"Dependency output was empty: {dep_id}"
+                        )
+                        continue
+
                     current_task.extra_params["input_content"] = raw_dep_output
                     logger.info(f"📎 Auto-injected output from {dep_id} into {current_task.task_id}")
             
@@ -1306,7 +1364,7 @@ def create_coordinator_graph():
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
             
-            if current_task.context == "web" and session_id:
+            if current_task.context == "web" and current_task.target_agent == "action" and session_id:
                 url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
                 if url_match:
                     extracted_url = url_match.group(1).strip()
@@ -1319,7 +1377,8 @@ def create_coordinator_graph():
             if result.content:
                 cleaned_content = result.content.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
                 #hala edit ashan el web
-                cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
+                if current_task.context == "web" and current_task.target_agent == "action":
+                    cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
                 # task_outputs[current_task.task_id] = result.content
                             # Only store if there's actual content
                 if cleaned_content:

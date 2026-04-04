@@ -173,7 +173,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="YUSR Unified Backend (Pub/Sub)",
+    title="AURA Unified Backend (Pub/Sub)",
     description="Multi-agent system with message broker",
     version="3.0.0",
     lifespan=lifespan

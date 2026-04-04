@@ -281,7 +281,7 @@ class _AutomationDemoState extends State<AutomationDemo>
       duration: const Duration(milliseconds: 1000),
     );
 
-    _videoCtrl = VideoPlayerController.asset('assets/aura1.webm')
+    _videoCtrl = VideoPlayerController.asset('assets/aura_main.mp4')
       ..initialize().then((_) {
         setState(() {});
         _videoCtrl

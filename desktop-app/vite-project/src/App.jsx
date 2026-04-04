@@ -8,6 +8,7 @@ import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
 import SplashScreen from "./components/splash/SplashScreen";
+import Calm3DBackground from "./components/Calm3DBackground";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
@@ -1520,10 +1521,8 @@ function App() {
       />
 
       <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-        {/* <video autoPlay muted loop playsInline>
-          <source src="/Background3.mp4" type="video/mp4" />
-        </video> */}
-        
+        <Calm3DBackground />
+
         <div className="main-overlay">
           <HeaderContent userName={userName} />
 

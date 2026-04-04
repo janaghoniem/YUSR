@@ -1,7 +1,6 @@
-// SideBar.jsx — With AuraLogo mark, Claude-style, WCAG AA
+// SideBar.jsx
 import React from "react";
 import { Settings, Menu, X, SquarePen, MessageSquare } from "lucide-react";
-import AuraLogo from "./AuraLogo";
 
 const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, currentSessionId }) => {
   return (
@@ -14,14 +13,8 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
       >
         <div className="sidebar-top">
           <div className="logo-area">
-            <AuraLogo
-              size={collapsed ? 26 : 24}
-              color="#FF3D9A"
-              animated={false}
-              aria-label="AURA"
-            />
             {!collapsed && (
-              <span className="logo-wordmark" aria-hidden="true">AURA</span>
+              <span className="logo-wordmark" aria-hidden="true" style={{marginLeft: 10, fontSize: "1.2rem"}}>AURA</span>
             )}
           </div>
           <button

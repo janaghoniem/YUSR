@@ -130,23 +130,21 @@ backend/chroma_db/chroma.sqlite3
 version
 analysis_benchmark.json
 
-# packages file containing multi-root paths
-.packages.generated
-
 # Flutter/Dart/Pub related
 **/doc/api/
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
 **/generated_plugin_registrant.dart
-.packages
-.pub-preload-cache/
-.pub/
-build/
-flutter_*.png
-linked_*.ds
-unlinked.ds
-unlinked_spec.ds
+**/.packages
+**/.pub-preload-cache/
+**/.pub/
+**/build/
+**/flutter_*.png
+**/linked_*.ds
+**/unlinked.ds
+**/unlinked_spec.ds
+
 
 # Android related
 **/android/**/gradle-wrapper.jar
@@ -219,15 +217,4 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
-
-/.venv
-
-**tmpclaude**
-
-
-backend/agents/execution_agent/RAG/analysis
 .venv/
-*.bin
-*.sqlite3-journal
-*.pickle
-backend/agents/execution_agent/strategies/task_memory_db/26dd199e-ccc3-453d-a914-19052bd06a45/index_metadata.pickle

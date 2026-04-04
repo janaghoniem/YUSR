@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:video_player/video_player.dart';
 import '../theme.dart';
@@ -94,7 +95,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       _step++;
     });
 
-    if (_step >= _currentQuestions.length) {
+    if (_step > _currentQuestions.length) {
       Navigator.of(context).pushReplacement(
         PageRouteBuilder(
           pageBuilder: (_, __, ___) => const HomeWrapper(),
@@ -103,9 +104,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           transitionDuration: const Duration(milliseconds: 650),
         ),
       );
+    } else if (_step == _currentQuestions.length) {
+      _announceToScreenReader(_chosenLanguage == 'ar' ? 'إعداد إمكانية الوصول' : 'Accessibility Setup');
+      _stopListening();
     } else if (_step >= 0) {
       _announceToScreenReader(_currentQuestions[_step]);
-      // Wait for transition and then auto-start listening
       Future.delayed(const Duration(milliseconds: 600), _startListening);
     }
   }
@@ -271,10 +274,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     child:
                         _step == -1
                             ? _buildLanguageSelection()
-                            : _buildQuestionDeck(),
+                            : (_step < _currentQuestions.length ? _buildQuestionDeck() : _buildAccessibilityScreen()),
                   ),
                 ),
-                if (_step >= 0) _buildInputBar(),
+                if (_step >= 0 && _step < _currentQuestions.length) _buildInputBar(),
               ],
             ),
           ),
@@ -532,6 +535,64 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       ),
     );
   }
+
+  Widget _buildAccessibilityScreen() {
+    return Center(
+      key: const ValueKey('accessibility_setup'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              header: true,
+              child: AnimatedQuestionText(
+                text: _chosenLanguage == 'ar'
+                  ? "لتمكين AURA من التفاعل يرجى تفعيل إمكانية الوصول."
+                  : "To allow AURA to interact, please enable Accessibility.",
+                isArabic: _chosenLanguage == 'ar',
+              ),
+            ),
+            const SizedBox(height: 48),
+            ElevatedButton(
+              onPressed: () async {
+                try {
+                  const platform = MethodChannel('com.example.automation/service');
+                  await platform.invokeMethod('openAccessibilitySettings');
+                } catch (e) {
+                  debugPrint("Error opening accessibility: ");
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AuraTheme.pink400.withOpacity(0.2),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: const BorderSide(color: AuraTheme.pink400, width: 2),
+                ),
+                elevation: 0,
+              ),
+              child: Text(
+                _chosenLanguage == 'ar' ? 'فتح الإعدادات' : 'Open Settings',
+                style: _f(Colors.white, size: 20, weight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(height: 24),
+            TextButton(
+              onPressed: () => _nextStep(),
+              child: Text(
+                _chosenLanguage == 'ar' ? 'متابعة' : 'Continue',
+                style: _f(AuraTheme.pink400, size: 18),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
 }
 
 class _LangBtn extends StatelessWidget {

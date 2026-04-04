@@ -38,18 +38,14 @@ dependencies:
   video_player: ^2.8.6
 
   
-  camera: ^0.10.5+9
-  permission_handler: ^11.3.0
-  image_picker: ^1.1.2
-  shared_preferences: ^2.2.3
-  # permission_handler: ^11.0.1
-  google_fonts: ^6.2.1
+  
+  google_fonts: 6.1.0
   webview_flutter: ^4.4.2
   
   # For system actions (removed move_to_background due to Android namespace issue)
-  android_intent_plus: 5.3.1
+  android_intent_plus: ^6.0.0
 
-  audioplayers: ^6.0.0
+  audioplayers: any
   flutter_tts: ^4.2.5
   universal_html: ^2.3.0
   speech_to_text: ^7.3.0
@@ -65,8 +61,8 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
 
-# dependency_overrides:
-#   http: ^1.1.0
+dependency_overrides:
+  http: ^1.1.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

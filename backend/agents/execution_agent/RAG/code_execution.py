@@ -423,9 +423,26 @@ class CoordinatorRAGBridge:
     #         TaskResult for coordinator
     #     """
     #     logger.info(f"🔄 Processing task {task.task_id}: {task.ai_prompt[:50]}...")
-    async def execute_action_task(self, task: ActionTask, max_retries: int = 3, enable_cache: bool = False) -> TaskResult:
+    def _extract_template_from_full_code(self, full_code: str) -> str:
+        """
+        Extract the function template from full code (removes __main__ block)
+
+        Args:
+            full_code: Complete generated code with function + __main__
+
+        Returns:
+            Just the function definition (without __main__)
+        """
+        # Find where __main__ starts
+        if 'if __name__ == "__main__":' in full_code:
+            template = full_code.split('if __name__ == "__main__":')[0].strip()
+            return template
+        # If no __main__, return as-is
+        return full_code
+
+    async def execute_action_task(self, task: ActionTask, max_retries: int = 3, enable_cache: bool = True) -> TaskResult:
         logger.info(f"🖥️ Processing DESKTOP task {task.task_id}: {task.ai_prompt[:50]}...")
-        
+
         # Only process action tasks
         if task.target_agent != "action":
             logger.warning(f"⚠️ Task {task.task_id} is not an action task, skipping RAG")
@@ -434,9 +451,15 @@ class CoordinatorRAGBridge:
                 status="failed",
                 error="Not an action task - should be handled by reasoning agent"
             )
-            
-        
-        
+
+        # ========================================================================
+        # STEP 0A: ROUTE TASK TO MODULE (word/excel/powerpoint/general)
+        # ========================================================================
+        from agents.execution_agent.RAG.module_router import ModuleRouter
+        router = ModuleRouter()
+        module = router.route_task(task.ai_prompt)
+        logger.info(f"[ROUTING] Task routed to module: '{module}'")
+
         # Build enhanced query for RAG
         rag_query = self.adapter.build_rag_query(task)
 
@@ -446,91 +469,145 @@ class CoordinatorRAGBridge:
             logger.info(f"[FILE CONTEXT] Injecting active file: {self.last_file_path}")
         elif self.last_file_path and not task.depends_on:
             logger.info(f"[FILE CONTEXT] Skipping file injection - independent new task")
-        
+
         # ========================================================================
-        # STEP 0: CHECK CACHE FIRST (if enabled and available)
+        # STEP 0B: CHECK CACHE FIRST (if enabled) - FILTERED BY MODULE
         # ========================================================================
         if enable_cache and hasattr(self.sandbox, 'action_cache'):
             try:
-                logger.info(f"🔍 Checking cache for task {task.task_id}...")
-                cached_action = self.sandbox.action_cache.search_cache(
-                    rag_query,  # Use enhanced query for better matching
-                    # threshold=cache_threshold
+                logger.info(f"🔍 Checking cache in '{module}' module for task {task.task_id}...")
+                cached_template = self.sandbox.action_cache.search_cache(
+                    query=rag_query,
+                    module=module  # ← SEARCH ONLY IN THIS MODULE
                 )
-                
-                if cached_action:
-                    logger.info(f"✅ CACHE HIT! Similarity: {cached_action['similarity']:.2%}")
-                    logger.info(f"⚡ Skipping RAG + Sandbox - using validated code!")
-                    
-                    # Execute cached code directly (already validated)
-                    import subprocess
-                    import tempfile
-                    import sys
-                    import time
-                    
-                    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
-                        f.write(cached_action['code'])
-                        temp_file = f.name
-                    
+
+                if cached_template and cached_template.get('cache_hit'):
+                    logger.info(f"✅ TEMPLATE CACHE HIT! Similarity: {cached_template['similarity']:.2%}")
+
+                    # Use mini prompt to LLM to just write __main__ with new parameters
+                    from agents.execution_agent.RAG.cache_mini_prompt import generate_cache_hit_mini_prompt, extract_function_name
+
+                    template_code = cached_template['template']
+                    mini_prompt = generate_cache_hit_mini_prompt(
+                        template_code=template_code,
+                        user_query=rag_query,
+                        input_data=None
+                    )
+
+                    logger.info(f"⚡ Using mini prompt to fill template __main__ section...")
+
+                    # Generate ONLY the __main__ section with LLM
                     try:
-                        start_time = time.time()
-                        result = subprocess.run(
-                            [sys.executable, temp_file],
-                            capture_output=True,
-                            text=True,
-                            timeout=30
+                        rag_result = self.rag.generate_code(
+                            mini_prompt,
+                            cache_key=None,  # Don't cache the mini prompt response
+                            start_context_index=0,
+                            num_contexts=1,
+                            screen_state={'active_window': 'N/A', 'process': 'N/A', 'controls': []}
                         )
-                        execution_time = time.time() - start_time
-                        
-                        # Create execution result
-                        from agents.execution_agent.RAG.execution import ExecutionResult, ExecutionStatus
-                        from datetime import datetime
-                        import hashlib
-                        
-                        exec_result = ExecutionResult(
-                            status=ExecutionStatus.SUCCESS if result.returncode == 0 else ExecutionStatus.FAILED,
-                            exit_code=result.returncode,
-                            stdout=result.stdout,
-                            stderr=result.stderr,
-                            execution_time=execution_time,
-                            timestamp=datetime.now().isoformat(),
-                            validation_passed=True,  # Already validated when cached
-                            validation_errors=[],
-                            security_passed=True,    # Already validated when cached
-                            security_violations=[],
-                            code_hash=cached_action['metadata']['code_hash']
-                        )
-                        
-                        logger.info(f"✅ Cached code executed in {execution_time:.3f}s")
-                        
-                        # Convert to TaskResult
-                        return self.adapter.execution_result_to_task_result(task, exec_result)
-                        
-                    except Exception as e:
-                        logger.warning(f"⚠️ Cached code execution failed: {e}")
-                        logger.info("🔄 Falling back to RAG generation...")
-                        # Continue to RAG flow below
-                    finally:
-                        import os
+
+                        main_code = rag_result.get('code', '').strip()
+                        if not main_code:
+                            logger.warning(f"⚠️ Mini prompt did not generate code, falling back to full generation...")
+                            raise Exception("Empty main code from mini prompt")
+
+                        # Extract ONLY the __main__ block (LLM might return full code with function)
+                        if 'if __name__' in main_code:
+                            # Take everything from 'if __name__' onward
+                            parts = main_code.split('if __name__')
+                            main_code = "if __name__" + parts[-1]  # Reconstruct with if __name__
+                        elif not main_code.startswith('if __name__'):
+                            main_code = f"if __name__ == \"__main__\":\n" + main_code
+
+                        # Combine template function with new __main__
+                        # Remove __main__ from cached template if it exists
+                        if 'if __name__' in template_code:
+                            func_def = template_code.split('if __name__')[0].strip()
+                        else:
+                            func_def = template_code.strip()
+
+                        filled_code = f"{func_def}\n\n{main_code}"
+
+                        logger.info(f"📝 Generated __main__ section ({len(main_code)} chars)")
+
+                        # Execute the filled template
+                        import subprocess
+                        import tempfile
+                        import sys
+                        import time
+
+                        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
+                            f.write(filled_code)
+                            temp_file = f.name
+
                         try:
-                            os.unlink(temp_file)
-                        except:
-                            pass
+                            start_time = time.time()
+                            result = subprocess.run(
+                                [sys.executable, temp_file],
+                                capture_output=True,
+                                text=True,
+                                timeout=30
+                            )
+                            execution_time = time.time() - start_time
+
+                            # Create execution result
+                            from agents.execution_agent.RAG.execution import ExecutionResult, ExecutionStatus
+                            from datetime import datetime
+                            import hashlib
+
+                            # Generate code hash
+                            code_hash = hashlib.md5(filled_code.encode()).hexdigest()
+
+                            exec_result = ExecutionResult(
+                                status=ExecutionStatus.SUCCESS if result.returncode == 0 else ExecutionStatus.FAILED,
+                                exit_code=result.returncode,
+                                stdout=result.stdout,
+                                stderr=result.stderr,
+                                execution_time=execution_time,
+                                timestamp=datetime.now().isoformat(),
+                                validation_passed=True,
+                                validation_errors=[],
+                                security_passed=True,
+                                security_violations=[],
+                                code_hash=code_hash
+                            )
+
+                            logger.info(f"✅ Template executed in {execution_time:.3f}s (cache hit reuse)")
+
+                            # Parse [FILE]: from stdout
+                            if exec_result.stdout:
+                                for line in exec_result.stdout.splitlines():
+                                    if line.startswith('[FILE]:'):
+                                        self.last_file_path = line[7:].strip()
+                                        logger.info(f"[FILE CONTEXT] Captured: {self.last_file_path}")
+                                        break
+
+                            return self.adapter.execution_result_to_task_result(task, exec_result)
+
+                        except Exception as e:
+                            logger.warning(f"⚠️ Template execution failed: {e}")
+                            logger.info("🔄 Falling back to full RAG generation...")
+                        finally:
+                            import os
+                            try:
+                                os.unlink(temp_file)
+                            except:
+                                pass
+
+                    except Exception as e:
+                        logger.warning(f"⚠️ Mini prompt generation failed: {e}")
+                        logger.info("🔄 Falling back to full RAG generation...")
+
                 else:
-                    logger.info(f"❌ Cache miss - proceeding with RAG generation")
-                    
+                    logger.info(f"❌ Cache miss in '{module}' module - proceeding with full RAG generation")
+
             except Exception as cache_error:
                 logger.warning(f"⚠️ Cache check failed: {cache_error}")
                 logger.info("🔄 Proceeding with RAG generation...")
-                # Continue to RAG flow below
-        
+
         # ========================================================================
         # CACHE MISS OR DISABLED - FULL RAG + SANDBOX FLOW
         # ========================================================================
-        # from agents.execution_agent.RAG.fast_window_detector import get_current_window
-
-        # Get current screen state BEFORE generating code
-        # With this:
         import pygetwindow as gw
 
         try:
@@ -627,13 +704,18 @@ class CoordinatorRAGBridge:
                     # ============================================================
                     if enable_cache and hasattr(self.sandbox, 'action_cache'):
                         try:
-                            logger.info(f"💾 Caching validated action...")
+                            logger.info(f"💾 Caching validated template in '{module}' module...")
+
+                            # Extract just the function template (without the __main__ block)
+                            template_code = self._extract_template_from_full_code(generated_code)
+
                             self.sandbox.action_cache.store_action(
-                                query=rag_query,  # Use enhanced query for better future matching
-                                code=generated_code,
+                                query=rag_query,
+                                code=template_code,  # Store just the function template
+                                module=module,  # ← STORE WITH MODULE
                                 execution_result=exec_result
                             )
-                            logger.info(f"✅ Action cached successfully")
+                            logger.info(f"✅ Template cached successfully in '{module}' module")
                         except Exception as cache_error:
                             logger.warning(f"⚠️ Failed to cache action: {cache_error}")
                             # Don't fail the task if caching fails
@@ -912,7 +994,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             
             sandbox_config = SandboxConfig(timeout_seconds=30)
             # Try to enable cache, but continue without it if it fails
-            enable_cache = False
+            enable_cache = True
             try:
                 # Test if ChromaDB is available
                 import chromadb
@@ -935,7 +1017,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             except Exception as e:
                 logger.warning(f"⚠️ Failed to initialize with cache: {e}")
                 # Fallback: create without cache
-                sandbox_pipeline = SandboxExecutionPipeline(sandbox_config, enable_cache=False)
+                sandbox_pipeline = SandboxExecutionPipeline(sandbox_config, enable_cache=True)
             
             logger.info("✅ Desktop sandbox pipeline ready")
             

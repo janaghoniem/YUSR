@@ -704,75 +704,80 @@ class ActionCache:
         
         print(f"Action cache initialized: {self.collection.count()} cached actions")
     
-    def search_cache(self, query: str, threshold: float = 0.85) -> Optional[Dict]:
+    def search_cache(self, query: str, module: str = "general", threshold: float = 0.85) -> Optional[Dict]:
         """
-        Search cache for similar action
-        
+        Search cache for similar action in the specified module ONLY
+
         Args:
             query: User's action request
+            module: Module namespace to search ('word', 'excel', 'powerpoint', 'general')
             threshold: Similarity threshold (0.85 = 85% match)
-        
+
         Returns:
-            Cached action dict or None
+            Cached template dict with code for reuse, or None
         """
         # Generate query embedding
         query_embedding = self.embedding_model.encode([query])[0]
-        
-        # Search cache
+
+        # Search cache ONLY in the specified module namespace
         results = self.collection.query(
             query_embeddings=[query_embedding.tolist()],
+            where={"module": module},  # ← FILTER BY MODULE
             n_results=1
         )
-        
+
         if not results['documents'][0]:
+            logger.info(f"[CACHE] No entries found in '{module}' module")
             return None
-        
+
         # Check similarity
         distance = results['distances'][0][0]
         similarity = 1 - distance
-        
+
         if similarity >= threshold:
-            print(f"Cache HIT! Similarity: {similarity:.2%}")
-            
-            # Parse cached data
-            cached_code = results['documents'][0][0]
+            logger.info(f"[CACHE HIT] Module: '{module}', Similarity: {similarity:.2%}")
+
+            # Parse cached template
+            template_code = results['documents'][0][0]
             metadata = results['metadatas'][0][0]
-            
+
             return {
-                'code': cached_code,
+                'template': template_code,  # Template function code
                 'metadata': metadata,
                 'similarity': similarity,
+                'module': module,
                 'cache_hit': True
             }
         else:
-            print(f"Cache MISS. Best match: {similarity:.2%} (threshold: {threshold:.0%})")
+            logger.info(f"[CACHE MISS] Module: '{module}', Best match: {similarity:.2%} (threshold: {threshold:.0%})")
             return None
     
-    def store_action(self, query: str, code: str, execution_result: ExecutionResult):
+    def store_action(self, query: str, code: str, module: str = "general", execution_result: ExecutionResult = None):
         """
-        Store validated action in cache
-        
+        Store validated action template in cache with module metadata
+
         Args:
-            query: User's action request
-            code: Validated Python code
+            query: User's generalized action request (e.g., "open application")
+            code: Validated Python template code (just the function, no params)
+            module: Module namespace ('word', 'excel', 'powerpoint', 'general')
             execution_result: Successful execution result
         """
         # Generate embedding
         embedding = self.embedding_model.encode([query])[0]
-        
+
         # Create unique ID
         import hashlib
-        action_id = hashlib.md5(f"{query}_{datetime.now().isoformat()}".encode()).hexdigest()
-        
-        # Metadata
+        action_id = hashlib.md5(f"{query}_{module}_{datetime.now().isoformat()}".encode()).hexdigest()
+
+        # Metadata with module tag
         metadata = {
             'query': query,
-            'execution_time': str(execution_result.execution_time),
-            'timestamp': execution_result.timestamp,
-            'code_hash': execution_result.code_hash,
+            'module': module,  # ← MODULE TAG
+            'execution_time': str(execution_result.execution_time) if execution_result else "0",
+            'timestamp': execution_result.timestamp if execution_result else datetime.now().isoformat(),
             'status': 'validated'
         }
-        
+
         # Store in cache
         self.collection.add(
             ids=[action_id],
@@ -780,8 +785,8 @@ class ActionCache:
             documents=[code],
             metadatas=[metadata]
         )
-        
-        print(f"Cached action: '{query}' (ID: {action_id[:8]}...)")
+
+        logger.info(f"[CACHE STORE] Module: '{module}' | Query: '{query}' | ID: {action_id[:8]}...")
     
     def get_stats(self) -> Dict:
         """Get cache statistics"""

@@ -1039,8 +1039,34 @@ Generate the task decomposition now:"""
         if not shared_goal:
             shared_goal = str(user_request.get("original_input") or user_request.get("confirmation") or user_request.get("action") or "Complete the requested task").strip()
 
-        for t in task_dicts:
+        for idx, t in enumerate(task_dicts):
             t["goal"] = shared_goal
+
+            extra_params = t.get("extra_params") or {}
+            if not isinstance(extra_params, dict):
+                extra_params = {}
+
+            # Inject the shared top-level goal for downstream mobile execution.
+            if not extra_params.get("overall_goal"):
+                extra_params["overall_goal"] = shared_goal
+            if not extra_params.get("goal"):
+                extra_params["goal"] = shared_goal
+
+            # Best-effort app propagation so dependent mobile steps inherit the app.
+            if not extra_params.get("app_name"):
+                dep_raw = t.get("depends_on")
+                dep_ids = dep_raw if isinstance(dep_raw, list) else ([dep_raw] if dep_raw else [])
+                for dep_id in dep_ids:
+                    for prev in task_dicts[:idx]:
+                        if prev.get("task_id") == dep_id:
+                            prev_app = (prev.get("extra_params") or {}).get("app_name", "")
+                            if prev_app:
+                                extra_params["app_name"] = prev_app
+                                break
+                    if extra_params.get("app_name"):
+                        break
+
+            t["extra_params"] = extra_params
 
         action_tasks = [ActionTask(**task) for task in task_dicts]
 
@@ -1284,6 +1310,25 @@ def create_coordinator_graph():
             current_task = task_queue.get_next_task()
             if not current_task:
                 break
+
+            # Defense-in-depth: ensure dispatched tasks always retain shared goal context.
+            if current_task.extra_params is None:
+                current_task.extra_params = {}
+            if not current_task.extra_params.get("overall_goal"):
+                current_task.extra_params["overall_goal"] = current_task.goal or current_task.ai_prompt
+            if not current_task.extra_params.get("goal"):
+                current_task.extra_params["goal"] = current_task.goal or current_task.ai_prompt
+
+            if not current_task.extra_params.get("app_name") and current_task.depends_on:
+                dep_raw = current_task.depends_on
+                dep_ids = dep_raw if isinstance(dep_raw, list) else [dep_raw]
+                for dep_id in dep_ids:
+                    dep_id = dep_id.strip() if isinstance(dep_id, str) else dep_id
+                    dep_task = next((t for t in state.get("tasks", []) if getattr(t, "task_id", None) == dep_id), None)
+                    dep_app = (getattr(dep_task, "extra_params", {}) or {}).get("app_name") if dep_task else ""
+                    if dep_app:
+                        current_task.extra_params["app_name"] = dep_app
+                        break
             
             # Check dependencies
             if current_task.depends_on:

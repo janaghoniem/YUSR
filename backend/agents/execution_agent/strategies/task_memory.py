@@ -1019,6 +1019,7 @@ class RecipeStep:
     expect_screen_change: bool
     similarity:       float
     success_count:    int
+    failure_count:    int = 0
 
 
 @dataclass
@@ -1244,7 +1245,13 @@ def resolve_element(
 # ═══════════════════════════════════════════════════════════════════════════
 import re as _re
 
-def _keyword_rerank(self, query_step: str, recipes: List[RecipeStep], query_goal: str = "") -> List[RecipeStep]:
+def _keyword_rerank(
+    self,
+    query_step: str,
+    recipes: List[RecipeStep],
+    query_goal: str = "",
+    query_app: Optional[str] = None,
+) -> List[RecipeStep]:
     """
     Rerank by blending three components:
       1. raw cosine similarity (0.6 weight)
@@ -1292,16 +1299,21 @@ def _keyword_rerank(self, query_step: str, recipes: List[RecipeStep], query_goal
         # Goal-context penalty for dangerous wrong-purpose matches.
         if (
             len(q_words_goal) >= 3
-            and goal_overlap < 0.12
-            and r.similarity > 0.85
+            and goal_overlap < 0.15
+            and r.similarity > 0.80
         ):
-            blended = blended * 0.75
+            blended = blended * 0.65
+
+        if query_app and r.app and r.app.lower() != query_app.lower() and r.similarity < 0.95:
+            blended = blended * 0.70
         
         # Hard penalty only for semantically weak zero-overlap matches
         if step_overlap == 0 and len(q_words_step) >= 2 and r.similarity < 0.82:
             blended = min(blended, 0.65)
         
-        reranked.append(dataclasses.replace(r, similarity=blended))
+        ucb = self._ucb_reliability(r)
+        blended_adjusted = blended * ucb
+        reranked.append(dataclasses.replace(r, similarity=blended_adjusted))
     return sorted(reranked, key=lambda x: -x.similarity)
 
 class TaskMemory:
@@ -1373,9 +1385,28 @@ class TaskMemory:
             show_progress_bar=False,
         ).tolist()
 
-    def _keyword_rerank(self, query_step: str, recipes: List[RecipeStep], query_goal: str = "") -> List[RecipeStep]:
+    def _keyword_rerank(
+        self,
+        query_step: str,
+        recipes: List[RecipeStep],
+        query_goal: str = "",
+        query_app: Optional[str] = None,
+    ) -> List[RecipeStep]:
         """Re-rank retrieved recipes by keyword overlap + semantic similarity + goal alignment."""
-        return _keyword_rerank(self, query_step, recipes, query_goal)
+        return _keyword_rerank(self, query_step, recipes, query_goal, query_app)
+
+    def _ucb_reliability(self, record: RecipeStep) -> float:
+        """
+        Beta-posterior style reliability multiplier for retrieval confidence.
+        Returns multiplier in [0.6, 1.15].
+        """
+        s = int(getattr(record, "success_count", 0) or 0)
+        f = int(getattr(record, "failure_count", 0) or 0)
+        n = s + f
+        if n == 0:
+            return 1.0
+        reliability = (s + 1) / (n + 2)
+        return 0.6 + 0.55 * reliability
 
     # ── Dataset loading ────────────────────────────────────────────────────
 
@@ -1444,6 +1475,7 @@ class TaskMemory:
                     "typed_value":      rec.get("typed_value") or "",
                     "expect_screen_change": str(rec.get("expect_screen_change", True)),
                     "success_count":    1,
+                    "failure_count":    0,
                     "demonstrated":     0,
                 })
 
@@ -1505,7 +1537,7 @@ class TaskMemory:
         # Re-rank by keyword overlap to prevent topically-similar but
         # action-dissimilar hits from staying at the top.
         if recipes:
-            recipes = self._keyword_rerank(step_instruction, recipes, overall_goal)
+            recipes = self._keyword_rerank(step_instruction, recipes, overall_goal, app)
 
         if not recipes:
             logger.debug("[CACHE] query: no results at all → band=none")
@@ -1608,7 +1640,7 @@ class TaskMemory:
         distances = results.get("distances", [[]])[0]
 
         for rid, meta, dist in zip(ids, metas, distances):
-            similarity = max(0.0, 1.0 - float(dist))
+            similarity = max(0.0, min(1.0, 1.0 - float(dist)))
             try:
                 selectors = json.loads(meta.get("selectors") or "[]")
             except (json.JSONDecodeError, TypeError):
@@ -1628,6 +1660,7 @@ class TaskMemory:
                 expect_screen_change = meta.get("expect_screen_change", "True") == "True",
                 similarity       = similarity,
                 success_count    = int(meta.get("success_count", 1)),
+                failure_count    = int(meta.get("failure_count", 0) or 0),
             ))
 
         return recipes
@@ -1648,6 +1681,7 @@ class TaskMemory:
         expect_screen_change: bool          = True,
         demonstrated:        int            = 0,
         success_count:       int            = 1,
+        failure_count:       int            = 0,
     ) -> Optional[str]:
         """
         Store one step into ChromaDB.
@@ -1679,6 +1713,7 @@ class TaskMemory:
                     "typed_value":      typed_value or "",
                     "expect_screen_change": str(expect_screen_change),
                     "success_count":    success_count,
+                    "failure_count":    failure_count,
                     "demonstrated":     demonstrated,
                 }],
             )
@@ -1708,6 +1743,24 @@ class TaskMemory:
             )
         except Exception as e:
             logger.debug(f"[CACHE] increment_success failed: {e}")
+
+    def mark_failure(self, record_id: str) -> None:
+        """Increment failure_count for a cached step that led to a bad outcome."""
+        if not record_id or self._col is None:
+            return
+        try:
+            existing = self._col.get(ids=[record_id], include=["metadatas"])
+            if not existing.get("ids"):
+                return
+            meta = dict(existing["metadatas"][0])
+            meta["failure_count"] = int(meta.get("failure_count", 0) or 0) + 1
+            self._col.update(ids=[record_id], metadatas=[meta])
+            logger.debug(
+                f"[CACHE] failure_count++ id={record_id[:8]} "
+                f"→ count={meta['failure_count']}"
+            )
+        except Exception as e:
+            logger.warning(f"[CACHE] mark_failure failed: {e}")
 
     # ── Hint builder ───────────────────────────────────────────────────────
 

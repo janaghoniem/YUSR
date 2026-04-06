@@ -63,9 +63,9 @@ desktop.ini
 
 # Project specific
 audit.json
-*.png
-*.jpg
-*.jpeg
+# *.png
+# *.jpg
+# *.jpeg
 
 # Temporary files
 *.tmp

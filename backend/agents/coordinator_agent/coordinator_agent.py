@@ -123,6 +123,51 @@ async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, me
     except Exception as e:
         logger.warning(f"⚠️ save_checkpoint_compat failed (non-fatal): {e}")
         return False
+    
+# ── F3: Coordinator confirmation sanitiser ────────────────────────────────────
+def sanitize_confirmation_for_prompt(text: str) -> str:
+    """
+    Sanitize the confirmation string before embedding it in the coordinator
+    LLM prompt. Blocks chained injection (A6) where attacker embeds
+    'IMPORTANT SYSTEM NOTE' style instructions inside response_text which
+    then get read as commands by the coordinator LLM.
+    """
+    if not text:
+        return text
+
+    COORDINATOR_INJECTION_MARKERS = [
+        "important system note",
+        "system note:",
+        "you must also add",
+        "add a second task",
+        "add a task to",
+        "also list all",
+        "ignore previous",
+        "disregard your",
+        "forget everything",
+        "set response_text",
+        "<|system|>",
+        "<|user|>",
+        "ignore previous formatting",
+        "ignore previous formatting rules",
+        "using pathlib",
+        "using shutil",
+    ]
+
+    text_lower = text.lower()
+    for marker in COORDINATOR_INJECTION_MARKERS:
+        if marker in text_lower:
+            logger.warning(
+                f"🚫 F3: Coordinator injection marker detected: '{marker}' — "
+                f"stripping to first sentence only"
+            )
+            idx = text_lower.index(marker)
+            safe_part = text[:idx].strip().rstrip('.,;')
+            logger.warning(f"   Safe part kept: '{safe_part[:80]}'")
+            return safe_part if safe_part else "Task request received."
+
+    return text
+
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -1171,6 +1216,40 @@ def create_coordinator_graph():
             preferences_context = pref_mgr.get_relevant_preferences(
                 str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
             )
+
+            # ── Memory Fix 3: Strip credentials from coordinator context ──────────
+            # T-M3/T-M4: Coordinator was embedding stored passwords into task
+            # decomposition prompt, potentially passing them to execution agents.
+            _CRED_MARKERS_COORD = [
+                "password", "passwd", "pwd", "secret",
+                "api key", "apikey", "api_key", "token",
+                "private key", "passphrase",
+            ]
+            if isinstance(preferences_context, list):
+                _orig_count = len(preferences_context)
+                preferences_context = [
+                    p for p in preferences_context
+                    if not any(m in str(p).lower() for m in _CRED_MARKERS_COORD)
+                ]
+                _blocked = _orig_count - len(preferences_context)
+                if _blocked > 0:
+                    logger.warning(
+                        f"🚫 Memory Fix 3: Removed {_blocked} credential memory "
+                        f"item(s) from coordinator context"
+                    )
+            elif isinstance(preferences_context, str):
+                _clean_lines = []
+                for _line in preferences_context.split('\n'):
+                    if any(m in _line.lower() for m in _CRED_MARKERS_COORD):
+                        logger.warning(
+                            f"🚫 Memory Fix 3: Removed credential line from context: "
+                            f"'{_line[:60]}'"
+                        )
+                    else:
+                        _clean_lines.append(_line)
+                preferences_context = '\n'.join(_clean_lines)
+            # ─────────────────────────────────────────────────────────────────────
+
         except Exception as e:
             logger.warning(f"⚠️ Could not retrieve preferences: {e}")
             preferences_context = "No user preferences available"
@@ -1736,6 +1815,19 @@ def create_coordinator_graph():
             context_for_undo={"original_request": original_request, "completed_tasks": [t.task_id for t in state.get("tasks", [])]}
         )
         
+        # ── DiD Layer 3: Output Validation ────────────────────────────────────
+        try:
+            from agents.security.output_validator import validate_output
+            _val = validate_output(response_text, context="coordinator")
+            if _val.was_modified:
+                logger.warning(
+                    f"🔒 Layer 3: Output violations detected: {_val.violations}"
+                )
+            response_text = _val.clean_text
+        except Exception as _val_err:
+            logger.warning(f"⚠️ Layer 3 output validation failed (non-fatal): {_val_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         response_msg = AgentMessage(
             message_type=MessageType.TASK_RESPONSE,
             sender=AgentType.COORDINATOR,
@@ -2101,8 +2193,16 @@ async def start_coordinator_agent(broker_instance):
                 language=user_language
             )
 
+        # ── F3: Sanitise confirmation string before coordinator LLM sees it ──
+        _raw_payload = dict(message.payload)
+        if "confirmation" in _raw_payload:
+            _raw_payload["confirmation"] = sanitize_confirmation_for_prompt(
+                _raw_payload.get("confirmation", "")
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         state_input = {
-            "input": message.payload,
+            "input": _raw_payload,
             "session_id": session_id,
             "original_message_id": http_request_id,
             "user_id": user_id,
@@ -2130,6 +2230,18 @@ async def start_coordinator_agent(broker_instance):
 
             try:
                 result = await coordinator_graph.ainvoke(state_input, config)
+            except asyncio.TimeoutError:
+                # ── Memory Fix 5: Queue recovery on timeout (T-M4 DoS fix) ─────
+                # V-SYS-01: The coordinator queue can deadlock if a task hangs,
+                # blocking all subsequent requests. Reset the queue on timeout so
+                # the server recovers without a manual restart.
+                task_queue.stop()
+                task_queue.reset()
+                logger.warning(
+                    "🔄 Memory Fix 5: Queue cleared after task timeout — "
+                    "server remains operational"
+                )
+                raise
             except KeyError as _ke:
                 if str(_ke) == "'step'":
                     logger.warning(

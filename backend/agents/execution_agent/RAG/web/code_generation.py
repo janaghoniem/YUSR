@@ -487,6 +487,67 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 - print("EXECUTION_SUCCESS")
 
 ================================================================
+❗ MANDATORY PATTERN: GOOGLE SEARCHES
+================================================================
+IF the user asks to "search for X on Google" or "google X" or similar:
+
+⚠️ EASIEST METHOD (RECOMMENDED): Use the pre-built helper function
+The execution environment provides: google_search_safe(query_string)
+
+try:
+    result = await google_search_safe('SEARCH_QUERY_HERE')
+    if result:
+        print("EXECUTION_SUCCESS")
+    else:
+        print("FAILED: Search failed")
+except Exception as e:
+    print(f"FAILED: {e}")
+
+ALTERNATIVELY (if you need to customize): Follow this exact pattern (no shortcuts):
+
+import random  # ← ADD THIS AT TOP IF NOT PRESENT
+
+try:
+    # 1. Wait before touching Google (looks human) - random jitter
+    delay = random.uniform(2.5, 3.5)
+    await page.wait_for_timeout(int(delay * 1000))
+    
+    # 2. Navigate to Google homepage FIRST (builds referrer)
+    await page.goto('https://www.google.com', wait_until='networkidle')
+    await page.wait_for_timeout(random.randint(1500, 2000))
+    
+    # 3. Check for bot detection
+    error_check = await page.locator('text="having trouble"').count()
+    if error_check > 0:
+        print("FAILED: Bot detection triggered")
+        return
+    
+    # 4. Find and fill search box with human-like typing
+    await page.wait_for_selector('input[name="q"]', state='visible', timeout=5000)
+    search_box = await page.query_selector('input[name="q"]')
+    
+    # Type character by character with small delays (human typing)
+    search_text = 'SEARCH_QUERY_HERE'
+    for char in search_text:
+        await page.fill('input[name="q"]', search_text[:search_text.index(char)+1])
+        await page.wait_for_timeout(random.randint(80, 150))
+    
+    # Pause after typing (humans think before searching)
+    await page.wait_for_timeout(random.randint(1200, 1800))
+    
+    # 5. Submit search with keyboard (looks more human, avoids bot detection)
+    await page.keyboard.press('Enter')
+    await page.wait_for_load_state('networkidle', timeout=15000)
+    await page.wait_for_timeout(random.randint(500, 800))
+    
+    print("EXECUTION_SUCCESS")
+except Exception as e:
+    print(f"FAILED: {e}")
+
+STRONGLY PREFER the google_search_safe() helper - it's battle-tested and handles all edge cases.
+Every delay and randomization is necessary to avoid Google's bot detection.
+
+================================================================
 STRICT MODE RULE — CRITICAL
 ================================================================
 Playwright STRICT MODE raises an error if a locator matches MORE THAN ONE element.
@@ -561,6 +622,46 @@ NEXT/CONTINUE BUTTON SELECTORS (always use .first):
   button:has-text("Sign in")  |  div[role="button"]:has-text("Next")
 
 ================================================================
+FINDING ELEMENTS BY VISUAL APPEARANCE (FIX 2)
+================================================================
+When elements lack text or standard attributes, use visual/color-based locators.
+Page semantics now includes: color, backgroundColor, title, data-test-id, data-qa.
+
+COLOR-BASED FINDING:
+  # Find red button by inline style
+  red_button = page.locator('button[style*="background-color: red"], button[style*="color: rgb(255, 0, 0)"]').first
+  await red_button.click()
+
+  # Find by computed color (works with CSS classes too)
+  # Use element position if color info provided in semantics
+  await page.locator('button').filter(has=page.locator('[style*="red"]')).first.click()
+
+TITLE ATTRIBUTE FINDING:
+  # PDF reader button with title
+  pdf_btn = page.locator('button[title*="PDF"], button[title*="pdf"], [title*="Read PDF"]').first
+  await pdf_btn.scroll_into_view()
+  await pdf_btn.click()
+
+DATA-* ATTRIBUTE FINDING:
+  # Use data-test-id, data-qa, data-automation for QA/testing attributes
+  await page.locator('[data-test-id="submit-button"], [data-qa="send"]').first.click()
+  await page.locator('[data-automation*="download"]').first.click()
+
+ARIA-LABEL ON SVG/ICONS:
+  # SVG icons often only have aria-label
+  share_btn = page.locator('svg[aria-label*="Share"], button[aria-label*="Share"]').first
+  await share_btn.click()
+
+  # Parent element aria-label
+  await page.locator('[aria-label*="More options"], [aria-label*="Menu"]').first.click()
+
+COORDINATE FALLBACK (if element location info in semantics):
+  # Use page.locator(selector).first.bounding_box() to get coordinates
+  bbox = await page.locator('button:has-text("Red")').first.bounding_box()
+  if bbox:
+      await page.mouse.click(bbox['x'] + bbox['width']/2, bbox['y'] + bbox['height']/2)
+
+================================================================
 CONTENTEDITABLE FILL PATTERN
 ================================================================
 Gmail body, Outlook, Notion, rich-text editors use <div contenteditable>.
@@ -625,6 +726,105 @@ except Exception as e:
     print(f"FAILED: {e}")
 ```
 
+TEXT EXTRACTION & RETURN VALUES (FIX 3)
+================================================================
+Generatedcode return values are NOW CAPTURED and exposed as 'text_extracted'.
+Return text content to retrieve and surface it through the pipeline.
+
+TEXT EXTRACTION PATTERN:
+  try:
+      # Extract text from element(s)
+      text = await page.locator('div.message').first.text_content()
+      # Return extracted text
+      return text
+  except Exception as e:
+      print(f"FAILED: {e}")
+
+EXTRACT MULTIPLE VALUES (return as dict/list):
+  try:
+      title = await page.locator('h1').first.text_content()
+      body = await page.locator('article').first.text_content()
+      # Return dict/list - will be captured
+      return {'title': title, 'body': body}
+  except Exception as e:
+      print(f"FAILED: {e}")
+
+COPY TO CLIPBOARD (if needed):
+  try:
+      await page.evaluate('''
+          () => {
+              const text = document.querySelector('div.message').textContent;
+              navigator.clipboard.writeText(text);
+          }
+      ''')
+      return "Text copied to clipboard"
+  except Exception as e:
+      print(f"FAILED: {e}")
+
+NOTE: Returned values automatically captured; no need for print statements.
+
+================================================================
+BOT DETECTION EVASION (FIX 4)
+================================================================
+Browser is configured to run in HEADED mode (visible window), which is critical for Google.
+
+BROWSER MODE REQUIREMENT:
+  ⚠️ CRITICAL: This browser runs in HEADED (not headless) mode
+  Google detects headless/automation instantly — headed mode is essential
+
+ANTI-DETECTION SETUP:
+- Removed --enable-automation flag (no longer signals browser is automated)
+- Removed --disable-plugins flag (keeps PDF plugin, looks natural)
+- Referer headers set naturally (omitted on first-party, preserved on cross-site)
+- Browser fingerprint randomized (user agent, viewport, timezone)
+
+GOOGLE SEARCH SAFETY — CRITICAL FOR BOT EVASION:
+  # Step 1: Wait before touching Google (simulate human thinking)
+  await page.wait_for_timeout(2000)
+  
+  # Step 2: Navigate to Google homepage FIRST (builds proper referrer context)
+  await page.goto('https://www.google.com', wait_until='networkidle')
+  await page.wait_for_timeout(1500)  # Humans don't search instantly
+  
+  # Step 3: Check for bot detection error page
+  error_page = await page.locator('text="having trouble accessing"').count()
+  if error_page > 0:
+      print("FAILED: Google bot detection triggered - try again later with more delays")
+      return
+  
+  # Step 4: Wait for search box and type slowly
+  await page.wait_for_selector('input[name="q"]', state='visible', timeout=5000)
+  await page.fill('input[name="q"]', 'blush')
+  await page.wait_for_timeout(1000)  # Humans pause after typing
+  
+  # Step 5: Submit search with keyboard (looks more human, avoids bot detection)
+  await page.keyboard.press('Enter')
+  await page.wait_for_load_state('networkidle')
+  await page.wait_for_timeout(800)
+
+ALTERNATIVE (if search box already focused):
+  # If already on Google search page, use keyboard
+  await page.fill('input[name="q"]', 'blush')
+  await page.wait_for_timeout(1000)
+  await page.keyboard.press('Enter')
+  await page.wait_for_load_state('networkidle')
+
+GENERAL NAVIGATION SAFETY:
+  # Add substantial delays between rapid clicks (looks human)
+  await page.wait_for_timeout(1000)
+  await page.locator('button').first.click()
+  await page.wait_for_timeout(1200)
+  
+  # For Google specifically: always wait 1-2+ seconds between any interaction
+
+FORM SUBMISSION PATTERN (non-Google):
+  # For any form (not Google):
+  await page.fill('input[type="text"]', 'value')
+  await page.wait_for_timeout(800)
+  await page.keyboard.press('Enter')
+  await page.wait_for_load_state('networkidle')
+
+================================================================
 CRITICAL RULES:
 1. Generate ONLY the action for THIS step (unless multi-step login — do full flow)
 2. NEVER import playwright
@@ -638,6 +838,9 @@ CRITICAL RULES:
 10. For Gmail send — ALWAYS use Control+Enter keyboard shortcut
 11. For Gmail body — ALWAYS use contenteditable locator, NOT input selectors
 12. For login with email+password — generate FULL multi-step flow with wait_for_selector
+13. For visual element finding — use color/title/data-* attributes per FIX 2
+14. For text extraction — return text directly; it will be captured as 'text_extracted' per FIX 3
+15. Avoid rapid navigation; add small waits to evade bot detection (FIX 4)
 """
 
     def _parse_response(self, response: str, contexts: List[Dict]) -> Dict:

@@ -12,6 +12,12 @@ yarn-error.log*
 .env
 .DS_Store
 
+# Credentials (NEVER commit these files)
+google_accounts.py
+*_accounts.py
+google_state.json
+browser_state*.json
+
 # Electron
 /out
 /electron-builder.yml

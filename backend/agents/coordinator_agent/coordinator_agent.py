@@ -1804,7 +1804,9 @@ def create_coordinator_graph():
             logger.warning(f"⚠️ Language Agent message generation failed, using fallback: {e}")
 
         # ── Safe fallback if Language Agent unavailable ───────────────────────
+        used_fallback = False
         if not response_text:
+            used_fallback = True
             if success_count == total_count and total_count > 0:
                 response_text = (
                     f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
@@ -1824,29 +1826,30 @@ def create_coordinator_graph():
                     "Task could not be completed. Please try again."
                 )
 
-        # Build follow-up question for read-aloud offer (appended to response)
+        # Build follow-up question for read-aloud offer (only if fallback used)
         follow_up_question = None
-        if success_count == 0:
-            follow_up_question = (
-                "المهمة ما كملتش. تحب أحاول تاني؟"
-                if is_arabic else
-                "The task didn't complete. Would you like me to try again?"
-            )
-        elif success_count < total_count:
-            follow_up_question = (
-                "تم التنفيذ جزئيًا. تحب أحاول أكمل الخطوات اللي فشلت؟"
-                if is_arabic else
-                "It was only partially completed. Would you like me to retry the failed steps?"
-            )
-        elif has_reasoning_content and len(full_content) > 200 and not follow_ups:
-            follow_up_question = (
-                "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
-                if is_arabic else
-                "Would you like me to read the results out loud or explain them briefly?"
-            )
+        if used_fallback:
+            if success_count == 0:
+                follow_up_question = (
+                    "المهمة ما كملتش. تحب أحاول تاني؟"
+                    if is_arabic else
+                    "The task didn't complete. Would you like me to try again?"
+                )
+            elif success_count < total_count:
+                follow_up_question = (
+                    "تم التنفيذ جزئيًا. تحب أحاول أكمل الخطوات اللي فشلت؟"
+                    if is_arabic else
+                    "It was only partially completed. Would you like me to retry the failed steps?"
+                )
+            elif has_reasoning_content and len(full_content) > 200 and not follow_ups:
+                follow_up_question = (
+                    "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
+                    if is_arabic else
+                    "Would you like me to read the results out loud or explain them briefly?"
+                )
 
-        if follow_up_question:
-            response_text = f"{response_text} {follow_up_question}"
+            if follow_up_question:
+                response_text = f"{response_text} {follow_up_question}"
 
         # Determine response type
         if success_count == 0:

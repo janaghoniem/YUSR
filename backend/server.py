@@ -2,6 +2,14 @@ import asyncio
 import logging
 import os
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+# Configure logging FIRST before any other code
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 import base64
 import tempfile
 import time
@@ -83,14 +91,7 @@ context_snapshots: dict[str, ContextSnapshot] = {}
 
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# ── Suppress noisy device-polling / HTTP-request logs ──
+# Suppress noisy device-polling / HTTP-request logs
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 

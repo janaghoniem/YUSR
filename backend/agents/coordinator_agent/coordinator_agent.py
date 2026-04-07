@@ -1318,19 +1318,30 @@ def create_coordinator_graph():
                     }
                     logger.info(f"📍 Browser state saved: {extracted_url}")
             
-            if result.content:
+            # ✅ CAPTURE RICHEST AVAILABLE OUTPUT FOR CROSS-AGENT DATA SHARING
+            # Prefer extracted_data (structured) over plain content when available
+            output_to_store = None
+            
+            if hasattr(result, 'extracted_data') and result.extracted_data:
+                # Web extraction result - prefer rich structured data
+                output_to_store = json.dumps(result.extracted_data) if isinstance(result.extracted_data, dict) else str(result.extracted_data)
+                logger.info(f"📊 Storing extracted_data from {current_task.task_id} (structured)")
+            elif result.content:
+                # Plain text content
                 cleaned_content = result.content.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
                 #hala edit ashan el web
                 cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
-                # task_outputs[current_task.task_id] = result.content
-                            # Only store if there's actual content
                 if cleaned_content:
-                    task_outputs[current_task.task_id] = cleaned_content
-                    logger.info(f"💾 Stored output for {current_task.task_id}")
-                    logger.info(f"   Length: {len(cleaned_content)} chars")
-                    logger.info(f"   Preview: {cleaned_content[:200]}...")
-                else:
-                    logger.warning(f"⚠️ Task {current_task.task_id} produced empty output after cleaning")
+                    output_to_store = cleaned_content
+                    logger.info(f"💾 Storing cleaned content from {current_task.task_id}")
+            
+            if output_to_store:
+                task_outputs[current_task.task_id] = output_to_store
+                logger.info(f"💾 Stored output for {current_task.task_id}")
+                logger.info(f"   Length: {len(output_to_store)} chars")
+                logger.info(f"   Preview: {output_to_store[:200]}...")
+            else:
+                logger.warning(f"⚠️ Task {current_task.task_id} produced empty output")
 
             event = _extract_execution_clarification(current_task, result)
             if event:

@@ -552,6 +552,7 @@ class OnboardingData(BaseModel):
     user_id: str
     username: str
     password: str
+    email: str = ""
     introduction: str
     preferences: dict
 
@@ -590,6 +591,7 @@ async def create_account(data: OnboardingData):
         user_doc = {
             "user_id": data.user_id,
             "username": data.username,
+            "email": data.email,
             "password_hash": hashed_pw,
             "introduction": data.introduction,
             "preferences": data.preferences,
@@ -653,7 +655,7 @@ async def check_username(username: str):
         return {"available": not exists}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 
 
 """
@@ -1989,6 +1991,88 @@ async def cleanup_user_data(user_id: str):
         raise HTTPException(status_code=500, detail=str(e)) 
     
 
+@app.get("/user/profile")
+async def get_user_profile(user_id: str):
+    """Get user profile (name, email)"""
+    try:
+        from pymongo import MongoClient
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+        user = db["users"].find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {
+            "status": "ok",
+            "username": user.get("username", ""),
+            "email": user.get("email", ""),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class UpdateProfileData(BaseModel):
+    user_id: str
+    username: str = ""
+    email: str = ""
+
+
+@app.put("/user/profile")
+async def update_user_profile(data: UpdateProfileData):
+    """Update user name and/or email"""
+    try:
+        from pymongo import MongoClient
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["aura_db"]
+
+        update_fields = {}
+        if data.username:
+            # Check uniqueness if username is changing
+            existing = db["users"].find_one({"username": data.username, "user_id": {"$ne": data.user_id}})
+            if existing:
+                raise HTTPException(status_code=409, detail="Username already taken")
+            update_fields["username"] = data.username
+        if data.email is not None:
+            update_fields["email"] = data.email
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        result = db["users"].update_one(
+            {"user_id": data.user_id},
+            {"$set": update_fields}
+        )
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {"status": "ok", "updated": update_fields}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
+@app.delete("/chats/{session_id}")
+async def delete_chat(session_id: str, user_id: str):
+    """Delete a specific chat session and all its messages"""
+    try:
+        from pymongo import MongoClient
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["yusr_db"]
+
+        result = db["language_agent_conversations"].delete_one(
+            {"session_id": session_id, "user_id": user_id}
+        )
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Chat not found or access denied")
+
+        return {"status": "ok", "deleted_session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 if __name__ == "__main__":
     import uvicorn
     

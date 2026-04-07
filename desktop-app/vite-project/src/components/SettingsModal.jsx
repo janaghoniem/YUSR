@@ -6,11 +6,13 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
   const [activeSection, setActiveSection] = useState("profile");
   const [profileData, setProfileData] = useState({
     username: initialName,
-    email: "user@example.com",
+    email: "",
     theme: "dark",
     language: "en",
     voice: initialVoice,
   });
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileStatus, setProfileStatus] = useState("");
   
   // ✅ Long-term memory (preferences) stats
   const [memoryStats, setMemoryStats] = useState({
@@ -33,6 +35,27 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
       fetchMemoryStats();
     }
   }, [activeSection]);
+
+// Load real profile data on mount
+  useEffect(() => {
+    const loadProfile = async () => {
+      try {
+        const userId = localStorage.getItem("userId") || "test_user";
+        const res = await fetch(`http://localhost:8000/user/profile?user_id=${userId}`);
+        if (res.ok) {
+          const data = await res.json();
+          setProfileData(prev => ({
+            ...prev,
+            username: data.username || prev.username,
+            email: data.email || "",
+          }));
+        }
+      } catch (e) {
+        console.error("Failed to load profile:", e);
+      }
+    };
+    loadProfile();
+  }, []);
 
   // ✅ ADD THIS AT THE TOP OF THE FILE (after imports, before component)
   const API_BASE_URL = "";
@@ -135,10 +158,43 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
     setProfileData({ ...profileData, [field]: value });
   };
 
-  const handleSave = () => {
-    console.log("Settings saved:", { profileData });
-    onSave(profileData);
-    onClose();
+
+  const handleSave = async () => {
+    setProfileLoading(true);
+    setProfileStatus("");
+    try {
+      const userId = localStorage.getItem("userId") || "test_user";
+      const res = await fetch("http://localhost:8000/user/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: userId,
+          username: profileData.username,
+          email: profileData.email,
+        }),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        setProfileStatus(`❌ ${result.detail || "Update failed"}`);
+        setProfileLoading(false);
+        return;
+      }
+      // Update localStorage with new username
+      if (profileData.username) {
+        localStorage.setItem("userName", profileData.username);
+        console.log("[SettingsModal] Saved username to localStorage:", profileData.username);
+      }
+      setProfileStatus("✅ Profile saved successfully");
+      
+      console.log("[SettingsModal] Calling onSave with:", profileData);
+      onSave(profileData);
+      
+      setTimeout(onClose, 800);
+    } catch (e) {
+      setProfileStatus(`❌ ${e.message}`);
+    } finally {
+      setProfileLoading(false);
+    }
   };
 
   return (
@@ -474,9 +530,14 @@ const SettingsModal = ({ onClose, onSave, onLogout, initialName = "User", initia
               </div>
             )}
 
+            {profileStatus && (
+              <div style={{ padding: "10px", fontSize: "13px", color: "rgba(255,255,255,0.9)" }}>
+                {profileStatus}
+              </div>
+            )}
             <div className="settings-actions">
-              <button className="settings-btn-save" onClick={handleSave}>
-                Save Changes
+              <button className="settings-btn-save" onClick={handleSave} disabled={profileLoading}>
+                {profileLoading ? "Saving..." : "Save Changes"}
               </button>
               <button className="settings-btn-cancel" onClick={onClose}>
                 Cancel

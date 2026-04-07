@@ -482,6 +482,23 @@ async def execute_action_on_device(
         elif ga == "BACK":
             action_data["action_type"] = "navigate_back"
 
+    # Swipe diagnostics to verify gesture direction mapping
+    if action_data.get("action_type") == "swipe":
+        sxp = float(action_data.get("start_x_percent", 50) or 50)
+        syp = float(action_data.get("start_y_percent", 80) or 80)
+        exp = float(action_data.get("end_x_percent", 50) or 50)
+        eyp = float(action_data.get("end_y_percent", 20) or 20)
+        w = int(action_data.get("screen_width", 1080) or 1080)
+        h = int(action_data.get("screen_height", 2340) or 2340)
+        sx = int(w * sxp / 100)
+        sy = int(h * syp / 100)
+        ex = int(w * exp / 100)
+        ey = int(h * eyp / 100)
+        logger.info(
+            f"[BRIDGE] swipe: ({sxp}%, {syp}%) → ({exp}%, {eyp}%) | "
+            f"abs: ({sx},{sy}) → ({ex},{ey}) | direction={'UP' if ey < sy else 'DOWN'}"
+        )
+
     # Convert navigate_home to goToHome for the action server
     if action_data.get("action_type") == "navigate_home":
         logger.debug(f"🏠 navigate_home request - queueing as goToHome for device: {device_id}")

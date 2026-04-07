@@ -65,7 +65,11 @@ function App() {
   const [deviceType, setDeviceType] = useState("desktop");
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("ttsVoice") || "Gacrux");
   const [screenSize, setScreenSize] = useState("desktop");
-  const [userName, setUserName] = useState("User");
+  const [userName, setUserName] = useState(() => {
+    const stored = localStorage.getItem("userName");
+    console.log("[App] Initializing userName from localStorage:", stored);
+    return stored || "User";
+  });
   const [thinkingSteps, setThinkingSteps] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
   // True when server-provided SSE thinking stream is connected
@@ -381,6 +385,17 @@ function App() {
   //     setUserName(savedName);
   //   }
   // }, []);
+
+  // Add this after your other useEffects (around line 120-150, before the WebSocket useEffect)
+  useEffect(() => {
+    if (authState === "app") {
+      const storedName = localStorage.getItem("userName");
+      if (storedName && storedName !== userName) {
+        console.log("[App] Syncing userName after auth change:", storedName);
+        setUserName(storedName);
+      }
+    }
+  }, [authState]);
 
   /* ---------- LOAD CHAT LIST ---------- */
   useEffect(() => {
@@ -1002,12 +1017,17 @@ function App() {
     setShowSettings(!showSettings);
   };
 
+
+  // In App.jsx - Update handleSettingsSave function
   const handleSettingsSave = (profileData) => {
     console.log("[Settings] Saving profile:", profileData);
-    localStorage.setItem("userName", profileData.username);
-    setUserName(profileData.username);
-
-    // Persist TTS voice if provided
+    console.log("[Settings] Current userName before update:", userName);
+    
+    if (profileData.username) {
+      localStorage.setItem("userName", profileData.username);
+      setUserName(profileData.username);
+      console.log("[Settings] Updated userName to:", profileData.username);
+    }
     if (profileData.voice) {
       localStorage.setItem("ttsVoice", profileData.voice);
       setTtsVoice(profileData.voice);
@@ -1016,12 +1036,23 @@ function App() {
 
 
   /* ---------- ONBOARDING COMPLETE ---------- */
-  const handleOnboardingComplete = ({ username, preferences }) => {
+  // const handleOnboardingComplete = ({ username, preferences }) => {
+  //     setUserName(username);
+  //     if (preferences?.voice) setTtsVoice(preferences.voice);
+  //     setAuthState("app");
+  // };
+
+
+  const handleOnboardingComplete = ({ userId: newUserId, username, preferences }) => {
+      if (newUserId) {
+        setUserId(newUserId);
+        localStorage.setItem("userId", newUserId);
+      }
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
+      localStorage.setItem("onboardingComplete", "true");
       setAuthState("app");
   };
-
   /* ---------- LOGOUT ---------- */
   // In App.jsx, update the handleLogout function
   const handleLogout = () => {
@@ -1442,6 +1473,26 @@ function App() {
 
   /* ---------- RENDER ---------- */
 
+  const handleDeleteChat = async (chatSessionId) => {
+    try {
+      const currentUserId = localStorage.getItem("userId") || "test_user";
+      const res = await fetch(`http://localhost:8000/chats/${chatSessionId}?user_id=${currentUserId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setChats(prev => prev.filter(c => (c.session_id || c.id) !== chatSessionId));
+        if (sessionId === chatSessionId) {
+          handleNewChat();
+        }
+      } else {
+        console.error("Failed to delete chat:", await res.text());
+      }
+    } catch (e) {
+      console.error("Failed to delete chat:", e);
+    }
+};
+
+  
 /* ---------- RENDER ---------- */
   const isExecuting = orbState === "processing" || orbState === "speaking" || isThinking;
   const appClassName = [
@@ -1591,9 +1642,9 @@ function App() {
             chats={chats}
             onSwitchChat={handleSwitchChat}
             onViewChat={handleViewChat}
+            onDeleteChat={handleDeleteChat}
             currentSessionId={sessionId}
           />
-
           <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
             <video autoPlay muted loop playsInline>
               <source src="/Background3.mp4" type="video/mp4" />

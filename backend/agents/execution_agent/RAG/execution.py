@@ -125,25 +125,42 @@ class SecurityValidator:
     def __init__(self):
         # Dangerous operations to block
         self.blocked_imports = {
-            'os.system',
+            # 'os.system',
             'subprocess.Popen', 'subprocess.call',
             'eval', 'exec', '__import__',
             'socket', 'urllib', 'requests',  # Block network (except in allowed context)
             'pickle', 'shelve',  # Serialization risks
             'ctypes', 'cffi',  # Low-level system access
+            # F1: Added after pentest — A4 used these to execute on host
+            'shutil',
+            'pathlib',
+            # 'os',          # block os module import entirely
+            # 'os.path',
+            'winreg',      # Windows registry access
+            'subprocess',  # catch bare subprocess import too
         }
         
         self.blocked_builtins = {
-            'eval', 'exec', 'compile', '__import__'  # File operations (context-dependent)
+            'eval', 'exec', 'compile', '__import__'
         }
         
         self.dangerous_patterns = [
-            # 'os.system',
             'subprocess.call',
             'subprocess.Popen',
             '__import__',
             'exec(',
             'eval(',
+            # F1: Added after pentest
+            'shutil.rmtree',
+            'shutil.move',
+            'shutil.copy',
+            'os.remove',
+            'os.unlink',
+            'os.rmdir',
+            'os.system',
+            'pathlib.Path',
+            'ctypes.windll',
+            'ctypes.wintypes',
         ]
     
     def validate_code(self, code: str) -> Tuple[bool, List[str]]:
@@ -181,23 +198,90 @@ class SecurityValidator:
         is_safe = len(violations) == 0
         return is_safe, violations
     
-    def _check_ast(self, tree: ast.AST) -> List[str]:
-        """Check AST for dangerous operations"""
-        violations = []
+    # def _check_ast(self, tree: ast.AST) -> List[str]:
+    #     """Check AST for dangerous operations"""
+    #     violations = []
         
+    #     for node in ast.walk(tree):
+    #         # Check imports
+    #         if isinstance(node, ast.Import):
+    #             for alias in node.names:
+    #                 if any(blocked in alias.name for blocked in [ 'subprocess', 'socket']):
+    #                     violations.append(f"Blocked import: {alias.name}")
+            
+    #         # Check function calls
+    #         if isinstance(node, ast.Call):
+    #             if isinstance(node.func, ast.Name):
+    #                 if node.func.id in self.blocked_builtins:
+    #                     violations.append(f"Blocked builtin: {node.func.id}")
+        
+    #     return violations
+
+
+    def _check_ast(self, tree: ast.AST) -> List[str]:
+        """Check AST for dangerous operations — F1: added from-import and os method checks"""
+        violations = []
+
+        BLOCKED_BASES = {
+            'shutil', 'pathlib', 'os', 'ctypes',
+            'subprocess', 'winreg', 'socket',
+            'urllib', 'requests', 'pickle', 'shelve', 'cffi'
+        }
+
         for node in ast.walk(tree):
-            # Check imports
+
+            # --- Original: Check 'import X' style ---
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if any(blocked in alias.name for blocked in [ 'subprocess', 'socket']):
+                    # Original check
+                    if any(blocked in alias.name for blocked in ['subprocess', 'socket']):
                         violations.append(f"Blocked import: {alias.name}")
-            
-            # Check function calls
+                    # F1: Extended check — catch all blocked modules
+                    base = alias.name.split('.')[0]
+                    if base in BLOCKED_BASES:
+                        violations.append(f"Blocked import: {alias.name}")
+
+            # --- F1: NEW — Check 'from X import Y' style (was completely missing) ---
+            # A4 exploited this gap: "from ctypes import wintypes" slipped through
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                base = module.split('.')[0]
+                if base in BLOCKED_BASES or module in BLOCKED_BASES:
+                    imported_names = [alias.name for alias in node.names]
+                    violations.append(
+                        f"Blocked from-import: 'from {module} import "
+                        f"{', '.join(imported_names)}'"
+                    )
+
+            # --- F1: NEW — Catch os/shutil method calls at call-site level ---
+            if isinstance(node, ast.Call):
+                # Check for os.remove(), os.unlink(), shutil.rmtree() etc.
+                if isinstance(node.func, ast.Attribute):
+                    obj_name = ""
+                    if isinstance(node.func.value, ast.Name):
+                        obj_name = node.func.value.id
+                    method_name = node.func.attr
+
+                    DANGEROUS_METHODS = {
+                        'os':     {'remove', 'unlink', 'rmdir', 'system', 'popen',
+                                   'makedirs', 'rename', 'replace'},
+                        'shutil': {'rmtree', 'move', 'copy', 'copy2', 'copytree',
+                                   'disk_usage'},
+                        'ctypes': {'windll', 'cdll', 'WinDLL'},
+                    }
+
+                    if obj_name in DANGEROUS_METHODS:
+                        if method_name in DANGEROUS_METHODS[obj_name]:
+                            violations.append(
+                                f"Blocked method call: {obj_name}.{method_name}()"
+                            )
+
+            # --- Original: Check dangerous builtins (eval, exec, etc.) ---
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
                     if node.func.id in self.blocked_builtins:
                         violations.append(f"Blocked builtin: {node.func.id}")
-        
+
         return violations
     
     def create_safe_wrapper(self, code: str, allow_pywinauto: bool = True) -> str:
@@ -969,8 +1053,32 @@ class SandboxExecutionPipeline:
         
         # Step 1: Security validation
         print("\n[1/5] Security Validation...")
-        is_safe, violations = self.security_validator.validate_code(code)
         
+        # ── NEW: Output validator code scan (DiD Layer 3) ────────────────────
+        from agents.security.output_validator import validate_code as validate_code_security
+        code_scan = validate_code_security(code, context="pre-execution")
+        if code_scan.violations:
+            logger.warning(f"🔒 Layer 3 (code scan): {len(code_scan.violations)} violation(s)")
+            for v in code_scan.violations:
+                logger.warning(f"   - {v}")
+            # Block execution if code contains credential extraction patterns
+            if any("password" in v.lower() or "credential" in v.lower() for v in code_scan.violations):
+                return ExecutionResult(
+                    status=ExecutionStatus.SECURITY_VIOLATION,
+                    exit_code=-1,
+                    stdout="",
+                    stderr="Code blocked: credential extraction patterns detected",
+                    execution_time=0.0,
+                    timestamp=datetime.now().isoformat(),
+                    validation_passed=False,
+                    validation_errors=[],
+                    security_passed=False,
+                    security_violations=code_scan.violations,
+                    code_hash=hashlib.md5(code.encode()).hexdigest()
+                )
+        # ─────────────────────────────────────────────────────────────────────
+        
+        is_safe, violations = self.security_validator.validate_code(code)
         if not is_safe:
             print(f"❌ Security validation failed:")
             for violation in violations:
@@ -1054,18 +1162,62 @@ class SandboxExecutionPipeline:
         
         return result
     
+    # def _prepare_code(self, code: str) -> str:
+    #     """Prepare code for execution"""
+    #     has_indicator = any(
+    #         keyword in code 
+    #         for keyword in ["EXECUTION_SUCCESS", "SUCCESS", "COMPLETED", "DONE"]
+    #     )
+        
+    #     if not has_indicator:
+    #         prepared = code + "\n\nprint('EXECUTION_SUCCESS')\n"
+    #     else:
+    #         prepared = code
+        
+    #     return prepared
+
     def _prepare_code(self, code: str) -> str:
-        """Prepare code for execution"""
+        """Prepare code for execution — F4: strip blocked imports as defence in depth"""
+
+        # ── F4: Strip blocked imports before execution ────────────────────────
+        # Even if SecurityValidator passed the code, this strips any blocked
+        # imports as a final layer before subprocess execution.
+        # Addresses A4 where shutil/os/ctypes ran on host.
+        STRIP_IMPORTS = [
+            'shutil', 'pathlib', 'os', 'ctypes',
+            'subprocess', 'winreg', 'socket',
+        ]
+
+        lines = code.split('\n')
+        clean_lines = []
+        for line in lines:
+            stripped = line.strip()
+            blocked = False
+            for mod in STRIP_IMPORTS:
+                if (stripped.startswith(f'import {mod}') or
+                        stripped.startswith(f'from {mod}') or
+                        f'import {mod},' in stripped or
+                        f', {mod}' in stripped):
+                    logger.warning(f"🔒 F4: Stripped blocked import: {stripped}")
+                    blocked = True
+                    break
+            if not blocked:
+                clean_lines.append(line)
+
+        code = '\n'.join(clean_lines)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Original logic: add EXECUTION_SUCCESS indicator if missing
         has_indicator = any(
-            keyword in code 
+            keyword in code
             for keyword in ["EXECUTION_SUCCESS", "SUCCESS", "COMPLETED", "DONE"]
         )
-        
+
         if not has_indicator:
             prepared = code + "\n\nprint('EXECUTION_SUCCESS')\n"
         else:
             prepared = code
-        
+
         return prepared
     
     def _save_execution_log(self, code: str, result: ExecutionResult):

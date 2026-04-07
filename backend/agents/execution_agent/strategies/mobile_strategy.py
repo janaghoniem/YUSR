@@ -7,19 +7,7 @@ Tier 1  Deterministic handlers        (0 tokens · 0 ms)
 Tier 2  ChromaDB semantic retrieval   (0 tokens · ~5 ms)
 Tier 3  LLM ReAct loop                (~400 ms/step)
 
-Fixes applied:
-    FIX 1  Session app memory — last known app_name persists across tasks
-            so task_2 inherits "clock" even if coordinator omits app_name.
-    FIX 2  Outer timeout uses smart-adjusted value, not the raw coordinator value.
-    FIX 3  App drawer — two-phase HOME then scroll; fires whenever target not
-            visible on home screen, not only after 5 stuck steps.
-    FIX 4  LLM system prompt — explicitly blocks Google/web search for apps;
-            explains app drawer correctly.
-    FIX 5  Cache hit/miss always logged at INFO with similarity + matched step
-            + primary selector — enough to debug without opening ChromaDB.
-    FIX 6  Time picker AM/PM — attempt counter; after 2 PM clicks proceed to OK
-            regardless of whether accessibility tree reflects the toggle.
-    FIX 7  Thought loop detection only fires for Tier 3 LLM decisions.
+
 
 Debug logging:
     [CACHE] prefix — all Tier 2 / ChromaDB events
@@ -42,6 +30,7 @@ from agents.execution_agent.core.exec_agent_models import ExecutionResult
 from agents.execution_agent.strategies.task_memory import (
     TaskMemory, RecipeStep, RetrievalResult,
     resolve_element, _signature_jaccard,
+    THRESHOLD_EXECUTE, THRESHOLD_HINT, SIGNATURE_OVERLAP,
 )
 
 import httpx
@@ -209,9 +198,12 @@ _SIG_VERIFY_THRESHOLD = 0.50
 
 def compute_smart_timeout(goal: str, default: int) -> int:
     g = goal.lower()
-    if any(k in g for k in ("alarm", "schedule", "set time")):  return max(60, default)
-    if any(k in g for k in ("email", "compose", "recipient")):  return max(60, default)
-    if any(k in g for k in ("search", "find", "look for")):     return max(45, default)
+    if any(k in g for k in ("alarm", "schedule", "set time")):  return max(90, default)
+    if any(k in g for k in ("email", "compose", "recipient")):  return max(90, default)
+    if any(k in g for k in ("chrome", "browser", "search", "navigate", "fill",
+                             "pharmacy", "google.com", "type url")):
+        return max(90, default)
+    if any(k in g for k in ("search", "find", "look for")):     return max(60, default)
     return max(30, default)
 
 
@@ -273,7 +265,7 @@ class MobileReActStrategy:
         self.backend_url = "http://localhost:8000"
 
         from groq import AsyncGroq
-        self.llm_client = AsyncGroq(api_key=" ")
+        self.llm_client = AsyncGroq(api_key="")
         self.model = "llama-3.3-70b-versatile"
 
         self.current_ui_tree:      Optional[SemanticUITree]     = None
@@ -299,6 +291,7 @@ class MobileReActStrategy:
         self._add_alarm_clicked: bool                           = False
         self._add_alarm_screen_sig: str                         = ""
         self._t2_completed_steps:  List[Dict]                   = []
+        self._last_t2_hint_record_id: Optional[str]             = None
         self.token_usage:          Dict[str, int]               = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls:      int                          = 0
         self.total_ui_elements_seen: int                        = 0
@@ -379,6 +372,14 @@ class MobileReActStrategy:
 
         # ── Tier 2 retrieval ───────────────────────────────────────────────
         # Skip current_signature on initial query — signature filtering blocks all hits
+        self._log_t2_query_request(
+            phase="initial-step",
+            step_instruction=task.ai_prompt,
+            overall_goal=overall_goal,
+            app=app,
+            current_signature="",
+            top_k=5,
+        )
         t2_result: RetrievalResult = self.task_memory.query(
             step_instruction  = task.ai_prompt,
             overall_goal      = overall_goal,
@@ -386,9 +387,18 @@ class MobileReActStrategy:
             current_signature = "",
         )
         self._log_cache_result(t2_result, task.ai_prompt, app)   # FIX 5
+        self._log_t2_nonfire_reason(t2_result, phase="initial-step")
 
         # Fallback: if step query misses but goal differs, query by goal to pull full sequence
         if t2_result.band == "none" and overall_goal != task.ai_prompt:
+            self._log_t2_query_request(
+                phase="goal-fallback",
+                step_instruction=overall_goal,
+                overall_goal=overall_goal,
+                app=app,
+                current_signature="",
+                top_k=8,
+            )
             t2_goal_query = self.task_memory.query(
                 step_instruction  = overall_goal,
                 overall_goal      = overall_goal,
@@ -396,6 +406,7 @@ class MobileReActStrategy:
                 current_signature = "",
                 top_k             = 8,
             )
+            self._log_t2_nonfire_reason(t2_goal_query, phase="goal-fallback")
             if t2_goal_query.band in ("execute", "hint"):
                 logger.info(
                     f"[CACHE] Goal-based fallback: band={t2_goal_query.band} "
@@ -412,9 +423,13 @@ class MobileReActStrategy:
             )
             if script_result is not None:
                 return script_result
+            if not t2_result.hint_text and t2_result.recipes:
+                t2_result.hint_text = self.task_memory._build_hint(t2_result.recipes, task.ai_prompt)
+            t2_result.band = "hint"
             logger.info("[T2] Handing off to Tier 3")
 
         tier3_hint = ""
+        t2_result = self._filter_hint_relevance(task.ai_prompt, t2_result)
         if t2_result.band == "hint" and app and app != "unknown":
             in_right_app = self._in_target_app(app, self.device_state)
             if not in_right_app:
@@ -423,10 +438,15 @@ class MobileReActStrategy:
                     f"(state={self.device_state}). Will re-query on app entry."
                 )
                 tier3_hint = ""
+                self._last_t2_hint_record_id = None
             else:
                 tier3_hint = t2_result.hint_text or ""
+                self._last_t2_hint_record_id = t2_result.recipes[0].record_id if t2_result.recipes else None
         elif t2_result.band == "hint":
             tier3_hint = t2_result.hint_text or ""
+            self._last_t2_hint_record_id = t2_result.recipes[0].record_id if t2_result.recipes else None
+        else:
+            self._last_t2_hint_record_id = None
 
         # ── ReAct Loop ────────────────────────────────────────────────────
         for step in range(task.max_steps):
@@ -434,6 +454,7 @@ class MobileReActStrategy:
 
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > task.timeout_seconds:
+                self._penalize_last_t2_hint("timeout")
                 return self._build_result(task.task_id, "timeout",
                     step, actions_executed, elapsed, error=f"Timeout after {task.timeout_seconds}s")
 
@@ -477,7 +498,7 @@ class MobileReActStrategy:
             decision_tier: str            = ""
             thought:       str            = ""
 
-            t1 = self._tier1(task.ai_prompt, self.current_ui_tree, self.device_state)
+            t1 = self._tier1(task, self.current_ui_tree, self.device_state)
             if t1:
                 thought       = t1["thought"]
                 action_json   = t1
@@ -503,6 +524,7 @@ class MobileReActStrategy:
                     pruned_tree=pruned, thought_history=thought_history,
                     step_number=step+1, hint_context=tier3_hint,
                     handoff_context=handoff_ctx, extra_params=task.extra_params,
+                    app=app,
                 )
 
             if not action_json:
@@ -546,6 +568,7 @@ class MobileReActStrategy:
                                 actions_executed, asyncio.get_event_loop().time() - start_time,
                                 completion_reason="Completed (text confirmed in field)")
                 logger.error("🚨 Thought loop persists — failing")
+                self._penalize_last_t2_hint("thought_loop")
                 return self._build_result(task.task_id, "failed", step+1,
                     actions_executed, asyncio.get_event_loop().time() - start_time,
                     error="Thought loop — unable to complete on current screen")
@@ -579,10 +602,15 @@ class MobileReActStrategy:
                         return self._build_result(task.task_id, "success", step+1,
                             actions_executed, asyncio.get_event_loop().time() - start_time,
                             completion_reason="Completed (text already typed in field)")
-                    logger.warning(
-                        f"[T3] Type duplicate guard: field {eid} missing expected text, retrying"
-                    )
-                    del self.typed_texts[eid]
+                    is_chrome = "chrome" in ((self.current_ui_tree.app_package or "").lower() if self.current_ui_tree else "")
+                    if is_chrome:
+                        logger.info("[T1] Chrome omnibox: skipping verification (known accessibility gap)")
+                        del self.typed_texts[eid]
+                    else:
+                        logger.warning(
+                            f"[T3] Type duplicate guard: field {eid} missing expected text, retrying"
+                        )
+                        del self.typed_texts[eid]
                 if eid is not None:
                     self.typed_texts[eid] = txt_typed
 
@@ -624,6 +652,7 @@ class MobileReActStrategy:
                 action_type=action_json.get("action_type"), max_attempts=3, retry_delay=2.0)
 
             if new_ui:
+                prev_ui_tree = self.current_ui_tree
                 self.current_ui_tree = new_ui
                 self.previous_ui_trees.append(new_ui)
                 self._update_ui_stats(new_ui)
@@ -649,6 +678,7 @@ class MobileReActStrategy:
                         task, overall_goal, app, prev_state_snapshot
                     )
                     if fresh_t2 is not None:
+                        fresh_t2 = self._filter_hint_relevance(task.ai_prompt, fresh_t2)
                         if fresh_t2.band == "execute":
                             script_result = await self._execute_tier2_script(
                                 task, fresh_t2, overall_goal, app,
@@ -658,12 +688,52 @@ class MobileReActStrategy:
                             if script_result is not None:
                                 return script_result
                             tier3_hint = fresh_t2.hint_text or ""
+                            self._last_t2_hint_record_id = fresh_t2.recipes[0].record_id if fresh_t2.recipes else None
                             logger.info("[T2] In-loop script failed → T3 with hint")
                         elif fresh_t2.band == "hint":
                             tier3_hint = fresh_t2.hint_text or ""
+                            self._last_t2_hint_record_id = fresh_t2.recipes[0].record_id if fresh_t2.recipes else None
                             logger.info(f"[CACHE] In-loop hint: {tier3_hint[:80]}")
                 else:
                     self.stuck_counter += 1
+
+                # EMAIL SENT DETECTION: compose screen -> inbox transition after click
+                if action_json.get("action_type") == "click":
+                    is_email_goal = (
+                        "send" in task.ai_prompt.lower()
+                        or "email" in (overall_goal or "").lower()
+                    )
+                    in_gmail_now = (
+                        "gm" in (new_ui.app_package or "").lower()
+                        or "gmail" in (new_ui.app_name or "").lower()
+                    )
+                    if is_email_goal and in_gmail_now and prev_ui_tree is not None:
+                        was_composing = any(
+                            "compose" in (e.content_description or "").lower()
+                            or "send" in (e.content_description or "").lower()
+                            for e in prev_ui_tree.elements
+                        )
+                        now_in_inbox = (
+                            len(new_ui.elements) > 25 and
+                            any("compose" in (e.content_description or "").lower() for e in new_ui.elements) and
+                            any(
+                                "inbox" in (e.text or "").lower()
+                                or "unread" in (e.text or "").lower()
+                                for e in new_ui.elements
+                            )
+                        )
+                        if was_composing and now_in_inbox:
+                            logger.info("✅ Email sent — returned to inbox")
+                            elapsed = asyncio.get_event_loop().time() - start_time
+                            self._store_learned_steps(task.ai_prompt, overall_goal, app, actions_executed)
+                            return self._build_result(
+                                task.task_id,
+                                "success",
+                                step + 1,
+                                actions_executed,
+                                elapsed,
+                                completion_reason="Email sent — returned to inbox",
+                            )
 
                 if (self.last_action_was_click and self._is_click_task(task.ai_prompt)
                         and self._screen_changed_significantly(new_ui)):
@@ -677,31 +747,40 @@ class MobileReActStrategy:
                 if (self.last_action_was_click and target_app
                         and not self._target_is_generic_page(target_app)
                         and len(new_ui.elements) >= 5):
-                    verification = await self._verify_app_llm(target_app, new_ui)
-                    if not verification["success"]:
-                        eid = self.last_clicked_element
-                        rc  = self.element_retry_count.get(eid, 0) + 1
-                        self.element_retry_count[eid] = rc
-                        logger.error(f"❌ Wrong app: expected={target_app} got={verification['actual']}")
-                        if rc >= self.MAX_ELEMENT_RETRIES:
-                            self.failed_elements.add(eid)
-                        await self._execute_action_on_device(
-                            UIAction(action_type="global_action", global_action="BACK", duration=1000))
-                        await asyncio.sleep(2.0)
-                        fresh = await self._fetch_ui_tree_with_retries("global_action")
-                        if fresh:
-                            self.current_ui_tree = fresh
-                            self.device_state = self._detect_device_state(fresh)
-                            self._update_ui_stats(fresh)
-                        self.last_action_was_click = False
-                        continue
+                    # During launcher navigation (home/app drawer), app verify is expected to fail.
+                    # Skip verification until we're no longer in those transient states.
+                    if new_state in ("home_screen", "app_drawer"):
+                        logger.debug(f"[T1] App verify skipped — still on {new_state} during navigation")
+                    else:
+                        verification = await self._verify_app_llm(target_app, new_ui)
+                        if not verification["success"]:
+                            eid = self.last_clicked_element
+                            rc  = self.element_retry_count.get(eid, 0) + 1
+                            self.element_retry_count[eid] = rc
+                            logger.error(f"❌ Wrong app: expected={target_app} got={verification['actual']}")
+                            if rc >= self.MAX_ELEMENT_RETRIES:
+                                self.failed_elements.add(eid)
+                            await self._execute_action_on_device(
+                                UIAction(action_type="global_action", global_action="BACK", duration=1000))
+                            await asyncio.sleep(2.0)
+                            fresh = await self._fetch_ui_tree_with_retries("global_action")
+                            if fresh:
+                                self.current_ui_tree = fresh
+                                self.device_state = self._detect_device_state(fresh)
+                                self._update_ui_stats(fresh)
+                            self.last_action_was_click = False
+                            continue
 
                 logger.info(f"👁️ New screen: {new_ui.screen_name or new_ui.app_name} ({len(new_ui.elements)} elements)")
 
                 if action_json.get("action_type") == "type":
                     eid = action_json.get("element_id")
                     txt_typed = (action_json.get("text") or "").strip()
-                    if self._typed_value_applied(action_json, new_ui):
+                    is_chrome = "chrome" in (new_ui.app_package or "").lower()
+                    if is_chrome:
+                        logger.info("[T1] Chrome omnibox: skipping post-type verification (known accessibility gap)")
+                        self.stuck_counter = 0
+                    elif self._typed_value_applied(action_json, new_ui):
                         live_val = (self._get_live_field_value(int(eid)) or "") if eid is not None else ""
                         logger.info(f"[T3] Type verified: field {eid} shows '{live_val[:30]}'")
                         self.stuck_counter = 0
@@ -737,6 +816,7 @@ class MobileReActStrategy:
                 logger.warning("⚠️ Failed to get new UI tree")
 
         logger.warning("⚠️ MAX STEPS REACHED")
+        self._penalize_last_t2_hint("max_steps")
         return self._build_result(task.task_id, "failed", task.max_steps,
             actions_executed, asyncio.get_event_loop().time() - start_time,
             error=f"Max steps ({task.max_steps}) reached")
@@ -762,6 +842,45 @@ class MobileReActStrategy:
             logger.info(f"[CACHE] HIT-EXECUTE | query='{q}' | app={app} | sim={r.similarity:.3f} | "
                         f"matched='{r.step_instruction[:50]}' | action={r.action_type} | "
                         f"sel={s.get('by')}='{s.get('value','')[:30]}'")
+
+    def _log_t2_query_request(
+        self,
+        phase: str,
+        step_instruction: str,
+        overall_goal: str,
+        app: str,
+        current_signature: str,
+        top_k: int,
+    ) -> None:
+        sig_preview = (current_signature[:80] + "…") if current_signature and len(current_signature) > 80 else current_signature
+        logger.info(
+            "[CACHE] QUERY "
+            f"phase={phase} | app={app} | state={self.device_state} | top_k={top_k} | "
+            f"exec>={THRESHOLD_EXECUTE:.2f} hint>={THRESHOLD_HINT:.2f} sig>={SIGNATURE_OVERLAP:.2f}"
+        )
+        logger.info(
+            f"[CACHE] QUERY step='{(step_instruction or '')[:80]}' | "
+            f"goal='{(overall_goal or '')[:80]}' | sig='{sig_preview or ''}'"
+        )
+
+    def _log_t2_nonfire_reason(self, result: RetrievalResult, phase: str) -> None:
+        if result.band != "none":
+            return
+        logger.info(
+            f"[CACHE] NO-FIRE phase={phase} | best_sim={result.best_sim:.3f} | "
+            f"hint_threshold={THRESHOLD_HINT:.2f} | best='{(result.best_label or '')[:80]}'"
+        )
+        if result.best_sim > 0:
+            if result.best_sim < THRESHOLD_HINT:
+                logger.info(
+                    "[CACHE] NO-FIRE reason: semantic similarity below hint threshold; "
+                    "Tier 2 intentionally skipped"
+                )
+        else:
+            logger.info(
+                "[CACHE] NO-FIRE reason: no viable candidates returned (possibly app filter, "
+                "empty collection subset, or signature mismatch upstream)"
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     #  TIER 2
@@ -799,8 +918,17 @@ class MobileReActStrategy:
             current_signature = "",
             top_k             = 8,
         )
+        self._log_t2_nonfire_reason(fresh, phase="in-loop-step")
 
         if fresh.band == "none":
+            self._log_t2_query_request(
+                phase="in-loop-goal-fallback",
+                step_instruction=overall_goal,
+                overall_goal=overall_goal,
+                app=app,
+                current_signature=current_sig,
+                top_k=5,
+            )
             fresh = self.task_memory.query(
                 step_instruction  = overall_goal,
                 overall_goal      = overall_goal,
@@ -808,9 +936,38 @@ class MobileReActStrategy:
                 current_signature = current_sig,
                 top_k             = 5,
             )
+            self._log_t2_nonfire_reason(fresh, phase="in-loop-goal-fallback")
 
         self._log_cache_result(fresh, f"[re-query] {task.ai_prompt[:40]}", app)
         return fresh if fresh.band != "none" else None
+
+    def _filter_hint_relevance(self, ai_prompt: str, result: RetrievalResult) -> RetrievalResult:
+        """Drop misleading navigation hints for non-navigation steps."""
+        if result.band != "hint" or not result.recipes:
+            return result
+
+        top_recipe = result.recipes[0]
+        ai_lower = (ai_prompt or "").lower()
+        is_nav_step = any(kw in ai_lower for kw in ("open", "launch", "start"))
+        hint_is_nav = any(
+            kw in (top_recipe.step_instruction or "").lower()
+            for kw in ("open", "launch", "start", "close")
+        )
+        if hint_is_nav and not is_nav_step:
+            logger.info(
+                f"[CACHE] Hint rejected: navigation hint for non-navigation step "
+                f"(hint='{(top_recipe.step_instruction or '')[:40]}')"
+            )
+            return RetrievalResult(band="none", recipes=[], best_sim=0.0, best_label="", hint_text="")
+        return result
+
+    def _penalize_last_t2_hint(self, reason: str) -> None:
+        rid = self._last_t2_hint_record_id
+        if not rid:
+            return
+        logger.info(f"[CACHE] Penalizing hint record {rid[:8]} due to {reason}")
+        self.task_memory.mark_failure(rid)
+        self._last_t2_hint_record_id = None
 
     async def _execute_tier2_script(
         self,
@@ -845,12 +1002,32 @@ class MobileReActStrategy:
             if t2_result.band == "execute" and i == 0:
                 context_ok = await self._verify_recipe_context(recipe, task.ai_prompt)
                 if not context_ok:
+                    self.task_memory.mark_failure(recipe.record_id)
                     logger.warning("[T2] Context verify rejected recipe → downgrade to hint")
                     t2_result.hint_text = self.task_memory._build_hint(
                         t2_result.recipes,
                         task.ai_prompt,
                     )
                     return None
+
+            # ACTION-TYPE SANITY CHECK for nav goals
+            goal_is_nav = any(kw in task.ai_prompt.lower() for kw in ("open", "launch", "start", "navigate to"))
+            recipe_is_internal_click = (
+                recipe.action_type == "click"
+                and bool(recipe.selectors)
+                and not any(
+                    kw in (recipe.selectors[0].get("value", "") or "").lower()
+                    for kw in (app.lower(), "play store", "clock", "gmail", "settings")
+                )
+            )
+            if goal_is_nav and recipe_is_internal_click and i == 0:
+                logger.warning(
+                    f"[T2] Nav-goal sanity fail: 'open {app}' should not start with "
+                    f"click selector='{recipe.selectors[0].get('value','')[:40]}' → downgrade to hint"
+                )
+                self.task_memory.mark_failure(recipe.record_id)
+                t2_result.hint_text = ""
+                return None
 
             params: Dict[str, str] = {
                 k: str(v) for k, v in task.extra_params.items()
@@ -868,6 +1045,7 @@ class MobileReActStrategy:
                         params=params,
                     )
                     if test_eid is None:
+                        self.task_memory.mark_failure(recipe.record_id)
                         logger.warning(
                             "[T2] EXECUTE gate failed: selectors not found on screen → downgrade to hint"
                         )
@@ -940,9 +1118,33 @@ class MobileReActStrategy:
     #  TIER 1
     # ══════════════════════════════════════════════════════════════════════
 
-    def _tier1(self, goal: str, ui_tree: SemanticUITree, device_state: str) -> Optional[Dict[str, Any]]:
+    def _tier1(self, task: MobileTaskRequest, ui_tree: SemanticUITree, device_state: str) -> Optional[Dict[str, Any]]:
+        goal = task.ai_prompt
         if not ui_tree or not ui_tree.elements:
             return None
+
+        # Chrome submit: if previous step typed in Chrome, submit immediately.
+        pkg = (ui_tree.app_package or "").lower()
+        if "chrome" in pkg and self.action_history:
+            last = self.action_history[-1]
+            if (last.get("action") or {}).get("action_type") == "type":
+                for e in ui_tree.elements:
+                    blob = f"{e.content_description or ''} {e.text or ''}".lower()
+                    if any(kw in blob for kw in ("go", "search", "submit")) and e.clickable:
+                        logger.info(f"[T1] Chrome post-type: click IME submit id={e.element_id}")
+                        return {
+                            "thought": "submit Chrome search via keyboard Go button",
+                            "action_type": "click",
+                            "element_id": e.element_id,
+                        }
+                logger.info("[T1] Chrome post-type: coordinate tap on keyboard Go key")
+                return {
+                    "thought": "submit Chrome search via keyboard Go key (coordinate)",
+                    "action_type": "coordinate_tap",
+                    "x_percent": 95,
+                    "y_percent": 93,
+                    "duration": 100,
+                }
 
         # Safety: AURA exit — HOME not BACK (BACK only navigates within Flutter)
         if "aura" in (ui_tree.app_name or "").lower():
@@ -985,29 +1187,38 @@ class MobileReActStrategy:
             self._add_alarm_clicked = False
             self._add_alarm_screen_sig = ""
 
+        # Play Store navigation guardrails
+        play_store_action = self._handle_play_store_navigation(goal, ui_tree)
+        if play_store_action:
+            return play_store_action
+
         # Chrome search submission (IME/search suggestion fallback)
         chrome_submit = self._handle_chrome_search_submit(goal, ui_tree)
         if chrome_submit:
             return chrome_submit
 
         # Deterministic compose-field typing for email tasks (To/Subject/Body)
-        compose = self._handle_compose_field_typing(goal, ui_tree)
+        compose = self._handle_compose_field_typing(task, ui_tree)
         if compose:
             return compose
 
-        # Already on target app
+        # Already on target app — only valid if we're actually inside the app
         goal_lower = goal.lower()
         if any(kw in goal_lower for kw in ("open", "launch", "start", "navigate")):
             target = self._extract_target_app(goal)
-            if target:
-                app_id = f"{(ui_tree.app_package or '').lower()} {(ui_tree.app_name or '').lower()}"
-                if target.lower().split()[0] in app_id:
+            if target and not self._target_is_generic_page(target):
+                in_target = self._in_target_app(target, device_state)
+                logger.info(
+                    f"[T1] Open-app guard | target='{target}' | state='{device_state}' | in_target={in_target}"
+                )
+                if in_target:
                     logger.info(f"[T1] '{target}' already open → complete")
                     return {"thought": f"'{target}' is already open", "action_type": "complete"}
 
-        # App drawer — phased swipe strategy when target app is not visible
+        # App drawer — only trigger for explicit navigation goals
         if device_state == "home_screen":
-            target = self._extract_target_app(goal)
+            goal_is_nav = any(kw in goal.lower() for kw in ("open", "launch", "start", "navigate to"))
+            target = self._extract_target_app(goal) if goal_is_nav else None
             if target and not self._target_is_generic_page(target):
                 app_visible = any(
                     target.lower() in (e.text or "").lower()
@@ -1021,27 +1232,27 @@ class MobileReActStrategy:
                                 "action_type": "global_action", "global_action": "HOME"}
                     elif self._app_drawer_phase == 1:
                         self._app_drawer_phase = 2
-                        logger.info("[T1] App drawer phase 2 — swipe up gesture")
+                        logger.info("[T1] App drawer phase 2 — fling from bottom dock")
                         return {
-                            "thought": "swipe up to open app drawer",
+                            "thought": "fling up from bottom dock to open app drawer",
                             "action_type": "swipe",
                             "start_x_percent": 50,
-                            "start_y_percent": 80,
+                            "start_y_percent": 92,
                             "end_x_percent": 50,
-                            "end_y_percent": 20,
-                            "duration": 600,
+                            "end_y_percent": 15,
+                            "duration": 300,
                         }
                     elif self._app_drawer_phase == 2:
                         self._app_drawer_phase = 3
-                        logger.info("[T1] App drawer phase 3 — second swipe attempt")
+                        logger.info("[T1] App drawer phase 3 — second fling attempt")
                         return {
-                            "thought": "swipe up again to fully open app drawer",
+                            "thought": "second fling up to fully open app drawer",
                             "action_type": "swipe",
                             "start_x_percent": 50,
-                            "start_y_percent": 75,
+                            "start_y_percent": 88,
                             "end_x_percent": 50,
-                            "end_y_percent": 15,
-                            "duration": 800,
+                            "end_y_percent": 10,
+                            "duration": 250,
                         }
                     elif self._app_drawer_phase == 3:
                         drawer_elem = next(
@@ -1072,24 +1283,83 @@ class MobileReActStrategy:
         return None
 
     def _global_interstitial_handler(self, ui_tree: SemanticUITree) -> Optional[Dict]:
+        # Never treat Chrome web content as a dialog/overlay.
+        pkg = (ui_tree.app_package or "").lower()
+        if "chrome" in pkg and len(ui_tree.elements) > 15:
+            return None
+
         DISMISS_VOCAB = {
             "got it", "ok", "okay", "dismiss", "done", "accept", "allow",
             "continue", "agree", "understood", "close", "skip", "later",
             "not now", "no thanks", "deny", "x",
         }
-        dismiss_elements = [
-            e for e in ui_tree.elements
-            if (e.clickable or e.focusable)
-            and any(kw in ((e.content_description or "") + " " + (e.text or "")).lower()
-                    for kw in DISMISS_VOCAB)
-        ]
-        if not dismiss_elements or len(ui_tree.elements) > 8:
+        IGNORE_VOCAB = {
+            "continue to app", "continue shopping", "continue browsing",
+            "no thanks, just browsing",
+        }
+
+        dismiss_elements = []
+        for e in ui_tree.elements:
+            if not (e.clickable or e.focusable):
+                continue
+            blob = ((e.content_description or "") + " " + (e.text or "")).lower().strip()
+            if any(kw in blob for kw in DISMISS_VOCAB):
+                if not any(ig in blob for ig in IGNORE_VOCAB):
+                    dismiss_elements.append(e)
+
+        if not dismiss_elements:
             return None
-        elem  = dismiss_elements[0]
-        label = (elem.content_description or elem.text or "dismiss")[:30]
-        logger.info(f"[T1] Global interstitial '{label}' → elem {elem.element_id}")
-        return {"thought": f"dismiss overlay ('{label}')",
-                "action_type": "click", "element_id": elem.element_id}
+
+        total = len(ui_tree.elements)
+        n_cta = len(dismiss_elements)
+
+        if total <= 8:
+            elem = dismiss_elements[0]
+            label = (elem.content_description or elem.text or "dismiss")[:30]
+            logger.info(f"[T1] Interstitial (sparse) '{label}' → elem {elem.element_id}")
+            return {"thought": f"dismiss overlay ('{label}')",
+                    "action_type": "click", "element_id": elem.element_id}
+
+        has_search_bar = any(
+            "search" in (e.hint_text or "").lower() or
+            "search" in (e.content_description or "").lower()
+            for e in ui_tree.elements if e.type == "textfield"
+        )
+        has_nav_tabs = any(
+            e.type in ("tab", "tabwidget") or
+            "selected" in (e.content_description or "").lower()
+            for e in ui_tree.elements
+        )
+
+        if n_cta >= 2 and not has_search_bar and not has_nav_tabs:
+            positive_vocab = {"continue", "accept", "allow", "ok", "yes", "got it", "agree"}
+            positive = next(
+                (e for e in dismiss_elements
+                 if any(kw in ((e.content_description or "") + (e.text or "")).lower()
+                        for kw in positive_vocab)),
+                dismiss_elements[0]
+            )
+            label = (positive.content_description or positive.text or "continue")[:30]
+            logger.info(
+                f"[T1] Modal dialog detected ({n_cta} CTAs, no search bar) → "
+                f"click '{label}' id={positive.element_id}"
+            )
+            return {
+                "thought": f"dismiss modal dialog ('{label}')",
+                "action_type": "click",
+                "element_id": positive.element_id,
+            }
+
+        n_buttons = sum(1 for e in ui_tree.elements
+                        if e.type in ("button", "imagebutton") and e.clickable)
+        if n_buttons <= 4 and n_cta >= 1:
+            elem = dismiss_elements[0]
+            label = (elem.content_description or elem.text or "dismiss")[:30]
+            logger.info(f"[T1] Interstitial (few buttons) '{label}' → elem {elem.element_id}")
+            return {"thought": f"dismiss overlay ('{label}')",
+                    "action_type": "click", "element_id": elem.element_id}
+
+        return None
 
     def _state_verification(self, goal: str, ui_tree: SemanticUITree) -> Optional[Dict]:
         gl = goal.lower()
@@ -1150,18 +1420,21 @@ class MobileReActStrategy:
             if "minutes" in desc and elem.type != "textfield":
                 displayed_m = text
 
-        # Fallback ordering
-        if hour_fid is None:
-            tfs = [e for e in ui_tree.elements if e.type == "textfield"]
-            if len(tfs) >= 1:
-                hour_fid = tfs[0].element_id
-                if (tfs[0].text or "").strip().isdigit():
-                    try: displayed_h = int(tfs[0].text.strip())
-                    except ValueError: pass
-            if len(tfs) >= 2:
-                minute_fid = tfs[1].element_id
-                if (tfs[1].text or "").strip().isdigit():
-                    displayed_m = tfs[1].text.strip()
+        # Fallback ordering (independent for hour/minute)
+        tfs = [e for e in ui_tree.elements if e.type == "textfield"]
+        if hour_fid is None and len(tfs) >= 1:
+            hour_fid = tfs[0].element_id
+            if (tfs[0].text or "").strip().isdigit():
+                try: displayed_h = int(tfs[0].text.strip())
+                except ValueError: pass
+        if minute_fid is None and len(tfs) >= 2:
+            minute_fid = tfs[1].element_id
+            displayed_m = (tfs[1].text or "").strip()
+
+        logger.debug(
+            f"[T1] Time picker fields: hour_fid={hour_fid} (val={displayed_h}) "
+            f"minute_fid={minute_fid} (val={displayed_m}) period={displayed_p} ok={ok_btn}"
+        )
 
         h2 = str(target_h).zfill(2)
         hour_ok   = (displayed_h == target_h)
@@ -1216,10 +1489,79 @@ class MobileReActStrategy:
                 return {"thought": f"click {target_per}",
                         "action_type": "click", "element_id": pm_elem.element_id}
 
+        if hour_fid is not None or minute_fid is not None:
+            logger.info("[T1] Time picker: waiting for UI to settle (fields found but state unclear)")
+            return {"thought": "time picker active — wait for UI",
+                    "action_type": "wait", "duration": 500}
+
         return None
 
-    def _handle_compose_field_typing(self, goal: str, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
+    def _handle_play_store_navigation(
+        self, goal: str, ui_tree: SemanticUITree
+    ) -> Optional[Dict[str, Any]]:
+        """Deterministic guardrails for Play Store navigation/search."""
+        pkg = (ui_tree.app_package or "").lower()
+        if "vending" not in pkg and "play" not in (ui_tree.app_name or "").lower():
+            return None
+
+        gl = goal.lower()
+        elements = ui_tree.elements
+
+        on_app_page = any(
+            (e.text or "").strip().lower() in ("install", "open", "update", "uninstall")
+            and e.clickable
+            for e in elements
+        )
+        looking_for_search = any(kw in gl for kw in ("search", "find", "type", "look"))
+
+        if on_app_page and looking_for_search:
+            target_app = re.search(r"(?:for|search for|find|download)\s+(\w+)", gl)
+            target_name = target_app.group(1).lower() if target_app else ""
+            app_title_visible = any(
+                target_name in (e.text or "").lower()
+                for e in elements if e.type in ("text", "textview") and len(e.text or "") > 2
+            )
+            if not app_title_visible and target_name:
+                logger.info(f"[T1] Play Store: wrong app page (looking for '{target_name}') → BACK")
+                return {"thought": f"wrong app page — go back to search for {target_name}",
+                        "action_type": "global_action", "global_action": "BACK"}
+
+        bad_fields = {"ask ai", "ask about", "write a review", "add a review",
+                      "your review", "share your thoughts"}
+        for e in elements:
+            blob = ((e.content_description or "") + " " + (e.hint_text or "") +
+                    " " + (e.text or "")).lower()
+            if any(bad in blob for bad in bad_fields) and e.focusable:
+                if e.element_id == self.last_clicked_element:
+                    logger.info("[T1] Play Store: 'Ask AI/review' field detected — BACK")
+                    return {"thought": "wrong field (Ask AI) — go back",
+                            "action_type": "global_action", "global_action": "BACK"}
+
+        if any(kw in gl for kw in ("search", "type", "find", "look")):
+            for e in elements:
+                hint = (e.hint_text or "").lower()
+                desc = (e.content_description or "").lower()
+                if any(kw in hint or kw in desc for kw in
+                       ("search for apps", "search apps", "search games",
+                        "search the store", "search play")):
+                    logger.info(f"[T1] Play Store: found search bar id={e.element_id}")
+                    return {"thought": "click Play Store search bar",
+                            "action_type": "click", "element_id": e.element_id}
+
+            for e in elements:
+                blob = ((e.content_description or "") + " " + (e.text or "")).lower()
+                if blob.strip() == "search" and e.clickable and e.type in (
+                    "button", "imagebutton", "imageview"
+                ):
+                    logger.info(f"[T1] Play Store: found search icon id={e.element_id}")
+                    return {"thought": "click Play Store search icon",
+                            "action_type": "click", "element_id": e.element_id}
+
+        return None
+
+    def _handle_compose_field_typing(self, task: MobileTaskRequest, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
         """Deterministic typing for Gmail compose fields to avoid click loops."""
+        goal = task.ai_prompt
         gl = goal.lower().strip()
 
         field_kind: Optional[str] = None
@@ -1238,6 +1580,20 @@ class MobileReActStrategy:
         elif m_body:
             field_kind = "body"
             text_value = m_body.group(1).strip().strip("'\"")
+
+        # Overwrite text_value if it references input_content from extra_params
+        if getattr(task, "extra_params", None) and "input_content" in task.extra_params:
+            raw_ic = str(task.extra_params["input_content"])
+            try:
+                ic = json.loads(raw_ic)
+                if isinstance(ic, dict):
+                    if field_kind == "subject" and "SUBJECT" in ic:
+                        text_value = str(ic["SUBJECT"])
+                    elif field_kind == "body" and "BODY" in ic:
+                        text_value = str(ic["BODY"])
+            except Exception:
+                if text_value and "generated" in text_value.lower():
+                    text_value = raw_ic.strip()
 
         if not field_kind or not text_value:
             return None
@@ -1329,21 +1685,81 @@ class MobileReActStrategy:
             return None
 
         gl = goal.lower()
+        # Guard: this is a submission helper, so only run after we've typed in Chrome recently.
+        # Exception: explicit navigate/url tasks may type URL here directly.
+        has_typed_in_chrome = any(
+            (h.get("action") or {}).get("action_type") == "type"
+            and "chrome" in ((h.get("device_state") or "").lower().replace("_", ""))
+            for h in self.action_history[-5:]
+        ) or bool(self.typed_texts)
+
         is_search_task = any(
             kw in gl for kw in (
                 "search", "find", "navigate", "type", "fill",
-                "click search", "click the search", "submit",
+                "click search", "click the search", "submit", "address bar", "url", "google",
             )
         )
-        if not is_search_task:
+        is_navigate = "navigate to" in gl or "open url" in gl
+        if not has_typed_in_chrome and not is_navigate:
+            logger.debug("[T1] Chrome submit handler skipped — no prior type in Chrome")
+            return None
+        if not is_search_task and not is_navigate:
             return None
 
-        # 1) IME action button (keyboard Go/Search)
+        # 0) Navigation tasks must use URL from task metadata, not the goal text.
+        if is_navigate and self.current_task:
+            web_params = ((self.current_task.extra_params or {}).get("web_params") or {})
+            if not isinstance(web_params, dict):
+                web_params = {}
+            url = (web_params.get("url") or "").strip()
+            if url:
+                for e in ui_tree.elements:
+                    if e.type != "textfield":
+                        continue
+                    txt = (e.text or "").strip().lower()
+                    if txt == "" or "search or type" in txt or "search or type url" in txt:
+                        if e.focusable or e.clickable:
+                            logger.info(f"[T1] Chrome: navigate to URL '{url[:40]}' id={e.element_id}")
+                            return {
+                                "thought": "type URL into Chrome address bar",
+                                "action_type": "type",
+                                "element_id": e.element_id,
+                                "text": url,
+                                "clear_first": True,
+                            }
+
+        # 1) Search tasks: extract the actual search query, but reject page descriptions.
+        if is_search_task:
+            query_match = re.search(
+                r"(?:type|search for|find)\s+['\"]?(.+?)['\"]?\s*(?:in|into|on)?\s*(?:the\s+)?(?:search\s+bar|address\s+bar|chrome)?\s*$",
+                goal, re.IGNORECASE
+            )
+            if query_match:
+                query_text = query_match.group(1).strip().strip("'\"")
+                if any(w in query_text.lower() for w in ("page", "screen", "bar", "button", "icon")):
+                    query_text = None
+                if query_text:
+                    for e in ui_tree.elements:
+                        if e.type != "textfield":
+                            continue
+                        txt = (e.text or "").strip().lower()
+                        if txt == "" or "search or type" in txt or "search or type url" in txt:
+                            if e.focusable or e.clickable:
+                                logger.info(f"[T1] Chrome: type query '{query_text[:30]}' id={e.element_id}")
+                                return {
+                                    "thought": "type search query into Chrome address bar",
+                                    "action_type": "type",
+                                    "element_id": e.element_id,
+                                    "text": query_text,
+                                    "clear_first": True,
+                                }
+
+        # 2) IME action button (keyboard Go/Search)
         for e in ui_tree.elements:
             if not e.clickable:
                 continue
             blob = f"{e.content_description or ''} {e.text or ''}".lower()
-            if any(kw in blob for kw in ("search", "go", "submit")) and e.type in (
+            if any(kw in blob for kw in ("search", "go", "submit", "done")) and e.type in (
                 "button", "imagebutton", "imageview"
             ):
                 logger.info(f"[T1] Chrome: IME submit button id={e.element_id}")
@@ -1353,15 +1769,24 @@ class MobileReActStrategy:
                     "element_id": e.element_id,
                 }
 
-        # 2) First autocomplete suggestion
+        # 3) First autocomplete suggestion (any clickable non-nav row)
+        nav_words = {"back", "tab", "tabs", "menu", "settings", "bookmark",
+                     "bookmarks", "more", "close", "new", "reload", "history"}
+        skip_descs = {
+            "ask ai", "search with", "performance", "measure",
+            "voice search", "voice", "start voice", "microphone",
+        }
         for e in ui_tree.elements:
             if not e.clickable:
                 continue
-            blob = f"{e.content_description or ''} {e.text or ''}".lower()
-            nav_words = {"back", "tab", "menu", "settings", "bookmark", "more", "close"}
+            blob = f"{e.content_description or ''} {e.text or ''}".lower().strip()
+            if len(blob) < 3:
+                continue
             if any(w in blob.split() for w in nav_words):
                 continue
-            if e.type in ("text", "textview") and len(blob.strip()) > 3:
+            if any(s in blob for s in skip_descs):
+                continue
+            if e.type not in ("textfield", "imagebutton") and blob:
                 logger.info(f"[T1] Chrome: click first suggestion id={e.element_id}: '{blob[:40]}'")
                 return {
                     "thought": f"click Chrome search suggestion: '{blob[:30]}'",
@@ -1369,16 +1794,18 @@ class MobileReActStrategy:
                     "element_id": e.element_id,
                 }
 
-        # 3) Results already loaded
-        if len(ui_tree.elements) > 35:
+        # 4) Results already loaded
+        if len(ui_tree.elements) > 30:
             for e in ui_tree.elements:
-                if e.type == "textfield" and (e.text or ""):
-                    logger.info("[T1] Chrome: results page loaded — task complete")
-                    return {
-                        "thought": "Chrome search results visible — task complete",
-                        "action_type": "complete",
-                        "reason": "Search results are loaded",
-                    }
+                if e.type == "textfield" and (e.text or "").strip():
+                    bar_text = (e.text or "").strip().lower()
+                    if not bar_text.startswith("search or type"):
+                        logger.info("[T1] Chrome: address bar has content → results loaded → complete")
+                        return {
+                            "thought": "Chrome results loaded — complete",
+                            "action_type": "complete",
+                            "reason": "Search results loaded",
+                        }
 
         return None
 
@@ -1388,7 +1815,7 @@ class MobileReActStrategy:
 
     async def _llm_react(
         self, goal, overall_goal, pruned_tree, thought_history,
-        step_number, hint_context, handoff_context, extra_params,
+        step_number, hint_context, handoff_context, extra_params, app,
     ) -> Tuple[str, Optional[Dict]]:
 
         history_ctx  = ("Prior thoughts: " + " → ".join(thought_history[-3:])) if thought_history else ""
@@ -1427,6 +1854,13 @@ CHROME-SPECIFIC:
 - If search results are already showing (many elements visible), declare complete.
 - NEVER declare the task failed just because you cannot see a 'Search' button.
 
+PLAY STORE-SPECIFIC:
+- The search bar is at the TOP of the Play Store home screen (not bottom tabs).
+- Bottom tabs are navigation tabs; do not use them to start a search.
+- To search for an app, click the top search bar/icon.
+- Never type into "Ask AI about this app" or review fields.
+- If you land on a wrong app page, press BACK before searching again.
+
 Example:
 Thought: The screen shows a "Compose" button. I will click it to start a new email.
 Action: {{"action_type": "click", "element_id": 42}}"""
@@ -1440,15 +1874,31 @@ Action: {{"action_type": "click", "element_id": 42}}"""
             + (f"\n{hint_context}"    if hint_context     else "")
             + (f"\n{handoff_context}" if handoff_context  else "")
             + f"\n{blacklist_str}\n"
-            f"\nCURRENT SCREEN:\n{pruned_tree}\n"
+            + (
+                f"\n⚠️ THIS STEP REQUIRES APP: {app.upper()}\n"
+                f"You are currently on: {self.device_state}\n"
+                f"DO NOT perform this step here. Navigate to {app} first.\n"
+                if app and app != "unknown" and not self._in_target_app(app, self.device_state)
+                else ""
+            )
+            + f"\nCURRENT SCREEN:\n{pruned_tree}\n"
             + (f"\n{history_ctx}" if history_ctx else "")
             + "\n\nRespond with Thought and Action."
         )
+
+        logger.info(
+            f"[T3] LLM_INPUT step={step_number} | state={self.device_state} | app={app} | "
+            f"hint_len={len(hint_context or '')} | handoff_len={len(handoff_context or '')} | "
+            f"history_items={len(thought_history)} | ui_lines={len((pruned_tree or '').splitlines())}"
+        )
+        logger.debug("[T3] SYSTEM_PROMPT:\n" + system_prompt)
+        logger.debug("[T3] USER_PROMPT:\n" + user_prompt)
 
         raw_response = ""
         for attempt in range(2):
             suffix = "\n\nSTRICT: Start with 'Thought:' on line 1." if attempt == 1 else ""
             try:
+                logger.info(f"[T3] LLM_CALL attempt={attempt+1}/2")
                 response = await self.llm_client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": system_prompt},
@@ -1457,7 +1907,8 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                 )
                 raw_response = response.choices[0].message.content.strip()
                 self._track_llm_usage(response)
-                logger.debug(f"[T3] Raw LLM:\n{raw_response}")
+                logger.info(f"[T3] LLM_RAW: {raw_response[:300]}")
+                logger.debug(f"[T3] Raw LLM full:\n{raw_response}")
                 break
             except Exception as e:
                 logger.error(f"[T3] LLM error attempt {attempt+1}: {e}")
@@ -1517,6 +1968,9 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                 action_json["action_type"] = new_type
                 action_json.update(extra)
                 logger.info(f"[T3] Normalized action_type '{atype}' → '{new_type}'")
+
+        logger.info(f"[T3] LLM_THOUGHT: {thought_text}")
+        logger.info(f"[T3] LLM_ACTION_JSON: {json.dumps(action_json, ensure_ascii=False)}")
 
         return thought_text, action_json
 
@@ -1661,17 +2115,22 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                   f"Screen: {summary}\n\nIs this '{target_app}'?\n"
                   f'Reply ONLY: {{"correct":true/false,"reason":"one sentence"}}')
         try:
+            logger.debug("[T1] App verify prompt:\n" + prompt)
             resp = await self.llm_client.chat.completions.create(
                 model=self.model, messages=[{"role": "user", "content": prompt}],
                 temperature=0.0, max_tokens=60,
             )
             self._track_llm_usage(resp)
-            js = self._extract_json(resp.choices[0].message.content.strip())
+            raw = resp.choices[0].message.content.strip()
+            logger.info(f"[T1] App verify raw: {raw[:200]}")
+            logger.debug(f"[T1] App verify raw full:\n{raw}")
+            js = self._extract_json(raw)
             if js:
                 d = json.loads(js)
                 correct = bool(d.get("correct", True))
                 logger.info(f"[T1] App verify: correct={correct} — {d.get('reason','')}")
                 return {"success": correct, "actual": app_name, "reason": d.get("reason", "")}
+            logger.warning("[T1] App verify: no JSON extracted from model response")
         except Exception as e:
             logger.warning(f"[T1] App verify LLM failed: {e}")
         if "home" in self._prev_device_state and "in_app" in cur_state:
@@ -1687,8 +2146,16 @@ Action: {{"action_type": "click", "element_id": 42}}"""
         Lightweight sanity check for EXECUTE-band cached steps.
         Verifies whether the first retrieved step matches current goal/context.
         """
-        if recipe.similarity > 0.97:
+        if recipe.similarity > 0.92:
             logger.debug(f"[T2] Context verify skipped (high sim={recipe.similarity:.3f})")
+            return True
+
+        is_nav = any(
+            kw in (recipe.step_instruction or "").lower()
+            for kw in ("open", "launch", "start", "navigate to")
+        )
+        if is_nav:
+            logger.debug("[T2] Context verify skipped — nav step always valid")
             return True
 
         screen_summary = " | ".join(
@@ -1705,6 +2172,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
             f'Reply ONLY: {{"ok":true/false,"r":"one phrase"}}'
         )
         try:
+            logger.debug("[T2] Context verify prompt:\n" + prompt)
             resp = await self.llm_client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
@@ -1712,12 +2180,16 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                 max_tokens=35,
             )
             self._track_llm_usage(resp)
-            js = self._extract_json(resp.choices[0].message.content.strip())
+            raw = resp.choices[0].message.content.strip()
+            logger.info(f"[T2] Context verify raw: {raw[:200]}")
+            logger.debug(f"[T2] Context verify raw full:\n{raw}")
+            js = self._extract_json(raw)
             if js:
                 d = json.loads(js)
                 ok = bool(d.get("ok", True))
                 logger.info(f"[T2] Context verify: ok={ok} — {d.get('r','')}")
                 return ok
+            logger.warning("[T2] Context verify: no JSON extracted; defaulting to permissive True")
         except Exception as e:
             logger.debug(f"[T2] Context verify failed: {e}")
         return True
@@ -1736,6 +2208,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
         )
 
         selectors: List[Dict[str, str]] = []
+        stored_action_type = "global_action" if is_nav_task else "click"
         if not is_nav_task and self.last_clicked_element:
             elem = self.current_ui_tree.get_element_by_id(self.last_clicked_element)
             if elem:
@@ -1748,7 +2221,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                 ]:
                     if attr: selectors.append({"by": by, "value": attr})
         last = self.action_history[-1] if self.action_history else {}
-        atype = last.get("action", {}).get("action_type", "click")
+        atype = stored_action_type if is_nav_task else last.get("action", {}).get("action_type", "click")
         record_id = self.task_memory.store(
             step_instruction=step_instruction, overall_goal=overall_goal,
             app=app, action_type=atype, screen_signature=sig,
@@ -1757,7 +2230,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
         if record_id:
             logger.info(
                 f"[CACHE] Stored Tier 3 success: '{step_instruction[:55]}' id={record_id[:8]}"
-                + (" (no selectors — nav task)" if is_nav_task else "")
+                + (" (nav task — no selectors)" if is_nav_task else "")
             )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1822,25 +2295,46 @@ Action: {{"action_type": "click", "element_id": 42}}"""
 
     def _verify_complete_claim(self, action_json: Dict, goal: str) -> Dict:
         gl = goal.lower()
-        if not any(kw in gl for kw in ("fill", "type", "enter", "set")): return action_json
-        if not self.current_ui_tree: return action_json
-        expected = []
-        em = re.search(r"(?:to|recipient)\s+([a-zA-Z0-9._%+-]+@\S+)", gl)
-        if em: expected.append(em.group(1))
-        sm = re.search(r"subject\s+['\"]?([^'\"]+)['\"]?", gl)
-        if sm: expected.append(sm.group(1).strip())
-        tm = re.search(r"(\d{1,2}:\d{2}\s*(?:am|pm))", gl, re.IGNORECASE)
-        if tm: expected.append(tm.group(1).strip())
-        if not expected: return action_json
-        screen_text = " ".join(
-            (e.text or "") + " " + (e.content_description or "")
-            for e in self.current_ui_tree.elements
-        ).lower()
-        missing = [v for v in expected if v.lower() not in screen_text]
-        if missing:
-            logger.error(f"[T3] Complete rejected: {missing} not on screen")
-            return {"action_type": "scroll", "direction": "down", "duration": 300,
-                    "thought": "verify failed — scroll"}
+        if not self.current_ui_tree:
+            return action_json
+
+        if any(kw in gl for kw in ("fill", "type", "enter", "set")):
+            expected = []
+            em = re.search(r"(?:to|recipient)\s+([a-zA-Z0-9._%+-]+@\S+)", gl)
+            if em: expected.append(em.group(1))
+            sm = re.search(r"subject\s+['\"]?([^'\"]+)['\"]?", gl)
+            if sm: expected.append(sm.group(1).strip())
+            tm = re.search(r"(\d{1,2}:\d{2}\s*(?:am|pm))", gl, re.IGNORECASE)
+            if tm: expected.append(tm.group(1).strip())
+            if expected:
+                screen_text = " ".join(
+                    (e.text or "") + " " + (e.content_description or "")
+                    for e in self.current_ui_tree.elements
+                ).lower()
+                missing = [v for v in expected if v.lower() not in screen_text]
+                if missing:
+                    logger.error(f"[T3] Complete rejected: {missing} not on screen")
+                    return {"action_type": "scroll", "direction": "down", "duration": 300,
+                            "thought": "verify failed — scroll"}
+
+        if any(kw in gl for kw in ("search", "find", "look for")):
+            target_match = re.search(
+                r"(?:search|find|look)\s+for\s+['\"]?(\w+)['\"]?", gl, re.IGNORECASE
+            )
+            if target_match:
+                target = target_match.group(1).lower()
+                screen_text = " ".join(
+                    (e.text or "") + " " + (e.content_description or "")
+                    for e in self.current_ui_tree.elements
+                ).lower()
+                results_indicators = {"result", "install", "open", "get", "download", "free"}
+                has_target = target in screen_text
+                has_results = any(ind in screen_text for ind in results_indicators)
+                if not has_target and not has_results:
+                    logger.error(f"[T3] Complete rejected: search target '{target}' not visible")
+                    return {"action_type": "scroll", "direction": "up", "duration": 300,
+                            "thought": "search results not confirmed — scroll up"}
+
         return action_json
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1853,16 +2347,10 @@ Action: {{"action_type": "click", "element_id": 42}}"""
             goal, re.IGNORECASE,
         )
         if m:
-            c = re.sub(r"\s+(login|home|main|app|page|screen)$", "",
+            c = re.sub(r"\s+(login|home|main|app|page|screen|application|applications)$", "",
                        m.group(1).strip().lower()).strip()
             if c and not any(w in c.split() for w in _GENERIC_PAGE_WORDS):
                 if c not in ("the", "a", "an", "my", "this", "that", "app", "it"):
-                    return c
-        m2 = re.search(r"\b(?:in|on|from|using|via)\s+(\w+(?:\s+\w+)?)\s*$", goal, re.IGNORECASE)
-        if m2:
-            c = m2.group(1).strip().lower()
-            if c not in ("the", "a", "an", "my", "this", "that", "it"):
-                if not any(w in c.split() for w in _GENERIC_PAGE_WORDS):
                     return c
         return None
 
@@ -1955,6 +2443,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
         self.action_history           = []
         self.previous_ui_trees        = []
         self._time_picker_pm_attempts = 0
+        self._last_t2_hint_record_id  = None
         self.token_usage = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls          = 0
         self.total_ui_elements_seen   = 0

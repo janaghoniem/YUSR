@@ -245,8 +245,13 @@ Your goal is correctness, clarity, and usefulness to the system."""
             # Parse JSON response
             try:
                 parsed_response = json.loads(clean_response)
-                result_content = parsed_response.get("result", str(parsed_response))
-                logger.info(f"✅ Reasoning complete: {str(result_content)[:200]}...")
+                result_content = parsed_response.get("result", parsed_response)
+                if isinstance(result_content, (dict, list)):
+                    result_content = json.dumps(result_content, ensure_ascii=False)
+                elif not isinstance(result_content, str):
+                    result_content = str(result_content)
+                    
+                logger.info(f"✅ Reasoning complete: {result_content[:200]}...")
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",
@@ -254,14 +259,15 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     "metadata": parsed_response.get("metadata", {})
                 }
             except json.JSONDecodeError:
-                # Last resort: if still not parseable, return the cleaned text directly.
-                # This avoids injecting raw fenced JSON blocks into downstream tasks.
-                logger.warning("⚠️ Response was not valid JSON, using cleaned raw text")
+                # Last resort: if still not parseable, return failed status.
+                # This prevents downstream tasks from receiving raw unstructured data instead of expected JSON.
+                logger.warning("⚠️ Response was not valid JSON, returning failure")
                 return {
                     "task_id": task_payload.get("task_id"),
-                    "status": "success",
+                    "status": "failed",
+                    "error": "Reasoning response did not contain valid JSON",
                     "content": clean_response,
-                    "metadata": {"notes": "Response was not in JSON format"}
+                    "metadata": {"notes": "Failed to parse reasoning output"}
                 }
 
         except Exception as e:

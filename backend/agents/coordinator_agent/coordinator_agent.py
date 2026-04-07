@@ -28,7 +28,7 @@ from langchain_groq import ChatGroq
 
 llm = ChatGroq(
     model=LLM_MODEL,
-    temperature=0.1,
+    temperature=0.05,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
 ) 
@@ -123,6 +123,51 @@ async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, me
     except Exception as e:
         logger.warning(f"⚠️ save_checkpoint_compat failed (non-fatal): {e}")
         return False
+    
+# ── F3: Coordinator confirmation sanitiser ────────────────────────────────────
+def sanitize_confirmation_for_prompt(text: str) -> str:
+    """
+    Sanitize the confirmation string before embedding it in the coordinator
+    LLM prompt. Blocks chained injection (A6) where attacker embeds
+    'IMPORTANT SYSTEM NOTE' style instructions inside response_text which
+    then get read as commands by the coordinator LLM.
+    """
+    if not text:
+        return text
+
+    COORDINATOR_INJECTION_MARKERS = [
+        "important system note",
+        "system note:",
+        "you must also add",
+        "add a second task",
+        "add a task to",
+        "also list all",
+        "ignore previous",
+        "disregard your",
+        "forget everything",
+        "set response_text",
+        "<|system|>",
+        "<|user|>",
+        "ignore previous formatting",
+        "ignore previous formatting rules",
+        "using pathlib",
+        "using shutil",
+    ]
+
+    text_lower = text.lower()
+    for marker in COORDINATOR_INJECTION_MARKERS:
+        if marker in text_lower:
+            logger.warning(
+                f"🚫 F3: Coordinator injection marker detected: '{marker}' — "
+                f"stripping to first sentence only"
+            )
+            idx = text_lower.index(marker)
+            safe_part = text[:idx].strip().rstrip('.,;')
+            logger.warning(f"   Safe part kept: '{safe_part[:80]}'")
+            return safe_part if safe_part else "Task request received."
+
+    return text
+
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -245,7 +290,7 @@ class ActionTask(BaseModel):
     # Interaction: {"action": "fill", "text": "search query"}  # Selector comes from RAG
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
-    target_agent: Literal["action", "reasoning"] = "action"
+    target_agent: Literal["action", "reasoning", "language"] = "action"
     depends_on: Optional[List[str]] = None
     
     class Config:
@@ -463,6 +508,7 @@ class CoordinatorState(BaseModel):
     conversation_history: List[Dict] = Field(default_factory=list)
     last_successful_action: Optional[str] = None
     current_page_url: Optional[str] = None
+    plan_error: Optional[str] = None
 
 # ============================================================================
 # ENHANCED TASK DECOMPOSITION - NO HARDCODED URLs
@@ -631,7 +677,13 @@ A COMPOSITE request:
 # DEVICE & CONTEXT
 
 - **device**: "desktop" or "mobile"
-- **context**: "local" (native OS/apps) or "web" (browser automation)
+- **context**:
+  - "web" → ONLY for desktop browser automation.
+  - "local" → for all mobile tasks, including web browsing on mobile.
+  
+  **Mobile devices**: even when the user says "open Chrome and search for X", you MUST use context: "local". The mobile automation layer handles browser opening, navigation, and typing locally.
+  
+  **Desktop**: use "web" for browser actions, "local" for native OS/apps.
 
 # TARGET AGENTS
 
@@ -794,17 +846,28 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
 
 - task_id: task_6
   goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before sending it. Wait for their response.
+  device: mobile
+  context: local
+  target_agent: language
+  extra_params:
+    input_from: "task_1"
+  depends_on: ["task_1", "task_5"]
+
+- task_id: task_7
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Click the Send button to send the email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_5"]
+  depends_on: ["task_6"]
 
 EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
 task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
 the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
-so the action layer can parse SUBJECT and BODY individually.
+so the action layer can parse SUBJECT and BODY individually. 
+task_6 explicitly takes input_from: "task_1" so the language agent can read the generated content to the user before task_7 sends it.
 The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
 
 ## Example 4: Mobile Configuration Task
@@ -878,12 +941,18 @@ EXPLANATION: Task 2 uses "reasoning" because writing a story is content generati
 
 # WHEN TO USE target_agent: "reasoning" vs "action"
 
-- **"action"**: Tasks that interact with the OS, apps, or browser (open, click, type, navigate, fill, screenshot, etc.)
-- **"reasoning"**: Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element, it is reasoning.
+- **Extracting text from UI, files, or webpages** (e.g., “read the price”, “get the error message”, “copy the visible text”) → ALWAYS target_agent: "action".
+- **Reasoning** is for content generation, summarisation, translation, or analysis AFTER text has been extracted by an action task.
+- If the user asks to understand or interpret extracted content, use two tasks:
+    1. Action task to extract the raw text.
+    2. Reasoning task that depends on the action task and receives the text via extra_params["input_content"].
+- **"action"**: Tasks that interact with the OS, apps, files, or browser (open file, read file, click, type, navigate, fill, screenshot, etc.). A reasoning component CANNOT open files or applications.
+- **"reasoning"**: Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element or file system, it is reasoning.
 
 Examples of REASONING tasks:
 - "Write a scary story" → reasoning
 - "Summarize this article" → reasoning
+- "Solve these math problems" → reasoning
 - "Translate this to Arabic" → reasoning
 - "Draft an email to my boss" → reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
 - "Explain quantum computing" → reasoning
@@ -895,6 +964,8 @@ into separate reasoning tasks. The action layer will parse the output and fill
 each field individually.
 
 Examples of ACTION tasks:
+- "Open the file worksheet.txt" → action
+- "Read text from the file" → action
 - "Open Notepad" → action
 - "Click the submit button" → action
 - "Navigate to google.com" → action
@@ -913,6 +984,16 @@ Examples of ACTION tasks:
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
 11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
+12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results and formats them into a natural, helpful conversational response.
+13. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action.
+  - The confirmation task must have:
+    - target_agent: "language"
+    - ai_prompt: "(e.g., Read out the generated content. Ask the user to confirm or critique this task. Wait for their response.)"
+    - extra_params: Must contain {{"input_from": "<generation_task_id>"}} so the language agent actually receives the text to read out.
+    - depends_on: the generation task
+  - The send task must depend on the confirmation task.
+  - If a user replies with a **critique** or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending. 
+  - The Language Agent will handle the user interaction and signal approval or return the user's critique.
 
 ============================
 OUTPUT RULES
@@ -926,7 +1007,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
     "ai_prompt": <string>,
     "device": <"desktop" | "mobile">,
     "context": <"local" | "web">,
-    "target_agent": <"action" | "reasoning">,
+    "target_agent": <"action" | "reasoning" | "language">,
     "extra_params": <object>,
     "web_params": <object>,
     "depends_on": <array of strings | null>
@@ -1038,10 +1119,149 @@ Generate the task decomposition now:"""
         if not shared_goal:
             shared_goal = str(user_request.get("original_input") or user_request.get("confirmation") or user_request.get("action") or "Complete the requested task").strip()
 
-        for t in task_dicts:
+        for idx, t in enumerate(task_dicts):
             t["goal"] = shared_goal
 
+            extra_params = t.get("extra_params") or {}
+            if not isinstance(extra_params, dict):
+                extra_params = {}
+
+            # Inject the shared top-level goal for downstream mobile execution.
+            if not extra_params.get("overall_goal"):
+                extra_params["overall_goal"] = shared_goal
+            if not extra_params.get("goal"):
+                extra_params["goal"] = shared_goal
+
+            # Best-effort app propagation so dependent mobile steps inherit the app.
+            if not extra_params.get("app_name"):
+                dep_raw = t.get("depends_on")
+                dep_ids = dep_raw if isinstance(dep_raw, list) else ([dep_raw] if dep_raw else [])
+                for dep_id in dep_ids:
+                    for prev in task_dicts[:idx]:
+                        if prev.get("task_id") == dep_id:
+                            prev_app = (prev.get("extra_params") or {}).get("app_name", "")
+                            if prev_app:
+                                extra_params["app_name"] = prev_app
+                                break
+                    if extra_params.get("app_name"):
+                        break
+
+            t["extra_params"] = extra_params
+
         action_tasks = [ActionTask(**task) for task in task_dicts]
+
+        # ── LLM VALIDATION PASS ────────────────────────────────────────────────
+        validation_prompt = f"""You are the AURA Task Decomposition Validator. Review the proposed decomposition for the user request.
+
+USER REQUEST:
+{json.dumps(user_request, indent=2)}
+
+PROPOSED DECOMPOSITION:
+{json.dumps(task_dicts, indent=2)}
+
+**YOUR JOB**:
+- ONLY modify the plan if you find a CLEAR VIOLATION of the rules.
+- DO NOT add or remove steps just because you would have written it differently.
+- DO NOT change the order of steps unless it breaks a logical dependency.
+- Return the plan EXACTLY as given if no violation exists.
+
+**Device‑Logical Validation**:
+Imagine you are giving step‑by‑step instructions to a user on that device (e.g., an Android phone). Ask yourself: would these steps be logical and complete?
+- For mobile: Do not assume a browser is already open unless the user said so. Opening a browser is its own step.
+- Do not skip necessary taps (e.g., after filling a field, a “Next” or “Send” button must be clicked).
+- Ensure that the number of steps matches what a human would need to do.
+If the plan violates this common‑sense device logic, you MAY add missing steps or remove redundant ones, but only if strictly necessary.
+
+**CRITICAL RULES TO ENFORCE**:
+1. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST ensure a confirmation task exists AFTER generation but BEFORE the final send action.
+  - The confirmation task must have: target_agent: "language", and its ai_prompt MUST explicitly tell the agent to read the generated content aloud to the user and ask for confirmation or critique.
+  - The confirmation task must explicitly declare `input_from: "<generation_task_id>"` in its `extra_params` so the text is routed to the language agent.
+  - The send task must depend on the confirmation task.
+  - If the user provides a critique (e.g., "make it shorter"), ensure the task sequence re-generates the content using a reasoning task, re-fills the new text, and asks for confirmation again.
+2. **One action per task** - never combine multiple actions.
+3. NO URLs or selectors hardcoded.
+4. Content generation MUST use target_agent: "reasoning".
+
+Return ONLY a valid JSON array of tasks (same format as input). Do not include markdown or explanations.
+"""
+        try:
+            val_response = await llm.ainvoke(validation_prompt)
+            val_text = val_response.content if hasattr(val_response, 'content') else str(val_response)
+            val_text = val_text.strip()
+            
+            # Step A: strip markdown fences
+            if "```" in val_text:
+                parts = val_text.split("```")
+                if len(parts) > 1:
+                    inner = parts[1].strip()
+                    if inner.startswith("json"):
+                        inner = inner[4:].strip()
+                    val_text = inner
+
+            # Step B: extract JSON array
+            val_json_str = _extract_first_json_array(val_text)
+            val_parsed = None
+            if val_json_str:
+                try:
+                    val_parsed = json.loads(val_json_str)
+                except json.JSONDecodeError:
+                    pass
+
+            if val_parsed is None:
+                try:
+                    candidate = json.loads(val_text.strip())
+                    if isinstance(candidate, dict) and "tasks" in candidate:
+                        val_parsed = candidate["tasks"]
+                    elif isinstance(candidate, list):
+                        val_parsed = candidate
+                except json.JSONDecodeError:
+                    pass
+            
+            if isinstance(val_parsed, list) and len(val_parsed) > 0:
+                validated_tasks_dicts = [t for t in val_parsed if isinstance(t, dict)]
+                for t in validated_tasks_dicts:
+                    t["goal"] = shared_goal  # Enforce shared goal
+                action_tasks = [ActionTask(**t) for t in validated_tasks_dicts]
+                logger.info(f"✅ Validation pass applied. Final tasks: {len(action_tasks)}")
+        except Exception as ve:
+            logger.warning(f"⚠️ Validation pass failed: {ve}. Using original decomposition.")
+
+        # ── PLAN GRAPH VALIDATION ──────────────────────────────────────────────
+        try:
+            valid_ids = {t.task_id for t in action_tasks}
+            # 1. Remove dangling dependencies
+            for t in action_tasks:
+                if t.depends_on:
+                    cleaned_deps = [dep for dep in t.depends_on if dep in valid_ids]
+                    t.depends_on = cleaned_deps if cleaned_deps else None
+            
+            # 2. Check for cycles (basic DFS)
+            visited = set()
+            path = set()
+            def has_cycle(task_id):
+                if task_id in path:
+                    return True
+                if task_id in visited:
+                    return False
+                visited.add(task_id)
+                path.add(task_id)
+                task = next((t for t in action_tasks if t.task_id == task_id), None)
+                if task and task.depends_on:
+                    for dep in task.depends_on:
+                        if has_cycle(dep):
+                            return True
+                path.remove(task_id)
+                return False
+
+            for t in action_tasks:
+                if has_cycle(t.task_id):
+                    logger.error(f"❌ Cycle detected involving task {t.task_id}, clearing its dependencies to break cycle.")
+                    t.depends_on = None
+                    # Re-run cycle breaking if necessary, but clearing one is usually enough for simple cases.
+                    path.clear()
+                    
+        except Exception as graph_e:
+            logger.warning(f"⚠️ Plan graph validation encountered an error: {graph_e}")
 
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
         return {"tasks": action_tasks}
@@ -1086,6 +1306,40 @@ def create_coordinator_graph():
             preferences_context = pref_mgr.get_relevant_preferences(
                 str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
             )
+
+            # ── Memory Fix 3: Strip credentials from coordinator context ──────────
+            # T-M3/T-M4: Coordinator was embedding stored passwords into task
+            # decomposition prompt, potentially passing them to execution agents.
+            _CRED_MARKERS_COORD = [
+                "password", "passwd", "pwd", "secret",
+                "api key", "apikey", "api_key", "token",
+                "private key", "passphrase",
+            ]
+            if isinstance(preferences_context, list):
+                _orig_count = len(preferences_context)
+                preferences_context = [
+                    p for p in preferences_context
+                    if not any(m in str(p).lower() for m in _CRED_MARKERS_COORD)
+                ]
+                _blocked = _orig_count - len(preferences_context)
+                if _blocked > 0:
+                    logger.warning(
+                        f"🚫 Memory Fix 3: Removed {_blocked} credential memory "
+                        f"item(s) from coordinator context"
+                    )
+            elif isinstance(preferences_context, str):
+                _clean_lines = []
+                for _line in preferences_context.split('\n'):
+                    if any(m in _line.lower() for m in _CRED_MARKERS_COORD):
+                        logger.warning(
+                            f"🚫 Memory Fix 3: Removed credential line from context: "
+                            f"'{_line[:60]}'"
+                        )
+                    else:
+                        _clean_lines.append(_line)
+                preferences_context = '\n'.join(_clean_lines)
+            # ─────────────────────────────────────────────────────────────────────
+
         except Exception as e:
             logger.warning(f"⚠️ Could not retrieve preferences: {e}")
             preferences_context = "No user preferences available"
@@ -1113,9 +1367,12 @@ def create_coordinator_graph():
             current_page_url=current_page_url  # ✅ BROWSER STATE hala edit ll web
         )
         
+        # Save the plan execution error if there was one
+        plan_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
+        
         # Surface decomposition errors when present
-        if isinstance(plan_result, dict) and "error" in plan_result:
-            logger.error(f"❌ Decomposition returned error: {plan_result['error']}")
+        if plan_error:
+            logger.error(f"❌ Decomposition returned error: {plan_error}")
             tasks = []
         else:
             tasks = plan_result.get("tasks", [])
@@ -1138,6 +1395,7 @@ def create_coordinator_graph():
             "original_message_id": original_message_id,
             "user_id": user_id,
             "preferences_context": preferences_context,
+            "plan_error": plan_error,
         }
 
     async def execute_tasks(state: Dict) -> Dict:
@@ -1182,6 +1440,7 @@ def create_coordinator_graph():
                     "remaining_tasks": [t.task_id for t in list(task_queue.current_queue)],
                     "timestamp": datetime.now().isoformat()
                 }
+                #edit here
                 # Original upstream version (commented for reference)
                 # await save_checkpoint_compat(
                 #     session_id,
@@ -1191,7 +1450,7 @@ def create_coordinator_graph():
                 
                 # Stashed changes version - use both methods for redundancy
                 await checkpointer.aput(
-                    config={"configurable": {"thread_id": session_id}},
+                    config={"configurable": {"thread_id": session_id, "checkpoint_ns": ""}},
                     checkpoint={"execution_state": execution_state},
                     metadata={"type": "task_progress"},
                     new_versions=[]
@@ -1224,16 +1483,35 @@ def create_coordinator_graph():
             current_task = task_queue.get_next_task()
             if not current_task:
                 break
+
+            # Defense-in-depth: ensure dispatched tasks always retain shared goal context.
+            if current_task.extra_params is None:
+                current_task.extra_params = {}
+            if not current_task.extra_params.get("overall_goal"):
+                current_task.extra_params["overall_goal"] = current_task.goal or current_task.ai_prompt
+            if not current_task.extra_params.get("goal"):
+                current_task.extra_params["goal"] = current_task.goal or current_task.ai_prompt
+
+            if not current_task.extra_params.get("app_name") and current_task.depends_on:
+                dep_raw = current_task.depends_on
+                dep_ids = dep_raw if isinstance(dep_raw, list) else [dep_raw]
+                for dep_id in dep_ids:
+                    dep_id = dep_id.strip() if isinstance(dep_id, str) else dep_id
+                    dep_task = next((t for t in state.get("tasks", []) if getattr(t, "task_id", None) == dep_id), None)
+                    dep_app = (getattr(dep_task, "extra_params", {}) or {}).get("app_name") if dep_task else ""
+                    if dep_app:
+                        current_task.extra_params["app_name"] = dep_app
+                        break
             
             # Check dependencies
             if current_task.depends_on:
                 dep_ids = current_task.depends_on
                 dependencies_met = all(
                    results.get(dep_id.strip()) 
-                   and results.get(dep_id.strip()).status == "success"
+                   and results.get(dep_id.strip()).status in {"success", "awaiting_confirmation"}
                    for dep_id in dep_ids
                 )
-                
+
                 if not dependencies_met:
                     logger.warning(f"⏭️ Skipping {current_task.task_id} - dependencies not met")
                     results[current_task.task_id] = TaskResult(
@@ -1273,10 +1551,24 @@ def create_coordinator_graph():
                             try:
                                 parsed = json.loads(stripped)
                                 if isinstance(parsed, dict) and "result" in parsed:
-                                    stripped = str(parsed["result"])
+                                    res_val = parsed["result"]
+                                    if isinstance(res_val, (dict, list)):
+                                        stripped = json.dumps(res_val, ensure_ascii=False)
+                                    else:
+                                        stripped = str(res_val)
                             except Exception:
                                 pass
                         raw_dep_output = stripped
+                    
+                    if not raw_dep_output or (isinstance(raw_dep_output, str) and not raw_dep_output.strip()):
+                        logger.warning(f"Warning: Reasoning task {dep_id} produced empty output")
+                        results[current_task.task_id] = TaskResult(
+                            task_id=current_task.task_id,
+                            status="failed",
+                            error=f"Dependency output was empty: {dep_id}"
+                        )
+                        continue
+
                     current_task.extra_params["input_content"] = raw_dep_output
                     logger.info(f"📎 Auto-injected output from {dep_id} into {current_task.task_id}")
             
@@ -1308,7 +1600,7 @@ def create_coordinator_graph():
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
             
-            if current_task.context == "web" and session_id:
+            if current_task.context == "web" and current_task.target_agent == "action" and session_id:
                 url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
                 if url_match:
                     extracted_url = url_match.group(1).strip()
@@ -1330,6 +1622,10 @@ def create_coordinator_graph():
                 # Plain text content
                 cleaned_content = result.content.replace("EXECUTION_SUCCESS", "").replace("FAILED:", "").strip()
                 #hala edit ashan el web
+                if current_task.context == "web" and current_task.target_agent == "action":
+                    cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
+                # task_outputs[current_task.task_id] = result.content
+                            # Only store if there's actual content
                 cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
                 if cleaned_content:
                     output_to_store = cleaned_content
@@ -1382,11 +1678,16 @@ def create_coordinator_graph():
 
                 if event.get("decision") in {"ask_user", "fail_safely"}:
                     clarification_event = event
+                    if event.get("decision") == "fail_safely":
+                        task_queue.current_queue.clear()
                     break
 
                 
             if result.status == "failed":
                 logger.error(f"❌ Task {current_task.task_id} failed: {result.error}")
+                # Clear the remaining task queue to prevent executing leftover 
+                # tasks in the future if a new plan is added to this session
+                task_queue.current_queue.clear()
                 break
         
         return {
@@ -1438,6 +1739,7 @@ def create_coordinator_graph():
         
         success_count = sum(1 for r in results.values() if r.status == "success")
         total_count = len(results)
+        plan_error = state.get("plan_error", "")
         
         # ✅ FIX 3: Update conversation history
         if success_count > 0:
@@ -1521,20 +1823,29 @@ def create_coordinator_graph():
             await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
             return {"status": "failed"}
 
-        # ── Build readable content from task results ─────────────────────────
-        detail_lines = []
-        has_reasoning_content = False
-        for task_obj in state.get("tasks", []):
-            tid = task_obj.task_id if hasattr(task_obj, 'task_id') else task_obj.get('task_id', '')
-            r = results.get(tid)
-            if r and r.content:
-                extracted_content = _extract_readable_text(r.content)
-                if extracted_content:
-                    detail_lines.append(extracted_content)
-                if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
-                    has_reasoning_content = True
+        # Override the error response if we had a planning error
+        if total_count == 0 and plan_error:
+            # We don't have tasks because decomposition failed (e.g. rate limit). 
+            # We construct a synthetic message to pass down to Language Agent.
+            full_content = f"A task planning error occurred: {plan_error}"
+            success_count = 0
+            has_reasoning_content = False
+            detail_lines = []
+        else:
+            # ── Build readable content from task results ─────────────────────────
+            detail_lines = []
+            has_reasoning_content = False
+            for task_obj in state.get("tasks", []):
+                tid = task_obj.task_id if hasattr(task_obj, 'task_id') else task_obj.get('task_id', '')
+                r = results.get(tid)
+                if r and r.content:
+                    extracted_content = _extract_readable_text(r.content)
+                    if extracted_content:
+                        detail_lines.append(extracted_content)
+                    if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
+                        has_reasoning_content = True
 
-        full_content = "\n\n".join(detail_lines) if detail_lines else ""
+            full_content = "\n\n".join(detail_lines) if detail_lines else ""
 
         # ── Delegate user-facing message to Language Agent ────────────────────
         # The Coordinator does NOT generate user communication directly.
@@ -1557,6 +1868,7 @@ def create_coordinator_graph():
                         "success_count": success_count,
                         "total_count": total_count,
                         "has_reasoning_content": has_reasoning_content,
+                        "plan_error": plan_error,
                     },
                     lang=user_language,
                 )
@@ -1567,8 +1879,15 @@ def create_coordinator_graph():
             logger.warning(f"⚠️ Language Agent message generation failed, using fallback: {e}")
 
         # ── Safe fallback if Language Agent unavailable ───────────────────────
+        used_fallback = False
         if not response_text:
-            if success_count == total_count and total_count > 0:
+            used_fallback = True
+            if total_count == 0 and plan_error:
+                if "Rate limit" in plan_error or "429" in plan_error:
+                    response_text = "بعتذر، نأسف لحدوث ضغط على النظام يرجى المحاولة لاحقاً." if is_arabic else "I apologize for the high system load, please try again later."
+                else:
+                    response_text = f"حدث خطأ أثناء التخطيط: {plan_error}" if is_arabic else f"Planning error occurred: {plan_error}"
+            elif success_count == total_count and total_count > 0:
                 response_text = (
                     f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
                     if is_arabic else
@@ -1587,29 +1906,30 @@ def create_coordinator_graph():
                     "Task could not be completed. Please try again."
                 )
 
-        # Build follow-up question for read-aloud offer (appended to response)
+        # Build follow-up question for read-aloud offer (only if fallback used)
         follow_up_question = None
-        if success_count == 0:
-            follow_up_question = (
-                "المهمة ما كملتش. تحب أحاول تاني؟"
-                if is_arabic else
-                "The task didn't complete. Would you like me to try again?"
-            )
-        elif success_count < total_count:
-            follow_up_question = (
-                "تم التنفيذ جزئيًا. تحب أحاول أكمل الخطوات اللي فشلت؟"
-                if is_arabic else
-                "It was only partially completed. Would you like me to retry the failed steps?"
-            )
-        elif has_reasoning_content and len(full_content) > 200 and not follow_ups:
-            follow_up_question = (
-                "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
-                if is_arabic else
-                "Would you like me to read the results out loud or explain them briefly?"
-            )
+        if used_fallback:
+            if success_count == 0:
+                follow_up_question = (
+                    "المهمة ما كملتش. تحب أحاول تاني؟"
+                    if is_arabic else
+                    "The task didn't complete. Would you like me to try again?"
+                )
+            elif success_count < total_count:
+                follow_up_question = (
+                    "تم التنفيذ جزئيًا. تحب أحاول أكمل الخطوات اللي فشلت؟"
+                    if is_arabic else
+                    "It was only partially completed. Would you like me to retry the failed steps?"
+                )
+            elif has_reasoning_content and len(full_content) > 200 and not follow_ups:
+                follow_up_question = (
+                    "تحب أقرأ النتائج بصوت عالي ولا أشرحها باختصار؟"
+                    if is_arabic else
+                    "Would you like me to read the results out loud or explain them briefly?"
+                )
 
-        if follow_up_question:
-            response_text = f"{response_text} {follow_up_question}"
+            if follow_up_question:
+                response_text = f"{response_text} {follow_up_question}"
 
         # Determine response type
         if success_count == 0:
@@ -1631,6 +1951,19 @@ def create_coordinator_graph():
             context_for_undo={"original_request": original_request, "completed_tasks": [t.task_id for t in state.get("tasks", [])]}
         )
         
+        # ── DiD Layer 3: Output Validation ────────────────────────────────────
+        try:
+            from agents.security.output_validator import validate_output
+            _val = validate_output(response_text, context="coordinator")
+            if _val.was_modified:
+                logger.warning(
+                    f"🔒 Layer 3: Output violations detected: {_val.violations}"
+                )
+            response_text = _val.clean_text
+        except Exception as _val_err:
+            logger.warning(f"⚠️ Layer 3 output validation failed (non-fatal): {_val_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         response_msg = AgentMessage(
             message_type=MessageType.TASK_RESPONSE,
             sender=AgentType.COORDINATOR,
@@ -1881,6 +2214,9 @@ async def execute_single_task(
     if task.target_agent == "action":
         channel = Channels.COORDINATOR_TO_EXECUTION
         receiver = AgentType.EXECUTION
+    elif task.target_agent == "language":
+        channel = Channels.COORDINATOR_TO_LANGUAGE
+        receiver = AgentType.LANGUAGE
     else:
         channel = Channels.COORDINATOR_TO_REASONING
         receiver = AgentType.REASONING
@@ -1968,6 +2304,9 @@ async def start_coordinator_agent(broker_instance):
     async def handle_task_from_language(message: AgentMessage):
         """Handle task from Language Agent"""
         
+        if message.message_type != MessageType.TASK_REQUEST:
+            return
+
         http_request_id = message.response_to if message.response_to else message.message_id
         user_id = message.payload.get("user_id", "default_user")
         session_id = message.session_id
@@ -1996,8 +2335,16 @@ async def start_coordinator_agent(broker_instance):
                 language=user_language
             )
 
+        # ── F3: Sanitise confirmation string before coordinator LLM sees it ──
+        _raw_payload = dict(message.payload)
+        if "confirmation" in _raw_payload:
+            _raw_payload["confirmation"] = sanitize_confirmation_for_prompt(
+                _raw_payload.get("confirmation", "")
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         state_input = {
-            "input": message.payload,
+            "input": _raw_payload,
             "session_id": session_id,
             "original_message_id": http_request_id,
             "user_id": user_id,
@@ -2025,6 +2372,18 @@ async def start_coordinator_agent(broker_instance):
 
             try:
                 result = await coordinator_graph.ainvoke(state_input, config)
+            except asyncio.TimeoutError:
+                # ── Memory Fix 5: Queue recovery on timeout (T-M4 DoS fix) ─────
+                # V-SYS-01: The coordinator queue can deadlock if a task hangs,
+                # blocking all subsequent requests. Reset the queue on timeout so
+                # the server recovers without a manual restart.
+                task_queue.stop()
+                task_queue.reset()
+                logger.warning(
+                    "🔄 Memory Fix 5: Queue cleared after task timeout — "
+                    "server remains operational"
+                )
+                raise
             except KeyError as _ke:
                 if str(_ke) == "'step'":
                     logger.warning(
@@ -2079,6 +2438,9 @@ async def start_coordinator_agent(broker_instance):
         - Race conditions in future handling
         - Silent failures when results arrive out of order
         """
+        if message.message_type != MessageType.EXECUTION_RESPONSE:
+            return
+            
         task_id = message.task_id
         result_status = message.payload.get('status', 'unknown')
         
@@ -2223,6 +2585,7 @@ async def start_coordinator_agent(broker_instance):
     
     # Subscribe to channels
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_task_from_language)
+    broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.EXECUTION_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.REASONING_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.INTERRUPT_CONTROL, handle_interrupt_command)

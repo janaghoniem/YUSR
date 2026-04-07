@@ -90,3 +90,10 @@ face-recognition
 opencv-python
 numpy
 python-multipart
+pywinauto
+pyautogui
+pytesseract
+pillow
+playwright
+docker
+chromadb

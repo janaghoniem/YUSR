@@ -946,12 +946,13 @@ EXPLANATION: Task 2 uses "reasoning" because writing a story is content generati
 - If the user asks to understand or interpret extracted content, use two tasks:
     1. Action task to extract the raw text.
     2. Reasoning task that depends on the action task and receives the text via extra_params["input_content"].
-- **"action"**: Tasks that interact with the OS, apps, or browser (open, click, type, navigate, fill, screenshot, etc.)
-- **"reasoning"**: Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element, it is reasoning.
+- **"action"**: Tasks that interact with the OS, apps, files, or browser (open file, read file, click, type, navigate, fill, screenshot, etc.). A reasoning component CANNOT open files or applications.
+- **"reasoning"**: Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element or file system, it is reasoning.
 
 Examples of REASONING tasks:
 - "Write a scary story" → reasoning
 - "Summarize this article" → reasoning
+- "Solve these math problems" → reasoning
 - "Translate this to Arabic" → reasoning
 - "Draft an email to my boss" → reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
 - "Explain quantum computing" → reasoning
@@ -963,6 +964,8 @@ into separate reasoning tasks. The action layer will parse the output and fill
 each field individually.
 
 Examples of ACTION tasks:
+- "Open the file worksheet.txt" → action
+- "Read text from the file" → action
 - "Open Notepad" → action
 - "Click the submit button" → action
 - "Navigate to google.com" → action
@@ -1223,6 +1226,43 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
         except Exception as ve:
             logger.warning(f"⚠️ Validation pass failed: {ve}. Using original decomposition.")
 
+        # ── PLAN GRAPH VALIDATION ──────────────────────────────────────────────
+        try:
+            valid_ids = {t.task_id for t in action_tasks}
+            # 1. Remove dangling dependencies
+            for t in action_tasks:
+                if t.depends_on:
+                    cleaned_deps = [dep for dep in t.depends_on if dep in valid_ids]
+                    t.depends_on = cleaned_deps if cleaned_deps else None
+            
+            # 2. Check for cycles (basic DFS)
+            visited = set()
+            path = set()
+            def has_cycle(task_id):
+                if task_id in path:
+                    return True
+                if task_id in visited:
+                    return False
+                visited.add(task_id)
+                path.add(task_id)
+                task = next((t for t in action_tasks if t.task_id == task_id), None)
+                if task and task.depends_on:
+                    for dep in task.depends_on:
+                        if has_cycle(dep):
+                            return True
+                path.remove(task_id)
+                return False
+
+            for t in action_tasks:
+                if has_cycle(t.task_id):
+                    logger.error(f"❌ Cycle detected involving task {t.task_id}, clearing its dependencies to break cycle.")
+                    t.depends_on = None
+                    # Re-run cycle breaking if necessary, but clearing one is usually enough for simple cases.
+                    path.clear()
+                    
+        except Exception as graph_e:
+            logger.warning(f"⚠️ Plan graph validation encountered an error: {graph_e}")
+
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
         return {"tasks": action_tasks}
 
@@ -1410,7 +1450,7 @@ def create_coordinator_graph():
                 
                 # Stashed changes version - use both methods for redundancy
                 await checkpointer.aput(
-                    config={"configurable": {"thread_id": session_id}},
+                    config={"configurable": {"thread_id": session_id, "checkpoint_ns": ""}},
                     checkpoint={"execution_state": execution_state},
                     metadata={"type": "task_progress"},
                     new_versions=[]

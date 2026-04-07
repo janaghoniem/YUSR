@@ -1114,48 +1114,88 @@ async def start_language_agent(broker):
         # ─────────────────────────────────────────────────────────────────────
 
         # ── NEW: Intent Classification (zero token cost) ─────────────────────
-        from agents.security.intent_classifier import classify_intent
-        intent_result = classify_intent(input_text)
-        
-        if intent_result.classification.value == "malicious":
-            logger.warning(f"🚫 MALICIOUS intent blocked: {intent_result.reasons}")
-            rejection_msg = AgentMessage(
-                message_type=MessageType.CLARIFICATION_REQUEST,
-                sender=AgentType.LANGUAGE,
-                receiver=AgentType.LANGUAGE,
-                session_id=session_id,
-                response_to=http_request_id,
-                payload={
-                    "question": "I'm not able to process that request. Blocked by security.",
-                    "context": "",
-                    "device_type": device_type
+        # Get or create agent early to manage state
+        agent = get_or_create_agent(session_id, user_id)
+
+        # ── Handle Security Confirmation ──────────────────────────────────────
+        is_security_confirmation = False
+        if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
+            if agent.awaiting_user_response.get("type") == "security_confirmation":
+                orig_request = agent.awaiting_user_response.get("original_request")
+                # Check if user says "yes/ok"
+                lower_input = input_text.lower().strip()
+                if lower_input in ["yes", "y", "ok", "sure", "proceed", "نعم", "موافق", "آه", "done", "do it"]:
+                    logger.info(f"✅ User bypassed security warning. Proceeding with original request.")
+                    input_text = orig_request  # Override input_text with the original prompt!
+                    is_security_confirmation = True
+                else:
+                    logger.info(f"🛑 User rejected security warning: {input_text}")
+                    agent.awaiting_user_response = None
+                    cancel_msg = AgentMessage(
+                        message_type=MessageType.TASK_RESPONSE,
+                        sender=AgentType.LANGUAGE,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=http_request_id,
+                        payload={
+                            "response": "تم إلغاء الإجراء الأمني." if agent.preferred_language == "ar" else "Security action cancelled."
+                        }
+                    )
+                    await broker.publish(Channels.LANGUAGE_OUTPUT, cancel_msg)
+                    return
+                # Clear response state either way
+                agent.awaiting_user_response = None
+
+        if not is_security_confirmation:
+            from agents.security.intent_classifier import classify_intent
+            intent_result = classify_intent(input_text)
+            
+            if intent_result.classification.value == "malicious":
+                logger.warning(f"🚫 MALICIOUS intent blocked: {intent_result.reasons}")
+                rejection_msg = AgentMessage(
+                    message_type=MessageType.CLARIFICATION_REQUEST,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=http_request_id,
+                    payload={
+                        "question": "I'm not able to process that request. Blocked by security.",
+                        "context": "",
+                        "device_type": device_type
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, rejection_msg)
+                return
+            
+            if intent_result.classification.value == "suspicious":
+                logger.info(f"⚠️ SUSPICIOUS intent detected: {intent_result.reasons}")
+                
+                # Store the original suspicious text to bypass classifier next time
+                agent.awaiting_user_response = {
+                    "type": "security_confirmation",
+                    "original_request": input_text
                 }
-            )
-            await broker.publish(Channels.LANGUAGE_OUTPUT, rejection_msg)
-            return
-        
-        if intent_result.classification.value == "suspicious":
-            logger.info(f"⚠️ SUSPICIOUS intent detected: {intent_result.reasons}")
-            # Ask for confirmation before proceeding (cheap, doesn't call LLM yet)
-            confirmation_msg = AgentMessage(
-                message_type=MessageType.CLARIFICATION_REQUEST,
-                sender=AgentType.LANGUAGE,
-                receiver=AgentType.LANGUAGE,
-                session_id=session_id,
-                response_to=http_request_id,
-                payload={
-                    "question": "This action might be sensitive. Are you sure you want to proceed?",
-                    "context": "",
-                    "device_type": device_type,
-                    "requires_confirmation": True
-                }
-            )
-            await broker.publish(Channels.LANGUAGE_OUTPUT, confirmation_msg)
-            return
+                
+                # Ask for confirmation before proceeding (cheap, doesn't call LLM yet)
+                confirmation_msg = AgentMessage(
+                    message_type=MessageType.CLARIFICATION_REQUEST,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=http_request_id,
+                    payload={
+                        "question": "This action might be sensitive. Are you sure you want to proceed?",
+                        "context": "",
+                        "device_type": device_type,
+                        "requires_confirmation": True
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, confirmation_msg)
+                return
         # ─────────────────────────────────────────────────────────────────────
 
         # Get or create agent first so we know the preferred language
-        agent = get_or_create_agent(session_id, user_id)
+        # agent = get_or_create_agent(session_id, user_id)
         # Get or create agent first so we know the preferred language
         # agent = get_or_create_agent(session_id, user_id)
         # Always pass the actual input text so language is detected from what the

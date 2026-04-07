@@ -184,7 +184,7 @@ class WebStrategy:
             
             # Build search URL based on engine
             if search_engine == "google":
-                search_url = f"https://www.bing.com/search?q={query_encoded}"
+                search_url = f"https://www.google.com/search?q={query_encoded}"
             elif search_engine == "bing":
                 search_url = f"https://www.bing.com/search?q={query_encoded}"
             elif search_engine == "duckduckgo":

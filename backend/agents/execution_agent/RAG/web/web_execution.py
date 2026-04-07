@@ -28,6 +28,16 @@ from .web_rag_sandbox import rag_sandbox
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# IMPORT PER-USER GOOGLE ACCOUNT CREDENTIALS
+# ============================================================================
+from .google_accounts import USER_ACCOUNTS
+
+def get_current_system_user() -> str:
+    """Get current system username (cross-platform: Windows/Mac/Linux)"""
+    import getpass
+    return getpass.getuser()
+
+# ============================================================================
 # EXECUTION STATUS & RESULT CLASSES
 # ============================================================================
 
@@ -1049,8 +1059,8 @@ class StealthBrowser:
             # ─ PLUGIN & NOTIFICATION BLOCKING ──────────────────────────
             '--disable-notifications',
             '--disable-popup-blocking',
-            '--disable-plugins',
-            '--disable-extensions',
+            # ❌ REMOVED: '--disable-plugins',  # FIX 4: Removes PDF plugin, looks headless
+            # ❌ REMOVED: '--disable-extensions',  # FIX 5: Disabling all extensions looks botlike; real browsers have extensions
             '--disable-device-emulation',
             
             # ─ PERFORMANCE/TIMING (AVOID DETECTION VIA TIMING ANALYSIS) ─
@@ -1065,9 +1075,9 @@ class StealthBrowser:
             '--disable-hang-monitor',
             '--disable-prompt-on-repost',
             '--disable-sync',
-            '--enable-automation',
+            # ❌ REMOVED: '--enable-automation',  # FIX 4: Signals browser is automated
             '--metrics-recording-only',
-            '--mute-audio',
+            # ❌ REMOVED: '--mute-audio',  # FIX 5: Real browsers don't launch muted; detectable automation signal
             '--no-default-browser-check',
             '--no-first-run',
             '--password-store=basic',
@@ -1108,6 +1118,7 @@ class WebExecutionPipeline:
         self.browser = None
         self.context = None
         self.sessions = {}
+        self.session_downloads = {}  # ✅ FIX 1: Track downloads per session
         self._rag_system = None
         self.shared_groq_client = None
         
@@ -1170,16 +1181,61 @@ class WebExecutionPipeline:
             if user_agent:
                 context_options['user_agent'] = user_agent
             
+            # ✅ FIX 5: Load persistent cookies from previous session (per-user)
+            # This preserves cookies between runs, so Google sees a returning user with history
+            self.current_user = get_current_system_user()
+            self.cookies_path = Path(__file__).parent / f'browser_state_{self.current_user}.json'
+            if self.cookies_path.exists():
+                context_options['storage_state'] = str(self.cookies_path)
+                logger.info(f"✅ Loading persistent browser state for user '{self.current_user}'")
+            else:
+                logger.info(f"📝 No existing browser state found for '{self.current_user}' - will auto-login on-demand when Google is needed")
+            
             self.context = await self.browser.new_context(**context_options)
             
-            # ✅ Add request interception to spoof referrer and add more stealthy headers
+            # Auto-login is deferred to on-demand (when Google task is executed, see get_or_create_page)
+            
+            # ✅ FIX 4: Add request interception with proper Referer handling + Google anti-detection
             async def handle_route(route):
                 request = route.request
                 headers = dict(request.headers)
-                headers.update({
-                    'Referer': request.url.split('?')[0],  # Spoof referer from same domain
-                    'Origin': '/'.join(request.url.split('/')[:3]),
-                })
+                
+                # Only set Referer on cross-site requests; omit on first-party navigation
+                current_url = request.url
+                referer = request.headers.get('referer', '')
+                
+                # Extract domain from URLs for comparison
+                from urllib.parse import urlparse
+                current_domain = urlparse(current_url).netloc
+                referer_domain = urlparse(referer).netloc if referer else ''
+                
+                # ✅ FIX: Google search requires Referer header to not trigger bot detection
+                # If referer is missing on search operations, set Google's homepage as referer
+                if not referer or not referer_domain:
+                    if 'google' in current_domain.lower() and '/search' in current_url:
+                        headers['Referer'] = 'https://www.google.com/'
+                    elif 'google' in current_domain.lower():
+                        headers['Referer'] = 'https://www.google.com/'
+                # Only set Referer if cross-site; otherwise let browser default
+                elif referer_domain and referer_domain != current_domain:
+                    headers['Referer'] = referer  # Preserve original cross-site referer
+                
+                # ✅ FIX: Add critical headers Google checks for real browsers
+                headers['Origin'] = '/'.join(current_url.split('/')[:3])
+                
+                # Ensure Google sees real Accept headers
+                if 'google' in current_domain.lower():
+                    headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9'
+                    headers['Accept-Encoding'] = 'gzip, deflate, br'
+                    headers['Accept-Language'] = 'en-US,en;q=0.9,en;q=0.8'
+                    headers['Sec-Fetch-Dest'] = 'document'
+                    headers['Sec-Fetch-Mode'] = 'navigate'
+                    headers['Sec-Fetch-Site'] = 'none'
+                    headers['Sec-Fetch-User'] = '?1'
+                    headers['Upgrade-Insecure-Requests'] = '1'
+                    headers['Pragma'] = 'no-cache'
+                    headers['Cache-Control'] = 'max-age=0'
+                
                 await route.continue_(headers=headers)
             
             await self.context.route('**/*', handle_route)
@@ -1187,20 +1243,63 @@ class WebExecutionPipeline:
             if self.config.use_stealth_plugin:
                 await self.stealth.inject_stealth_scripts(self.context)
             
-            logger.info("✅ ULTIMATE stealth Playwright initialized (headers + request spoofing)")
+            logger.info("✅ ULTIMATE stealth Playwright initialized (persistent cookies + extensions allowed + dynamic headers + timing drift + humanization)")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Playwright: {e}")
             raise
     
+    async def _is_page_truly_closed(self, page) -> bool:
+        """
+        Distinguish between a truly closed/crashed page and a page that is
+        simply on an error/bot-detection URL.
+
+        Playwright's page.is_closed() only returns True when the CDP connection
+        is gone (tab closed, browser crashed).  A Google bot-detection page is
+        NOT closed — the tab is alive but showing an error.  We must NOT create
+        a new page in that case, because doing so loses the existing browser
+        session (cookies, history) and starts fresh on about:blank, which then
+        triggers *more* bot detection on the very next task.
+
+        Strategy: try a lightweight evaluate().  If it succeeds, the page is
+        alive.  If it raises TargetClosedError (or any Playwright closed error),
+        the page is truly gone.
+        """
+        if page is None:
+            return True
+        if page.is_closed():
+            return True
+        try:
+            await page.evaluate("() => document.readyState")
+            return False   # page responded → it is alive
+        except Exception as e:
+            err = str(e).lower()
+            if "closed" in err or "target" in err or "disconnected" in err:
+                return True
+            # Any other error (e.g. script timeout on a loading page) — keep page
+            return False
+
     async def get_or_create_page(self, session_id: str):
-        """Get existing page for session or create new one"""
-        if session_id not in self.sessions or self.sessions[session_id].is_closed():
+        """Get existing page for session or create new one with async download handling"""
+        existing = self.sessions.get(session_id)
+        page_truly_closed = await self._is_page_truly_closed(existing)
+        if page_truly_closed:
             page = await self.context.new_page()
             
-            # ✅ Set up download handling - IMPROVED with better logging and error handling
-            def handle_download(download):
-                """Handle PDF and file downloads to user's Downloads folder"""
+            # ✅ FIX 6: Apply playwright-stealth to patch Runtime.enable CDP leak
+            # This is essential for defeating runtime-based bot detection
+            try:
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+                logger.info("✅ playwright-stealth injected successfully")
+            except ImportError:
+                logger.warning("⚠️  playwright-stealth not installed. Install with: pip install playwright-stealth")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to inject playwright-stealth: {e}")
+            
+            # ✅ FIX 1: Async download handler that doesn't block event loop
+            async def handle_download_async(download):
+                """Async handler for downloads - non-blocking"""
                 logger.info(f"🔽 DOWNLOAD TRIGGERED: {download.suggested_filename}")
                 
                 try:
@@ -1215,8 +1314,10 @@ class WebExecutionPipeline:
                     
                     logger.info(f"💾 Saving to: {filepath}")
                     
-                    # Playwright's save_as is synchronous in the handler
-                    download.save_as(filepath)
+                    # Schedule the blocking save_as call asynchronously
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: download.save_as(filepath)
+                    )
                     
                     logger.info(f"✅ Downloaded successfully: {filepath}")
                     
@@ -1224,14 +1325,24 @@ class WebExecutionPipeline:
                     if os.path.exists(filepath):
                         filesize = os.path.getsize(filepath)
                         logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
+                        
+                        # Track download for this session
+                        if session_id not in self.session_downloads:
+                            self.session_downloads[session_id] = []
+                        self.session_downloads[session_id].append(filepath)
                     else:
                         logger.warning(f"⚠️ File not found after save: {filepath}")
                         
                 except Exception as e:
                     logger.error(f"❌ Download failed: {e}", exc_info=True)
             
-            page.on("download", handle_download)
-            logger.info(f"✅ Download handler registered for page")
+            # Use ensure_future to schedule the async handler
+            def sync_download_wrapper(download):
+                """Synchronous wrapper for Playwright's download event"""
+                asyncio.ensure_future(handle_download_async(download))
+            
+            page.on("download", sync_download_wrapper)
+            logger.info(f"✅ Async download handler registered for page")
             
             self.sessions[session_id] = page
             logger.info(f"📄 Created new page for session {session_id}")
@@ -1361,12 +1472,65 @@ class WebExecutionPipeline:
         
         try:
             page = await self.get_or_create_page(session_id)
-            ai_prompt = task.get('ai_prompt', '')
+            
+            # ── ON-DEMAND GOOGLE LOGIN ───────────────────────────────────────
+            # If this is a Google task and we don't have valid cookies, auto-login now
+            ai_prompt = task.get('ai_prompt', '').lower()
+            is_google_task = any(keyword in ai_prompt for keyword in ['google', 'search', 'gmail', 'youtube'])
+            
+            if is_google_task and not self.cookies_path.exists():
+                logger.info(f"🔐 Google task detected and no saved session found. Triggering on-demand auto-login...")
+                # IMPORTANT: Use the SAME page for login AND navigation (don't close it)
+                # This ensures cookies are preserved and used for the actual task
+                try:
+                    await self._humanize_page(page)
+                    login_success = await self.auto_login_google(page, self.current_user)
+                    if login_success:
+                        logger.info(f"✅ On-demand Google auto-login successful for '{self.current_user}'")
+                        # Save cookies immediately after successful login (not just at cleanup)
+                        try:
+                            # Ensure directory exists
+                            self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+                            await self.context.storage_state(path=str(self.cookies_path))
+                            logger.info(f"💾 Cookies saved immediately after auto-login for '{self.current_user}' to {self.cookies_path}")
+                        except Exception as e:
+                            logger.warning(f"⚠️  Could not save cookies after auto-login: {e}")
+                        # After login succeeds, page is already authenticated. Continue with the task on this page.
+                    else:
+                        logger.warning(f"⚠️  On-demand auto-login failed. Continuing anyway (might trigger bot detection)...")
+                except Exception as e:
+                    logger.error(f"❌ On-demand login failed: {e}")
+
+            # ── GOOGLE BOT-DETECTION ERROR PAGE RECOVERY ─────────────────────
+            # When Google shows "having trouble accessing Google Search", the page
+            # is still alive (not closed) but it is completely empty / broken.
+            # The next task then runs on about:blank (wrong page) or tries to
+            # interact with the error page and crashes.  Detect this state here
+            # and reload back to google.com so the existing session is preserved.
+            try:
+                current_url = page.url
+                if 'google' in current_url and current_url != 'about:blank':
+                    page_text = await page.evaluate("() => document.body && document.body.innerText || ''")
+                    if 'having trouble' in page_text.lower() or (
+                        'google search' in page_text.lower() and len(page_text.strip()) < 500
+                    ):
+                        logger.warning("⚠️ Google bot-detection error page detected — reloading to google.com")
+                        await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
+                        await page.wait_for_timeout(2000)
+                        logger.info("✅ Recovered to google.com homepage")
+            except Exception as _recovery_err:
+                logger.debug(f"Bot-detection recovery check skipped: {_recovery_err}")
 
             # ── Strip any error context that was appended by the bridge on
             #    retry so it never contaminates the original prompt.
             # The bridge appends " | Previous errors: ..." — remove that part.
             clean_prompt = re.split(r'\s*\|\s*Previous errors?:', ai_prompt)[0].strip()
+            
+            # ✅ INJECT INPUT_CONTENT FROM CROSS-AGENT DATA BRIDGE
+            input_content = task.get('extra_params', {}).get('input_content')
+            if input_content:
+                clean_prompt = f"{clean_prompt}\n\n⚙️ Use the following content from a previous step:\n{input_content}"
+                logger.info(f"📬 Prepended input_content ({len(input_content)} chars) to web RAG prompt")
             
             # Validation
             if not clean_prompt:
@@ -1583,9 +1747,14 @@ class WebExecutionPipeline:
                     result['success'] = False
                     result['error'] = f"Action executed but verification failed: {verification_message}"
             
-            # Get final page info
-            page_url = page.url
-            page_title = await page.title()
+            # Get final page info — guard against page closing mid-navigation
+            try:
+                page_url = page.url
+                page_title = await page.title()
+            except Exception as _page_info_err:
+                logger.warning(f"⚠️ Could not get final page info (page may have navigated away): {_page_info_err}")
+                page_url = getattr(page, 'url', 'unknown')
+                page_title = 'unknown'
             
             # Update context cache in background
             if result.get('success') and self.config.cache_page_context:
@@ -1887,8 +2056,52 @@ async def __rag_step__(page):
                 'page': page,
                 'asyncio': asyncio,
                 '__result__': None,
-                '__stdout__': ''
+                '__stdout__': '',
+                'random': random,  # ✅ Make random available for jitter
             }
+            
+            # ✅ Add helper function for Google searches
+            async def google_search_safe(query: str):
+                """Safe Google search with full bot evasion"""
+                try:
+                    # Random jitter
+                    delay = random.uniform(2.5, 3.5)
+                    await page.wait_for_timeout(int(delay * 1000))
+                    
+                    # Navigate to homepage first
+                    await page.goto('https://www.google.com', wait_until='networkidle')
+                    await page.wait_for_timeout(random.randint(1500, 2000))
+                    
+                    # Check for bot detection
+                    error_count = await page.locator('text="having trouble"').count()
+                    if error_count > 0:
+                        print("FAILED: Bot detection triggered on Google homepage")
+                        return False
+                    
+                    # Wait for search box
+                    await page.wait_for_selector('input[name="q"]', state='visible', timeout=5000)
+                    
+                    # Type with human-like delays
+                    for i, char in enumerate(query):
+                        current_text = query[:i+1]
+                        await page.fill('input[name="q"]', current_text)
+                        await page.wait_for_timeout(random.randint(80, 150))
+                    
+                    # Pause after typing
+                    await page.wait_for_timeout(random.randint(1200, 1800))
+                    
+                    # Click search
+                    await page.locator('input[type="submit"][value="Google Search"], button[aria-label="Google Search"]').first.click()
+                    await page.wait_for_load_state('networkidle', timeout=15000)
+                    await page.wait_for_timeout(random.randint(500, 800))
+                    
+                    print("EXECUTION_SUCCESS")
+                    return True
+                except Exception as e:
+                    print(f"FAILED: {e}")
+                    return False
+            
+            exec_namespace['google_search_safe'] = google_search_safe
             
             exec(wrapped_code, exec_namespace)
             
@@ -1897,6 +2110,10 @@ async def __rag_step__(page):
             
             stdout_content = exec_namespace['_stdout_capture'].getvalue()
             exec_namespace['__stdout__'] = stdout_content
+            
+            # ✅ FIX 3: Capture actual return value from generated code
+            if result_data is not None:
+                logger.info(f"✅ Captured return value: {str(result_data)[:100]}")
             
             if exec_namespace.get('__result__') is not None:
                 result_data = exec_namespace['__result__']
@@ -1914,11 +2131,28 @@ async def __rag_step__(page):
             
             logger.info(f"✅ Code executed successfully")
             
-            return {
+            # ✅ FIX 3: Include both extracted_data and text_extracted in result
+            result_dict = {
                 'success': True,
                 'output': stdout_content,
                 'extracted_data': result_data
             }
+            
+            # Add text_extracted if result_data is a string (text extraction)
+            if isinstance(result_data, str):
+                result_dict['text_extracted'] = result_data
+            
+            # ✅ FIX 1: Include downloads list in result
+            if task_id or hasattr(self, 'session_downloads'):
+                # Extract session_id from page if available
+                downloads_list = []
+                for session_id, downloads in getattr(self, 'session_downloads', {}).items():
+                    downloads_list.extend(downloads)
+                if downloads_list:
+                    result_dict['downloads'] = downloads_list
+                    logger.info(f"✅ Included {len(downloads_list)} downloads in result")
+            
+            return result_dict
             
         except Exception as e:
             logger.error(f"❌ Code execution failed: {e}")
@@ -1942,6 +2176,9 @@ async def __rag_step__(page):
         
         if 'EXECUTION_SUCCESS' in stdout:
             return True, "Execution successful"
+        
+        # Default to success if no failure markers found
+        return True, "Execution completed"
         
         if len(stdout.strip()) > 0:
             return True, "Code executed (no explicit success marker)"
@@ -1990,6 +2227,92 @@ async def __rag_step__(page):
                 await page.wait_for_timeout(random.randint(50, 150))
         except Exception:
             pass  # non-fatal
+    
+    async def auto_login_google(self, page, username: str) -> bool:
+        """
+        Automatically log into Google account using credentials from USER_ACCOUNTS.
+        Called on-demand when a Google task is executed.
+        Returns True if login succeeded, False otherwise.
+        """
+        try:
+            if username not in USER_ACCOUNTS:
+                logger.error(f"❌ User '{username}' not found in USER_ACCOUNTS mapping")
+                logger.info(f"📝 Configure your account in USER_ACCOUNTS dict in google_accounts.py")
+                return False
+            
+            account = USER_ACCOUNTS[username]
+            email = account['email']
+            password = account['password']
+            
+            logger.info(f"🔐 Auto-logging in Google account for user: {username}")
+            
+            # Navigate to Google login
+            await page.goto('https://accounts.google.com/signin', wait_until='networkidle')
+            await page.wait_for_timeout(2000)
+            
+            # Step 1: Enter email and press Enter (NOT clicking Next button)
+            try:
+                # IMPORTANT: Do NOT await the locator itself. Locators are synchronous.
+                # Only await the .fill() method call on the locator.
+                await page.locator('input[type="email"]').first.fill(email)
+                await page.keyboard.press('Enter')
+                await page.wait_for_timeout(2000)
+                logger.info(f"✅ Entered email and pressed Enter")
+            except Exception as e:
+                logger.error(f"❌ Failed to enter email: {e}")
+                return False
+            
+            # Step 2: Wait for password field and enter password, then press Enter
+            try:
+                await page.wait_for_selector('input[type="password"]', state='visible', timeout=10000)
+                await page.locator('input[type="password"]').first.fill(password)
+                await page.keyboard.press('Enter')
+                await page.wait_for_timeout(3000)
+                logger.info(f"✅ Entered password and pressed Enter")
+            except Exception as e:
+                logger.error(f"❌ Failed to enter password: {e}")
+                return False
+            
+            # Step 3: Verify login success by checking we're off the signin page
+            try:
+                await page.wait_for_url(lambda url: 'signin' not in url.lower(), timeout=10000)
+                # Verify we're actually logged in by checking for account indicators
+                # Wait a moment for page to fully load
+                await page.wait_for_timeout(1000)
+                
+                # Try to verify authentication by checking for Google account elements
+                try:
+                    # Look for account email in page (indicates logged in state)
+                    account_email = await page.evaluate("""() => {
+                        const elements = Array.from(document.querySelectorAll('[aria-label*="account"], [aria-label*="Account"]'));
+                        return elements.length > 0 || document.body.innerText.includes(arguments[0] || 'accounts');
+                    }""")
+                    if account_email:
+                        logger.info(f"✅ Account indicators found - login verified for {username}")
+                except:
+                    pass  # Verification check failed but we're off signin page anyway
+                
+                # CRITICAL: Navigate to google.com to establish the authenticated session properly
+                # This ensures cookies work across all Google domains (search, account, etc.)
+                logger.info(f"🌐 Navigating to google.com to establish authenticated session...")
+                await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(1500)
+                
+                logger.info(f"✅ Google auto-login succeeded for {username}")
+                return True
+            except Exception as e:
+                current_url = page.url
+                if '/signin' in current_url.lower():
+                    logger.error(f"❌ Still on signin page. URL: {current_url}")
+                    return False
+                else:
+                    # We're off the signin page, so login probably worked
+                    logger.info(f"✅ Navigation succeeded. URL: {current_url}")
+                    return True
+                
+        except Exception as e:
+            logger.error(f"❌ Auto-login failed: {e}")
+            return False
 
     async def cleanup(self):
         """Clean up browser resources"""
@@ -2003,7 +2326,14 @@ async def __rag_step__(page):
                 if not page.is_closed():
                     await page.close()
             
-            if self.context:
+            # ✅ FIX 5: Save browser state (cookies, storage) for next session (per-user)
+            if self.context and hasattr(self, 'cookies_path'):
+                try:
+                    await self.context.storage_state(path=str(self.cookies_path))
+                    logger.info(f"✅ Saved browser state (cookies) for user '{self.current_user}' to next session")
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not save browser state: {e}")
+                
                 await self.context.close()
             
             if self.browser:

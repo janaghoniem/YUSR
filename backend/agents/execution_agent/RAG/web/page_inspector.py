@@ -79,22 +79,48 @@ async def get_page_semantics_fallback(page) -> str:
                 const clickableElements = Array.from(document.querySelectorAll('[onclick], [data-action]'));
                 
                 return {
-                    buttons: buttons.slice(0, 15).map(el => ({
-                        text: el.textContent?.trim() || el.ariaLabel || el.title || el.getAttribute('data-tooltip') || 'Unnamed button',
-                        disabled: el.disabled || el.hasAttribute('disabled'),
-                        id: el.id || '',
-                        classes: el.className || '',
-                    })),
-                    links: links.slice(0, 20).map(el => ({
-                        text: el.textContent?.trim() || el.ariaLabel || el.title || 'Unnamed link',
-                        href: el.href,
-                        id: el.id || '',
-                    })),
+                    buttons: buttons.slice(0, 15).map(el => {
+                        const s = getComputedStyle(el);
+                        return {
+                            text: el.textContent?.trim() || el.ariaLabel || el.title || el.getAttribute('data-tooltip') || 'Unnamed button',
+                            disabled: el.disabled || el.hasAttribute('disabled'),
+                            id: el.id || '',
+                            classes: el.className || '',
+                            // ✅ FIX 2: Visual attributes for button finding
+                            title: el.getAttribute('title') || '',
+                            dataTestId: el.getAttribute('data-test-id') || el.getAttribute('data-qa') || '',
+                            dataAttributes: Array.from(el.attributes).filter(a => a.name.startsWith('data-')).slice(0, 3).map(a => `${a.name}=${a.value}`),
+                            color: s.color || '',
+                            backgroundColor: s.backgroundColor || '',
+                            role: el.getAttribute('role') || '',
+                        };
+                    }),
+                    links: links.slice(0, 20).map(el => {
+                        const s = getComputedStyle(el);
+                        return {
+                            text: el.textContent?.trim() || el.ariaLabel || el.title || 'Unnamed link',
+                            href: el.href,
+                            id: el.id || '',
+                            // ✅ FIX 2: Visual attributes for links
+                            title: el.getAttribute('title') || '',
+                            color: s.color || '',
+                            backgroundColor: s.backgroundColor || '',
+                        };
+                    }),
                     inputs: inputs.slice(0, 20).map(el => {
                         const r = el.getBoundingClientRect();
                         const s = getComputedStyle(el);
                         const visible = r.width > 0 && r.height > 0
                             && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                        
+                        // ✅ FIX 2: Add visual attributes for all inputs
+                        const baseAttrs = {
+                            title: el.getAttribute('title') || '',
+                            dataTestId: el.getAttribute('data-test-id') || el.getAttribute('data-qa') || '',
+                            color: s.color || '',
+                            backgroundColor: s.backgroundColor || '',
+                            borderColor: s.borderColor || '',
+                        };
                         
                         // Special handling for contenteditable elements (Gmail recipients)
                         if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
@@ -107,6 +133,7 @@ async def get_page_semantics_fallback(page) -> str:
                                 ariaLabel: el.getAttribute('aria-label') || '',
                                 visible: visible,
                                 isContentEditable: true,
+                                ...baseAttrs,
                             };
                         }
                         
@@ -118,6 +145,7 @@ async def get_page_semantics_fallback(page) -> str:
                             disabled: el.disabled || el.hasAttribute('disabled'),
                             ariaLabel: el.getAttribute('aria-label') || '',
                             visible: visible,
+                            ...baseAttrs,
                         };
                     }),
                     videos: videoElements.map(el => ({

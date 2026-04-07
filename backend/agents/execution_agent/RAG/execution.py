@@ -144,6 +144,7 @@ class SecurityValidator:
             'eval', 'exec', 'compile', '__import__'
         }
         
+        #here this is updated
         self.dangerous_patterns = [
             'subprocess.call',
             'subprocess.Popen',
@@ -158,7 +159,9 @@ class SecurityValidator:
             'os.unlink',
             'os.rmdir',
             'os.system',
-            'pathlib.Path',
+            'os.popen',
+            # NOTE: 'pathlib.Path' removed — os.path.* calls are safe and used
+            # by module_selector.py. pathlib import is blocked at the AST level.
             'ctypes.windll',
             'ctypes.wintypes',
         ]
@@ -223,9 +226,13 @@ class SecurityValidator:
         violations = []
 
         BLOCKED_BASES = {
-            'shutil', 'pathlib', 'os', 'ctypes',
+            'shutil', 'pathlib', 'ctypes',
             'subprocess', 'winreg', 'socket',
             'urllib', 'requests', 'pickle', 'shelve', 'cffi'
+            # NOTE: 'os' is intentionally NOT in this set.
+            # os.startfile, os.makedirs, os.path.* are required by module_selector.py.
+            # Dangerous os methods (os.system, os.remove, etc.) are blocked
+            # individually in DANGEROUS_METHODS below.
         }
 
         for node in ast.walk(tree):
@@ -263,8 +270,14 @@ class SecurityValidator:
                     method_name = node.func.attr
 
                     DANGEROUS_METHODS = {
-                        'os':     {'remove', 'unlink', 'rmdir', 'system', 'popen',
-                                   'makedirs', 'rename', 'replace'},
+                        'os':     {
+                            # Blocked: destructive or shell-execution methods
+                            'remove', 'unlink', 'rmdir', 'system', 'popen',
+                            'rename', 'replace',
+                            # NOTE: 'makedirs' and 'listdir' are intentionally ALLOWED.
+                            # module_selector.py uses makedirs to create output folders.
+                            # 'startfile' is also allowed — it opens files/apps safely.
+                        },
                         'shutil': {'rmtree', 'move', 'copy', 'copy2', 'copytree',
                                    'disk_usage'},
                         'ctypes': {'windll', 'cdll', 'WinDLL'},

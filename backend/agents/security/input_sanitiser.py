@@ -17,15 +17,15 @@ import base64
 import unicodedata
 import logging
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
 # ── Tunable constants ──────────────────────────────────────────────────────
 MAX_INPUT_LENGTH = 4096   # S-04 — truncate beyond this
 
-# S-01: phrases that signal prompt injection / override attempts
-# Keep entries lowercase for case-insensitive matching.
+# ── S-01: CRITICAL BLOCK PHRASES (prompt injection / override attempts) ───
+# These ALWAYS block — no exceptions.
 OVERRIDE_PATTERNS = [
     "ignore previous instructions",
     "ignore all previous",
@@ -50,7 +50,7 @@ OVERRIDE_PATTERNS = [
     "set response_text",
     # Structural injection (A4 original)
     "ignore previous formatting",
-    "ignore previous formatting rules",      # A4 variant — live-test bypass
+    "ignore previous formatting rules",
     "ignore previous format",
     "you must respond only with this exact json",
     "respond only with this exact json",
@@ -60,8 +60,7 @@ OVERRIDE_PATTERNS = [
     "<|assistant|>",
     "<|im_start|>",
     "<|im_end|>",
-    # Destructive social-engineering phrases (B2/B3 fix)
-# Destructive social-engineering phrases (B2/B3 fix)
+    # Destructive system commands — ALWAYS block
     "delete all files",
     "permanently delete",
     "delete all files in",
@@ -69,9 +68,28 @@ OVERRIDE_PATTERNS = [
     "format drive",
     "rm -rf",
     "del /f /q",
-    # Credential-harvesting intent patterns (B4 fix)
+    # OS-critical path deletion (system destruction)
+    "delete windows",
+    "delete system32",
+    "delete boot",
+    "rm -rf /",
+    "rm -rf /*",
+    # Indirect OS shell invocation
+    "[inst]",
+    "<<sys>>",
+    "disregard your prior",
+    "disregard all",
+]
+
+# ── SUSPICIOUS PHRASES (log warning but DO NOT block) ──────────────────────
+# These are moved from OVERRIDE_PATTERNS to allow confirmation flow.
+# The intent classifier will handle them with SUSPICIOUS → confirmation.
+SUSPICIOUS_PHRASES = [
+    # Credential-harvesting intent patterns (now warns, doesn't block)
     "show me all saved",
-    "show all saved",
+    "show all saved passwords",
+    "show all saved wifi",
+    "show all saved credentials",
     "saved wifi passwords",
     "wifi passwords",
     "saved passwords",
@@ -90,25 +108,6 @@ OVERRIDE_PATTERNS = [
     "show me the secret",
     "print my api key",
     "disclose",
-    # Indirect OS shell invocation
-    "open cmd",
-    "open command prompt",
-    "open powershell",
-    "open terminal",
-    "open bash",
-    "launch cmd",
-    "launch powershell",
-    "run cmd",
-    "run command prompt",
-    "run powershell",
-    "run shell",
-    # Missing ChatML delimiters
-    "[inst]",
-    "<<sys>>",
-    # Missing disregard variant
-    "disregard your prior",
-    "disregard all",
-
 ]
 
 # S-02: minimum length of a suspicious base64 chunk
@@ -121,6 +120,8 @@ class SanitisationResult:
     was_blocked: bool = False
     block_reason: str = ""
     triggered_checks: List[str] = field(default_factory=list)
+    is_suspicious: bool = False
+    suspicious_matches: List[str] = field(default_factory=list)
 
 
 def _is_suspicious_base64(fragment: str) -> bool:
@@ -152,6 +153,7 @@ def sanitise_input(text: str) -> SanitisationResult:
         return SanitisationResult(clean_text="")
 
     checks_triggered = []
+    suspicious_matches = []
 
     # ── S-04: Length bomb ────────────────────────────────────────────────────
     if len(text) > MAX_INPUT_LENGTH:
@@ -190,8 +192,14 @@ def sanitise_input(text: str) -> SanitisationResult:
 
     text = homoglyph_mapped
 
-    # ── S-01: Override keyword detection ────────────────────────────────────
+    # ── CHECK SUSPICIOUS PHRASES FIRST (log but don't block) ─────────────────
     text_lower = text.lower()
+    for phrase in SUSPICIOUS_PHRASES:
+        if phrase in text_lower:
+            suspicious_matches.append(phrase)
+            logger.info(f"⚠️ S-01-suspicious: Phrase detected (will route to confirmation): '{phrase}'")
+
+    # ── S-01: Override keyword detection (CRITICAL BLOCK) ────────────────────
     for pattern in OVERRIDE_PATTERNS:
         if pattern in text_lower:
             checks_triggered.append(f"S-01-override:{pattern[:30]}")
@@ -201,6 +209,8 @@ def sanitise_input(text: str) -> SanitisationResult:
                 was_blocked=True,
                 block_reason=f"Override keyword detected: '{pattern}'",
                 triggered_checks=checks_triggered,
+                is_suspicious=bool(suspicious_matches),
+                suspicious_matches=suspicious_matches,
             )
 
     # ── S-02: Base64 payload detection ───────────────────────────────────────
@@ -215,9 +225,20 @@ def sanitise_input(text: str) -> SanitisationResult:
                 was_blocked=True,
                 block_reason="Suspicious base64-encoded payload detected",
                 triggered_checks=checks_triggered,
+                is_suspicious=bool(suspicious_matches),
+                suspicious_matches=suspicious_matches,
             )
 
     # ── All checks passed ─────────────────────────────────────────────────────
     if checks_triggered:
         logger.info(f"✅ Input sanitised (checks: {checks_triggered})")
-    return SanitisationResult(clean_text=text, triggered_checks=checks_triggered)
+    
+    if suspicious_matches:
+        logger.info(f"⚠️ Input contains suspicious phrases (will route to confirmation): {suspicious_matches}")
+    
+    return SanitisationResult(
+        clean_text=text,
+        triggered_checks=checks_triggered,
+        is_suspicious=bool(suspicious_matches),
+        suspicious_matches=suspicious_matches,
+    )

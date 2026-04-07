@@ -34,6 +34,7 @@ class IntentClassifier:
     1. Uses weighted scores (not just presence/absence)
     2. Detects combinations (e.g., "cmd" + "delete" is worse than either alone)
     3. Has configurable thresholds
+    4. Applies safe modifiers to reduce suspicion for legitimate use
     """
     
     def __init__(self):
@@ -47,13 +48,40 @@ class IntentClassifier:
             (r"format drive", 10.0, "destructive"),
             (r"wipe all", 10.0, "destructive"),
             (r"del /f /q", 10.0, "destructive"),
+            (r"delete everything", 8.0, "destructive"),  # ADDED: was missing
+            (r"delete all", 8.0, "destructive"),        # ADDED: catch "delete all X"
             
-            # HIGH WEIGHT (8.0) — Credential harvesting
-            (r"show me.*saved.*password", 8.0, "credential_theft"),
-            (r"saved wifi passwords", 8.0, "credential_theft"),
+            # OS-CRITICAL PATHS (weight 9.0) — System file deletion
+            (r"delete.*(?:windows|system32|boot|program files|winnt)", 9.0, "os_critical"),
+            (r"rm -rf.*(?:/boot|/etc|/usr|/var|/lib|/bin|/sbin)", 9.0, "os_critical"),
+            (r"del.*(?:C:\\Windows|C:\\Program Files|C:\\System)", 9.0, "os_critical"),
+                    
+            # HIGH WEIGHT (8.0) — Credential harvesting (malicious intent)
             (r"extract.*password", 8.0, "credential_theft"),
             (r"netsh wlan", 8.0, "credential_theft"),
             (r"key=clear", 8.0, "credential_theft"),
+            
+            # MEDIUM-HIGH WEIGHT (6.0) — Credential access (may be legitimate)
+            # These trigger SUSPICIOUS, not MALICIOUS, to allow confirmation
+            (r"saved wifi passwords", 6.0, "credential_access"),
+            (r"wifi passwords", 6.0, "credential_access"),
+            (r"saved passwords", 6.0, "credential_access"),
+            (r"stored passwords", 6.0, "credential_access"),
+            (r"view saved passwords", 6.0, "credential_access"),
+            (r"display saved passwords", 6.0, "credential_access"),
+            (r"show my passwords", 6.0, "credential_access"),
+            (r"list all passwords", 6.0, "credential_access"),
+            (r"show me.*saved.*password", 6.0, "credential_access"),
+            (r"retrieve my password", 6.0, "credential_access"),
+            (r"get my password", 6.0, "credential_access"),
+            (r"show my credentials", 6.0, "credential_access"),
+            (r"show network credentials", 6.0, "credential_access"),
+            (r"reveal the password", 6.0, "credential_access"),
+            (r"show me the api_key", 6.0, "credential_access"),
+            (r"display the mongodb", 6.0, "credential_access"),
+            (r"show me the secret", 6.0, "credential_access"),
+            (r"print my api key", 6.0, "credential_access"),
+            (r"disclose", 6.0, "credential_access"),
             
             # HIGH WEIGHT (7.0) — System commands
             (r"cmd.*delete", 7.0, "system_manipulation"),
@@ -66,31 +94,35 @@ class IntentClassifier:
             (r"import os", 5.0, "library_abuse"),
             (r"import subprocess", 5.0, "library_abuse"),
             
-            # MEDIUM WEIGHT (4.0) — File system access
-            (r"list all files in", 4.0, "enumeration"),
-            (r"enumerate.*files", 4.0, "enumeration"),
+            # MEDIUM WEIGHT (4.0) — File system access (sensitive paths only)
+            (r"list.*(?:etc/passwd|/etc/shadow|sam database|system32/config)", 4.0, "enumeration"),
+            (r"enumerate.*(?:system|registry|credential|network)", 4.0, "enumeration"),
             (r"read.*etc/passwd", 4.0, "enumeration"),
             
-            # LOW WEIGHT (2.0) — Context-dependent
-            (r"open cmd", 2.0, "shell_access"),
-            (r"open command prompt", 2.0, "shell_access"),
-            (r"open powershell", 2.0, "shell_access"),
+            # LOW WEIGHT (2.0) — Context-dependent shell access with action
+            (r"(?:open|launch|run|start)\s+(?:cmd|command prompt|powershell|terminal|bash)\s+(?:and|then|to)\s+\w+", 2.0, "shell_access_with_action"),
         ]
         
         # Keywords that REDUCE suspicion (e.g., legitimate contexts)
         # Format: (keyword_pattern, weight_reduction)
         self.safe_modifiers = [
-            (r"my own", -3.0),
-            (r"my personal", -2.0),
-            (r"for my account", -2.0),
+            (r"my own", -4.0),           # ADDED: stronger reduction for ownership
+            (r"my personal", -3.0),
+            (r"for my account", -3.0),
             (r"with my permission", -3.0),
+            (r"for my network", -4.0),   # ADDED: "for my own network" reduces suspicion
+            (r"my wifi", -3.0),          # ADDED: "my wifi" indicates ownership
+            (r"on my computer", -3.0),   # ADDED: local ownership context
+            (r"on my device", -3.0),     # ADDED: local ownership context
         ]
         
         # Thresholds
         self.malicious_threshold = 5.0  # Score >= this → MALICIOUS
         self.suspicious_threshold = 2.0  # Score >= this → SUSPICIOUS
         
-        # Patterns that ALWAYS block regardless of score
+
+        # Patterns that ALWAYS block regardless of score.
+        # These cover prompt injection and destructive shell commands.
         self.always_block_patterns = [
             r"ignore previous instructions",
             r"disregard your instructions",
@@ -98,6 +130,17 @@ class IntentClassifier:
             r"new system prompt",
             r"system override",
             r"important system note",
+            # Destructive shell invocations — blocked even after confirmation
+            r"(?:cmd|powershell|terminal|bash).*(?:del\s+/f|rm\s+-rf|rmdir\s+/s|format\s+[a-z]:)",
+            r"(?:cmd|powershell).*(?:reg\s+delete|reg\s+add.*system)",
+            r"(?:cmd|powershell).*(?:net\s+user|net\s+localgroup)",
+            r"(?:cmd|powershell).*(?:attrib|cacls|icacls|takeown).*system32",
+            r"(?:cmd|powershell).*(?:shutdown|taskkill.*system|sc\s+delete)",
+            # System-critical path deletion
+            r"rm -rf /",
+            r"rm -rf /\*",
+            r"del /f /s C:\\Windows",
+            r"format C:",
         ]
         
     def classify(self, text: str) -> IntentResult:

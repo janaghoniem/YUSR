@@ -1,5 +1,5 @@
-// HeaderContent.jsx
-import React, { useMemo, useState } from "react";
+// HeaderContent.jsx - FIXED: Recalculates greeting when userName changes
+import React, { useMemo } from "react";
 
 const GREETINGS = {
   default: [
@@ -43,8 +43,11 @@ const getTimeGreeting = (user) => {
   return `💤 Burning the midnight oil, ${user}?`;
 };
 
-const HeaderContent = ({ userName = "User", mode = "default", chatTitle = "New Chat" }) => {
-  const [greeting] = useState(getTimeGreeting(userName));
+const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "New Chat" }) => {
+  console.log("[HeaderContent] Received userName prop:", propUserName);
+  
+  // FIXED: Use useMemo with propUserName as dependency so it recalculates when userName changes
+  const greeting = useMemo(() => getTimeGreeting(propUserName), [propUserName]);
 
   const headline = useMemo(() => {
     return HEADLINES[Math.floor(Math.random() * HEADLINES.length)];

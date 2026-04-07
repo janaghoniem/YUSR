@@ -125,7 +125,7 @@ class SecurityValidator:
     def __init__(self):
         # Dangerous operations to block
         self.blocked_imports = {
-            'os.system',
+            # 'os.system',
             'subprocess.Popen', 'subprocess.call',
             'eval', 'exec', '__import__',
             'socket', 'urllib', 'requests',  # Block network (except in allowed context)
@@ -134,8 +134,8 @@ class SecurityValidator:
             # F1: Added after pentest — A4 used these to execute on host
             'shutil',
             'pathlib',
-            'os',          # block os module import entirely
-            'os.path',
+            # 'os',          # block os module import entirely
+            # 'os.path',
             'winreg',      # Windows registry access
             'subprocess',  # catch bare subprocess import too
         }

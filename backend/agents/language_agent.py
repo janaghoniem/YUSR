@@ -556,7 +556,20 @@ class LanguageAgent:
 
         raw = call_groq_api(messages, max_tokens=300)
         try:
-            cleaned = raw.replace("\\\\", "/").replace("\\", "/")
+            # Strip markdown fences if present
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                inner = lines[1:]
+                if inner and inner[-1].strip() == "```":
+                    inner = inner[:-1]
+                cleaned = "\n".join(inner).strip()
+            cleaned = cleaned.replace("\\\\", "/").replace("\\", "/")
+            
+            # Additional cleanup for literal string wrapping
+            if cleaned.startswith('"') and cleaned.endswith('"'):
+                cleaned = cleaned[1:-1]
+                
             parsed = json.loads(cleaned)
             message = parsed.get("message", "")
             follow_ups = parsed.get("follow_ups", cached_follow_ups)
@@ -565,10 +578,24 @@ class LanguageAgent:
                 follow_ups = cached_follow_ups
             return {"message": message, "follow_ups": follow_ups}
         except Exception:
-            # If parsing fails, return a safe fallback
-            fallback = (
-                "تمت المهمة بنجاح." if effective_lang == "ar" else "Task completed successfully."
-            )
+            # If parsing fails, use result_metadata to return a safe context-aware fallback
+            success_count = result_metadata.get("success_count", 0) if result_metadata else 0
+            total_count = result_metadata.get("total_count", 0) if result_metadata else 0
+            plan_error = result_metadata.get("plan_error", "") if result_metadata else ""
+            
+            if total_count > 0 and success_count == 0:
+                fallback = "المهمة فشلت." if effective_lang == "ar" else "Task failed."
+            elif total_count > 0 and success_count < total_count:
+                fallback = "تم تنفيذ المهمة جزئياً." if effective_lang == "ar" else "Task partially completed."
+            elif total_count == 0 and plan_error:
+                # Groq 429 rate limit or decomposition failure
+                if "Rate limit" in plan_error or "429" in plan_error:
+                    fallback = "بعتذر، النظام عليه ضغط كبير. يرجى المحاولة بعد قليل." if effective_lang == "ar" else "I apologize, the system is experiencing high load due to rate limits. Please try again shortly."
+                else:
+                    fallback = "فشلت عملية التخطيط للمهمة." if effective_lang == "ar" else "Task planning failed."
+            else:
+                fallback = "تمت المهمة بنجاح." if effective_lang == "ar" else "Task completed successfully."
+            
             return {"message": fallback, "follow_ups": cached_follow_ups}
 
     # -----------------------------------------------------------------------

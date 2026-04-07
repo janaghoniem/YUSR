@@ -508,6 +508,7 @@ class CoordinatorState(BaseModel):
     conversation_history: List[Dict] = Field(default_factory=list)
     last_successful_action: Optional[str] = None
     current_page_url: Optional[str] = None
+    plan_error: Optional[str] = None
 
 # ============================================================================
 # ENHANCED TASK DECOMPOSITION - NO HARDCODED URLs
@@ -1326,9 +1327,12 @@ def create_coordinator_graph():
             current_page_url=current_page_url  # ✅ BROWSER STATE hala edit ll web
         )
         
+        # Save the plan execution error if there was one
+        plan_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
+        
         # Surface decomposition errors when present
-        if isinstance(plan_result, dict) and "error" in plan_result:
-            logger.error(f"❌ Decomposition returned error: {plan_result['error']}")
+        if plan_error:
+            logger.error(f"❌ Decomposition returned error: {plan_error}")
             tasks = []
         else:
             tasks = plan_result.get("tasks", [])
@@ -1351,6 +1355,7 @@ def create_coordinator_graph():
             "original_message_id": original_message_id,
             "user_id": user_id,
             "preferences_context": preferences_context,
+            "plan_error": plan_error,
         }
 
     async def execute_tasks(state: Dict) -> Dict:
@@ -1619,11 +1624,16 @@ def create_coordinator_graph():
 
                 if event.get("decision") in {"ask_user", "fail_safely"}:
                     clarification_event = event
+                    if event.get("decision") == "fail_safely":
+                        task_queue.current_queue.clear()
                     break
 
                 
             if result.status == "failed":
                 logger.error(f"❌ Task {current_task.task_id} failed: {result.error}")
+                # Clear the remaining task queue to prevent executing leftover 
+                # tasks in the future if a new plan is added to this session
+                task_queue.current_queue.clear()
                 break
         
         return {
@@ -1675,6 +1685,7 @@ def create_coordinator_graph():
         
         success_count = sum(1 for r in results.values() if r.status == "success")
         total_count = len(results)
+        plan_error = state.get("plan_error", "")
         
         # ✅ FIX 3: Update conversation history
         if success_count > 0:
@@ -1758,20 +1769,29 @@ def create_coordinator_graph():
             await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
             return {"status": "failed"}
 
-        # ── Build readable content from task results ─────────────────────────
-        detail_lines = []
-        has_reasoning_content = False
-        for task_obj in state.get("tasks", []):
-            tid = task_obj.task_id if hasattr(task_obj, 'task_id') else task_obj.get('task_id', '')
-            r = results.get(tid)
-            if r and r.content:
-                extracted_content = _extract_readable_text(r.content)
-                if extracted_content:
-                    detail_lines.append(extracted_content)
-                if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
-                    has_reasoning_content = True
+        # Override the error response if we had a planning error
+        if total_count == 0 and plan_error:
+            # We don't have tasks because decomposition failed (e.g. rate limit). 
+            # We construct a synthetic message to pass down to Language Agent.
+            full_content = f"A task planning error occurred: {plan_error}"
+            success_count = 0
+            has_reasoning_content = False
+            detail_lines = []
+        else:
+            # ── Build readable content from task results ─────────────────────────
+            detail_lines = []
+            has_reasoning_content = False
+            for task_obj in state.get("tasks", []):
+                tid = task_obj.task_id if hasattr(task_obj, 'task_id') else task_obj.get('task_id', '')
+                r = results.get(tid)
+                if r and r.content:
+                    extracted_content = _extract_readable_text(r.content)
+                    if extracted_content:
+                        detail_lines.append(extracted_content)
+                    if hasattr(task_obj, 'target_agent') and task_obj.target_agent == "reasoning":
+                        has_reasoning_content = True
 
-        full_content = "\n\n".join(detail_lines) if detail_lines else ""
+            full_content = "\n\n".join(detail_lines) if detail_lines else ""
 
         # ── Delegate user-facing message to Language Agent ────────────────────
         # The Coordinator does NOT generate user communication directly.
@@ -1794,6 +1814,7 @@ def create_coordinator_graph():
                         "success_count": success_count,
                         "total_count": total_count,
                         "has_reasoning_content": has_reasoning_content,
+                        "plan_error": plan_error,
                     },
                     lang=user_language,
                 )
@@ -1807,7 +1828,12 @@ def create_coordinator_graph():
         used_fallback = False
         if not response_text:
             used_fallback = True
-            if success_count == total_count and total_count > 0:
+            if total_count == 0 and plan_error:
+                if "Rate limit" in plan_error or "429" in plan_error:
+                    response_text = "بعتذر، نأسف لحدوث ضغط على النظام يرجى المحاولة لاحقاً." if is_arabic else "I apologize for the high system load, please try again later."
+                else:
+                    response_text = f"حدث خطأ أثناء التخطيط: {plan_error}" if is_arabic else f"Planning error occurred: {plan_error}"
+            elif success_count == total_count and total_count > 0:
                 response_text = (
                     f"تم تنفيذ المهمة بنجاح! تم تنفيذ {success_count} خطوات."
                     if is_arabic else

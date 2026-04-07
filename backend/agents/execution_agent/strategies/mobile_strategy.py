@@ -498,7 +498,7 @@ class MobileReActStrategy:
             decision_tier: str            = ""
             thought:       str            = ""
 
-            t1 = self._tier1(task.ai_prompt, self.current_ui_tree, self.device_state)
+            t1 = self._tier1(task, self.current_ui_tree, self.device_state)
             if t1:
                 thought       = t1["thought"]
                 action_json   = t1
@@ -1118,7 +1118,8 @@ class MobileReActStrategy:
     #  TIER 1
     # ══════════════════════════════════════════════════════════════════════
 
-    def _tier1(self, goal: str, ui_tree: SemanticUITree, device_state: str) -> Optional[Dict[str, Any]]:
+    def _tier1(self, task: MobileTaskRequest, ui_tree: SemanticUITree, device_state: str) -> Optional[Dict[str, Any]]:
+        goal = task.ai_prompt
         if not ui_tree or not ui_tree.elements:
             return None
 
@@ -1197,7 +1198,7 @@ class MobileReActStrategy:
             return chrome_submit
 
         # Deterministic compose-field typing for email tasks (To/Subject/Body)
-        compose = self._handle_compose_field_typing(goal, ui_tree)
+        compose = self._handle_compose_field_typing(task, ui_tree)
         if compose:
             return compose
 
@@ -1558,8 +1559,9 @@ class MobileReActStrategy:
 
         return None
 
-    def _handle_compose_field_typing(self, goal: str, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
+    def _handle_compose_field_typing(self, task: MobileTaskRequest, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
         """Deterministic typing for Gmail compose fields to avoid click loops."""
+        goal = task.ai_prompt
         gl = goal.lower().strip()
 
         field_kind: Optional[str] = None
@@ -1578,6 +1580,20 @@ class MobileReActStrategy:
         elif m_body:
             field_kind = "body"
             text_value = m_body.group(1).strip().strip("'\"")
+
+        # Overwrite text_value if it references input_content from extra_params
+        if getattr(task, "extra_params", None) and "input_content" in task.extra_params:
+            raw_ic = str(task.extra_params["input_content"])
+            try:
+                ic = json.loads(raw_ic)
+                if isinstance(ic, dict):
+                    if field_kind == "subject" and "SUBJECT" in ic:
+                        text_value = str(ic["SUBJECT"])
+                    elif field_kind == "body" and "BODY" in ic:
+                        text_value = str(ic["BODY"])
+            except Exception:
+                if text_value and "generated" in text_value.lower():
+                    text_value = raw_ic.strip()
 
         if not field_kind or not text_value:
             return None

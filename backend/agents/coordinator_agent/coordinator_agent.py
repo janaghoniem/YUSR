@@ -28,7 +28,7 @@ from langchain_groq import ChatGroq
 
 llm = ChatGroq(
     model=LLM_MODEL,
-    temperature=0.1,
+    temperature=0.05,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
 ) 
@@ -290,7 +290,7 @@ class ActionTask(BaseModel):
     # Interaction: {"action": "fill", "text": "search query"}  # Selector comes from RAG
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
-    target_agent: Literal["action", "reasoning"] = "action"
+    target_agent: Literal["action", "reasoning", "language"] = "action"
     depends_on: Optional[List[str]] = None
     
     class Config:
@@ -676,7 +676,13 @@ A COMPOSITE request:
 # DEVICE & CONTEXT
 
 - **device**: "desktop" or "mobile"
-- **context**: "local" (native OS/apps) or "web" (browser automation)
+- **context**:
+  - "web" → ONLY for desktop browser automation.
+  - "local" → for all mobile tasks, including web browsing on mobile.
+  
+  **Mobile devices**: even when the user says "open Chrome and search for X", you MUST use context: "local". The mobile automation layer handles browser opening, navigation, and typing locally.
+  
+  **Desktop**: use "web" for browser actions, "local" for native OS/apps.
 
 # TARGET AGENTS
 
@@ -839,17 +845,28 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
 
 - task_id: task_6
   goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before sending it. Wait for their response.
+  device: mobile
+  context: local
+  target_agent: language
+  extra_params:
+    input_from: "task_1"
+  depends_on: ["task_1", "task_5"]
+
+- task_id: task_7
+  goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Click the Send button to send the email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_5"]
+  depends_on: ["task_6"]
 
 EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
 task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
 the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
-so the action layer can parse SUBJECT and BODY individually.
+so the action layer can parse SUBJECT and BODY individually. 
+task_6 explicitly takes input_from: "task_1" so the language agent can read the generated content to the user before task_7 sends it.
 The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
 
 ## Example 4: Mobile Configuration Task
@@ -923,6 +940,11 @@ EXPLANATION: Task 2 uses "reasoning" because writing a story is content generati
 
 # WHEN TO USE target_agent: "reasoning" vs "action"
 
+- **Extracting text from UI, files, or webpages** (e.g., “read the price”, “get the error message”, “copy the visible text”) → ALWAYS target_agent: "action".
+- **Reasoning** is for content generation, summarisation, translation, or analysis AFTER text has been extracted by an action task.
+- If the user asks to understand or interpret extracted content, use two tasks:
+    1. Action task to extract the raw text.
+    2. Reasoning task that depends on the action task and receives the text via extra_params["input_content"].
 - **"action"**: Tasks that interact with the OS, apps, or browser (open, click, type, navigate, fill, screenshot, etc.)
 - **"reasoning"**: Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element, it is reasoning.
 
@@ -959,6 +981,15 @@ Examples of ACTION tasks:
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
 11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
 12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results and formats them into a natural, helpful conversational response.
+13. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action.
+  - The confirmation task must have:
+    - target_agent: "language"
+    - ai_prompt: "(e.g., Read out the generated content. Ask the user to confirm or critique this task. Wait for their response.)"
+    - extra_params: Must contain {{"input_from": "<generation_task_id>"}} so the language agent actually receives the text to read out.
+    - depends_on: the generation task
+  - The send task must depend on the confirmation task.
+  - If a user replies with a **critique** or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending. 
+  - The Language Agent will handle the user interaction and signal approval or return the user's critique.
 
 ============================
 OUTPUT RULES
@@ -972,7 +1003,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
     "ai_prompt": <string>,
     "device": <"desktop" | "mobile">,
     "context": <"local" | "web">,
-    "target_agent": <"action" | "reasoning">,
+    "target_agent": <"action" | "reasoning" | "language">,
     "extra_params": <object>,
     "web_params": <object>,
     "depends_on": <array of strings | null>
@@ -1116,20 +1147,38 @@ Generate the task decomposition now:"""
         action_tasks = [ActionTask(**task) for task in task_dicts]
 
         # ── LLM VALIDATION PASS ────────────────────────────────────────────────
-        validation_prompt = f"""You are the AURA Task Decomposition Validator. Review this proposed decomposition for the user request.
-        
+        validation_prompt = f"""You are the AURA Task Decomposition Validator. Review the proposed decomposition for the user request.
+
 USER REQUEST:
 {json.dumps(user_request, indent=2)}
 
 PROPOSED DECOMPOSITION:
 {json.dumps(task_dicts, indent=2)}
 
-Your job is to act as a rigorous validator:
-1. Ensure no intermediate steps are skipped or assumed. However, DO NOT add tasks to explicitly "open browser" - web tasks automatically handle browser opening.
-2. Ensure dependencies (depends_on) are correctly linked so tasks wait for required data.
-3. CRITICAL: For research/informational tasks, ensure there is a final step (target_agent: "reasoning") to format and communicate the content back to the disabled user.
+**YOUR JOB**:
+- ONLY modify the plan if you find a CLEAR VIOLATION of the rules.
+- DO NOT add or remove steps just because you would have written it differently.
+- DO NOT change the order of steps unless it breaks a logical dependency.
+- Return the plan EXACTLY as given if no violation exists.
 
-Return ONLY a valid JSON array of the reviewed and potentially corrected tasks. Do not include markdown formatting or explanations.
+**Device‑Logical Validation**:
+Imagine you are giving step‑by‑step instructions to a user on that device (e.g., an Android phone). Ask yourself: would these steps be logical and complete?
+- For mobile: Do not assume a browser is already open unless the user said so. Opening a browser is its own step.
+- Do not skip necessary taps (e.g., after filling a field, a “Next” or “Send” button must be clicked).
+- Ensure that the number of steps matches what a human would need to do.
+If the plan violates this common‑sense device logic, you MAY add missing steps or remove redundant ones, but only if strictly necessary.
+
+**CRITICAL RULES TO ENFORCE**:
+1. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST ensure a confirmation task exists AFTER generation but BEFORE the final send action.
+  - The confirmation task must have: target_agent: "language", and its ai_prompt MUST explicitly tell the agent to read the generated content aloud to the user and ask for confirmation or critique.
+  - The confirmation task must explicitly declare `input_from: "<generation_task_id>"` in its `extra_params` so the text is routed to the language agent.
+  - The send task must depend on the confirmation task.
+  - If the user provides a critique (e.g., "make it shorter"), ensure the task sequence re-generates the content using a reasoning task, re-fills the new text, and asks for confirmation again.
+2. **One action per task** - never combine multiple actions.
+3. NO URLs or selectors hardcoded.
+4. Content generation MUST use target_agent: "reasoning".
+
+Return ONLY a valid JSON array of tasks (same format as input). Do not include markdown or explanations.
 """
         try:
             val_response = await llm.ainvoke(validation_prompt)
@@ -1457,7 +1506,11 @@ def create_coordinator_graph():
                             try:
                                 parsed = json.loads(stripped)
                                 if isinstance(parsed, dict) and "result" in parsed:
-                                    stripped = str(parsed["result"])
+                                    res_val = parsed["result"]
+                                    if isinstance(res_val, (dict, list)):
+                                        stripped = json.dumps(res_val, ensure_ascii=False)
+                                    else:
+                                        stripped = str(res_val)
                             except Exception:
                                 pass
                         raw_dep_output = stripped
@@ -2078,6 +2131,9 @@ async def execute_single_task(
     if task.target_agent == "action":
         channel = Channels.COORDINATOR_TO_EXECUTION
         receiver = AgentType.EXECUTION
+    elif task.target_agent == "language":
+        channel = Channels.COORDINATOR_TO_LANGUAGE
+        receiver = AgentType.LANGUAGE
     else:
         channel = Channels.COORDINATOR_TO_REASONING
         receiver = AgentType.REASONING
@@ -2165,6 +2221,9 @@ async def start_coordinator_agent(broker_instance):
     async def handle_task_from_language(message: AgentMessage):
         """Handle task from Language Agent"""
         
+        if message.message_type != MessageType.TASK_REQUEST:
+            return
+
         http_request_id = message.response_to if message.response_to else message.message_id
         user_id = message.payload.get("user_id", "default_user")
         session_id = message.session_id
@@ -2296,6 +2355,9 @@ async def start_coordinator_agent(broker_instance):
         - Race conditions in future handling
         - Silent failures when results arrive out of order
         """
+        if message.message_type != MessageType.EXECUTION_RESPONSE:
+            return
+            
         task_id = message.task_id
         result_status = message.payload.get('status', 'unknown')
         
@@ -2440,6 +2502,7 @@ async def start_coordinator_agent(broker_instance):
     
     # Subscribe to channels
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_task_from_language)
+    broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.EXECUTION_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.REASONING_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.INTERRUPT_CONTROL, handle_interrupt_command)

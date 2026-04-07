@@ -1146,6 +1146,38 @@ async def start_language_agent(broker):
         except Exception as e:
             logger.warning(f"⚠️ Failed to send thinking update: {e}")
 
+        # ── Handle EXECUTION_REQUEST confirmations ─────────────────────────────
+        if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
+            if agent.awaiting_user_response.get("type") == "task_confirmation":
+                task_id = agent.awaiting_user_response.get("task_id")
+                orig_request = agent.awaiting_user_response.get("original_request")
+                agent.awaiting_user_response = None
+                
+                logger.info(f"✅ User answered task confirmation for {task_id}: {input_text}")
+                
+                # Clear thinking step immediately
+                try:
+                    await ThinkingStepManager.clear_steps(session_id)
+                except Exception:
+                    pass
+
+                # Form execution response
+                response_msg = AgentMessage(
+                    message_type=MessageType.EXECUTION_RESPONSE,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    response_to=orig_request or http_request_id,
+                    payload={
+                        "status": "success",
+                        "content": input_text,
+                        "details": f"User replied: {input_text}"
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
+                return
+
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
         contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
         if contextual_follow_up:
@@ -1366,7 +1398,70 @@ async def start_language_agent(broker):
             )
             await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
 
+    async def handle_execution_request(message):
+        """Handle execution request (task confirmation) from Coordinator."""
+        # Convert to AgentMessage if it's a dict
+        if isinstance(message, dict):
+            try:
+                message = AgentMessage(**message)
+            except Exception:
+                return
+
+        if message.message_type != MessageType.EXECUTION_REQUEST:
+            return
+            
+        payload_data = message.payload
+        session_id = message.session_id if message.session_id else "default_session"
+        task_id = message.task_id
+        user_id = payload_data.get("user_id", "default_user")
+        ai_prompt = payload_data.get("ai_prompt", "Please confirm this action.")
+        extra_params = payload_data.get("extra_params", {})
+        # Try both direct and nested input content in case of extraction variance
+        input_content = extra_params.get("input_content", "")
+        if not input_content and "input_from" in extra_params:
+            logger.info(f"Looking for content from: {extra_params.get('input_from')}")
+            
+        agent = get_or_create_agent(session_id, user_id)
+        
+        question = ai_prompt
+        if input_content:
+             question += f"\n\nContent:\n{input_content}"
+             
+        agent.awaiting_user_response = {
+            "type": "task_confirmation",
+            "task_id": task_id,
+            "original_request": message.response_to
+        }
+        
+        clarification_msg = AgentMessage(
+            message_type=MessageType.CLARIFICATION_REQUEST,
+            sender=AgentType.LANGUAGE,
+            receiver=AgentType.LANGUAGE,
+            session_id=session_id,
+            response_to=message.response_to,
+            payload={
+                "question": question,
+                "context": str(payload_data)
+            }
+        )
+        await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+        
+        ws_msg = AgentMessage(
+            message_type=MessageType.CLARIFICATION_REQUEST,
+            sender=AgentType.LANGUAGE,
+            receiver=AgentType.LANGUAGE,
+            session_id=session_id,
+            response_to=message.response_to,
+            payload={
+                "ws_type": "clarification_needed",
+                "question": question
+            }
+        )
+        await broker.publish(Channels.WEBSOCKET_OUTPUT, ws_msg)
+        logger.info(f"🛑 Paused for user task confirmation: {task_id}")
+
     broker.subscribe(Channels.LANGUAGE_INPUT, handle_user_input)
+    broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_execution_request)
     logger.info("✅ Language Agent started")
 
     while True:

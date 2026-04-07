@@ -245,8 +245,13 @@ Your goal is correctness, clarity, and usefulness to the system."""
             # Parse JSON response
             try:
                 parsed_response = json.loads(clean_response)
-                result_content = parsed_response.get("result", str(parsed_response))
-                logger.info(f"✅ Reasoning complete: {str(result_content)[:200]}...")
+                result_content = parsed_response.get("result", parsed_response)
+                if isinstance(result_content, (dict, list)):
+                    result_content = json.dumps(result_content, ensure_ascii=False)
+                elif not isinstance(result_content, str):
+                    result_content = str(result_content)
+                    
+                logger.info(f"✅ Reasoning complete: {result_content[:200]}...")
                 return {
                     "task_id": task_payload.get("task_id"),
                     "status": "success",

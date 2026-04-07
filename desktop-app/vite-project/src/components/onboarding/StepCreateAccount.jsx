@@ -193,21 +193,6 @@ const StepCreateAccount = ({ onSubmit, data, setData, isSubmitting }) => {
       )}
       {errors.username && <p className="onboarding-error">{errors.username}</p>}
 
-      {/* Email field */}
-      <div className="voice-input-wrapper" style={{ marginTop: "16px" }}>
-        <label className="onboarding-input-label">Email (optional)</label>
-        <div className="voice-input-container">
-          <input
-            type="email"
-            className="onboarding-input"
-            value={data.email || ""}
-            onChange={(e) => setData({ ...data, email: e.target.value })}
-            placeholder="your@email.com"
-            autoComplete="email"
-          />
-        </div>
-      </div>
-
       {/* Face Registration Section */}
       <div className="face-registration-section" style={{ marginTop: "24px" }}>
         <label className="onboarding-input-label">Face Authentication</label>

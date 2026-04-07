@@ -2,7 +2,7 @@
 import React from "react";
 import { Settings, Menu, X, SquarePen } from "lucide-react";
 
-const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, onViewChat, onDeleteChat, currentSessionId }) => {
+const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, onViewChat, currentSessionId }) => {
   return (
     <>
       <aside className={`sidebar ${collapsed ? "collapsed" : ""}`} role="navigation" aria-label="Main sidebar">
@@ -78,21 +78,6 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                         aria-label="View chat history"
                       >
                         👁
-                      </button>
-                      {/* Delete chat button */}
-                      <button
-                        className="chat-view-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (window.confirm(`Delete chat "${title}"?`)) {
-                            onDeleteChat && onDeleteChat(sid);
-                          }
-                        }}
-                        title="Delete this chat"
-                        aria-label="Delete this chat"
-                        style={{ color: "#ff4d6d" }}
-                      >
-                        🗑
                       </button>
                     </li>
                   );

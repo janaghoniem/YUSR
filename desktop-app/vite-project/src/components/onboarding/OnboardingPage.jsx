@@ -15,7 +15,6 @@ const OnboardingPage = ({ userId, onComplete }) => {
   const [formData, setFormData] = useState({
     introduction: "",
     username: "",
-    email: "",
     password: "",
     confirmPassword: "",
     preferences: {
@@ -75,7 +74,6 @@ const OnboardingPage = ({ userId, onComplete }) => {
       const payload = {
         user_id: currentUserId,
         username: formData.username,
-        email: formData.email || "",
         password: formData.password,
         introduction: formData.introduction,
         preferences: formData.preferences,

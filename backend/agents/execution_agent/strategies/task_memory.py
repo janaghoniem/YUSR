@@ -1794,6 +1794,72 @@ class TaskMemory:
         )
         return "\n".join(lines)
 
+    # # ── Stats ──────────────────────────────────────────────────────────────
+
+    # def stats(self) -> Dict[str, Any]:
+    #     count = self._col.count() if self._col else 0
+    #     return {
+    #         "total_records": count,
+    #         "chroma_path":   self._chroma_path,
+    #         "embed_model":   EMBED_MODEL,
+    #     }
+# ── ICRL / FeedbackAgent integration ──────────────────────────────────
+
+    def store_trajectory_feedback(
+        self,
+        goal: str,
+        evaluation_score: float,
+        is_success: bool,
+        improvements: List[str],
+    ) -> None:
+        """
+        Store FeedbackAgent evaluation result for a completed trajectory.
+        
+        Called by FeedbackAgent.evaluate_and_store() after scoring a run.
+        Writes a lightweight record so future retrieval can surface
+        "what went wrong last time" as a hint.
+        
+        Args:
+            goal: The high-level user goal that was attempted
+            evaluation_score: Scalar reward 0.0–1.0 from FeedbackAgent
+            is_success: Whether the trajectory achieved the goal
+            improvements: List of actionable improvement suggestions
+        """
+        if self._col is None:
+            return
+        try:
+            import json as _json
+            record_id = str(uuid.uuid4())
+            doc = _build_composite_document(goal, f"trajectory_feedback score={evaluation_score:.2f}")
+            embedding = self._embed([doc])
+            self._col.add(
+                ids=[record_id],
+                documents=[doc],
+                embeddings=embedding,
+                metadatas=[{
+                    "step_instruction":  f"[FEEDBACK] score={evaluation_score:.2f} success={is_success}",
+                    "overall_goal":      (goal or "")[:300],
+                    "app":               "feedback",
+                    "action_type":       "trajectory_feedback",
+                    "screen_signature":  "",
+                    "selectors":         _json.dumps([]),
+                    "param_key":         "",
+                    "direction":         "",
+                    "typed_value":       _json.dumps(improvements[:5]),
+                    "expect_screen_change": "False",
+                    "success_count":     1 if is_success else 0,
+                    "failure_count":     0 if is_success else 1,
+                    "demonstrated":      0,
+                }],
+            )
+            logger.info(
+                f"[CACHE] stored trajectory feedback: "
+                f"goal='{goal[:50]}' score={evaluation_score:.2f} "
+                f"success={is_success} id={record_id[:8]}"
+            )
+        except Exception as e:
+            logger.warning(f"[CACHE] store_trajectory_feedback failed: {e}")
+
     # ── Stats ──────────────────────────────────────────────────────────────
 
     def stats(self) -> Dict[str, Any]:

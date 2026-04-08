@@ -1,3 +1,4 @@
+from unittest import result
 import os, uuid, asyncio, json, re
 from dotenv import load_dotenv   
 from langgraph.graph import StateGraph, END
@@ -18,6 +19,11 @@ from agents.utils.protocol import (
 )
 from agents.utils.broker import broker
 from ThinkingStepManager import ThinkingStepManager
+
+# ICRL imports — In-Context Reinforcement Learning (arXiv:2506.06303)
+from agents.ICRL.icrl_buffer import ICRLBuffer
+from agents.ICRL.icrl_reward_bridge import compute_reward, summarize_task_attempt
+from agents.ICRL.icrl_prompt_builder import inject_icrl_into_decomposition_prompt, inject_icrl_into_execution_prompt
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -478,6 +484,25 @@ pending_results: Dict[str, asyncio.Future] = {}
 #hala edit ashan el web 
 _session_browser_state: Dict[str, Dict] = {}
 
+# ICRL: Per-session, per-task buffers for In-Context Reinforcement Learning
+# Key: f"{session_id}:{task_id}" → ICRLBuffer
+# Cleared when a new chat session starts
+_icrl_buffers: Dict[str, ICRLBuffer] = {}
+
+def _get_icrl_buffer(session_id: str, task_id: str, goal: str) -> ICRLBuffer:
+    """Get or create an ICRL buffer for a specific task within a session."""
+    key = f"{session_id}:{task_id}"
+    if key not in _icrl_buffers:
+        _icrl_buffers[key] = ICRLBuffer(goal=goal)
+    return _icrl_buffers[key]
+
+def _clear_icrl_buffers_for_session(session_id: str):
+    """Clear all ICRL buffers for a session (called on new chat)."""
+    keys_to_remove = [k for k in _icrl_buffers if k.startswith(f"{session_id}:")]
+    for k in keys_to_remove:
+        del _icrl_buffers[k]
+    if keys_to_remove:
+        logger.info(f"🗑️ ICRL: Cleared {len(keys_to_remove)} buffers for session {session_id}")
 
 # Helper function for guarded futures
 def create_guarded_future(task_id: str) -> asyncio.Future:
@@ -1263,6 +1288,7 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
         except Exception as graph_e:
             logger.warning(f"⚠️ Plan graph validation encountered an error: {graph_e}")
 
+        #here
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
         return {"tasks": action_tasks}
 
@@ -1270,8 +1296,74 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
         logger.error(f"❌ Task decomposition failed: {e}")
         return {"error": str(e)}
 
-# --- REST OF THE CODE REMAINS THE SAME ---
-# (Orchestration graph, execution, broker integration, etc.)
+
+async def decompose_task_to_actions_with_icrl(
+    user_request: Dict[str, Any],
+    preferences_context: str,
+    device_type: str = "desktop",
+    conversation_history: List[Dict] = None,
+    session_id: str = None,
+    http_request_id: str = None,
+    current_page_url: str = None,
+    icrl_buffer: Optional[ICRLBuffer] = None,
+    icrl_round: int = 0,
+) -> Dict[str, Any]:
+    """
+    ICRL-aware wrapper around decompose_task_to_actions.
+    
+    On round 0: calls decompose_task_to_actions normally (no history).
+    On rounds 1+: injects the ICRL history context + instruction into the
+    decomposition prompt before calling the LLM.
+    
+    This implements the core ICRL loop for PLAN-LEVEL retries:
+    if the entire plan failed, we retry the decomposition with reward-annotated
+    history so the LLM generates a better plan.
+    
+    Args:
+        ...(same as decompose_task_to_actions)...
+        icrl_buffer: Shared ICRLBuffer tracking plan-level attempts
+        icrl_round: Current round number (0 = first attempt)
+    
+    Returns:
+        Same as decompose_task_to_actions: {"tasks": [...]} or {"error": "..."}
+    """
+    if icrl_round == 0 or icrl_buffer is None or icrl_buffer.attempt_count == 0:
+        # First attempt — no ICRL history yet, call normally
+        return await decompose_task_to_actions(
+            user_request, preferences_context, device_type,
+            conversation_history, session_id, http_request_id, current_page_url
+        )
+
+    # Build the base prompt (we need to intercept it before the LLM call)
+    # We reconstruct the prompt the same way decompose_task_to_actions does,
+    # inject ICRL context, then call the LLM directly.
+    
+    logger.info(
+        f"🔄 ICRL round {icrl_round}: injecting {icrl_buffer.attempt_count} "
+        f"attempt(s) into decomposition prompt. "
+        f"Best reward so far: {icrl_buffer.best_reward:.3f}"
+    )
+
+    # Get the base prompt by calling the original function but capturing what it would send.
+    # Rather than duplicating the entire prompt construction (which is huge and would drift),
+    # we use a simpler approach: add ICRL context to the user_request dict so the LLM
+    # sees it naturally in the "USER REQUEST" section of the prompt.
+    icrl_context_block = ""
+    from agents.ICRL.icrl_prompt_builder import build_icrl_context_block
+    icrl_context_block = build_icrl_context_block(icrl_buffer)
+    icrl_instruction = icrl_buffer.get_icrl_instruction(icrl_round)
+
+    # Inject ICRL as an additional field in the request so it appears in the
+    # "USER REQUEST" JSON block the LLM sees
+    icrl_enriched_request = dict(user_request)
+    icrl_enriched_request["_icrl_history"] = icrl_context_block + icrl_instruction
+    icrl_enriched_request["_icrl_round"] = icrl_round
+    icrl_enriched_request["_icrl_best_reward"] = round(icrl_buffer.best_reward, 3)
+
+    return await decompose_task_to_actions(
+        icrl_enriched_request, preferences_context, device_type,
+        conversation_history, session_id, http_request_id, current_page_url
+    )
 
 def create_coordinator_graph():
     """Create the coordinator orchestration graph"""
@@ -1685,11 +1777,47 @@ def create_coordinator_graph():
                 
             if result.status == "failed":
                 logger.error(f"❌ Task {current_task.task_id} failed: {result.error}")
-                # Clear the remaining task queue to prevent executing leftover 
-                # tasks in the future if a new plan is added to this session
                 task_queue.current_queue.clear()
                 break
         
+        # ── ICRL: Plan-level retry if execution failed ────────────────────────
+        # If the plan failed and we have session context, compute a plan-level
+        # reward and store it. The coordinator graph currently runs once per
+        # request, so plan-level ICRL retries are handled via the LangGraph
+        # checkpoint mechanism — the next invocation will have ICRL history.
+        # Here we store the plan-level reward in the state for potential future use.
+        plan_success_count = sum(1 for r in results.values() if r.status == "success")
+        plan_total = len(results)
+        plan_reward = plan_success_count / max(plan_total, 1)
+
+        if session_id and plan_total > 0:
+            try:
+                plan_goal = state.get("input", {}).get(
+                    "original_input",
+                    state.get("input", {}).get("confirmation", "unknown goal")
+                )
+                plan_buffer_key = f"{session_id}:__plan__"
+                if plan_buffer_key not in _icrl_buffers:
+                    _icrl_buffers[plan_buffer_key] = ICRLBuffer(goal=plan_goal)
+
+                plan_buffer = _icrl_buffers[plan_buffer_key]
+                tasks_summary = "; ".join(
+                    t.ai_prompt[:60] for t in state.get("tasks", [])
+                )
+                plan_buffer.add(
+                    attempt_summary=f"Plan with {plan_total} tasks: {tasks_summary}",
+                    reward=plan_reward,
+                    result_snippet=f"{plan_success_count}/{plan_total} tasks succeeded",
+                )
+                logger.info(
+                    f"📊 ICRL plan-level: reward={plan_reward:.3f} "
+                    f"({plan_success_count}/{plan_total} tasks), "
+                    f"buffer={plan_buffer.summary()}"
+                )
+            except Exception as _plan_icrl_err:
+                logger.warning(f"⚠️ ICRL plan recording failed (non-fatal): {_plan_icrl_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         return {
             **state,
             "results": results,
@@ -2131,17 +2259,157 @@ Extract now:"""
         return {"status": "completed"}
 
     # Build graph
+    # ── ICRL: Plan-level retry node ───────────────────────────────────────────
+    MAX_ICRL_PLAN_RETRIES = 2  # Max times to re-decompose a failing plan
+    ICRL_RETRY_SUCCESS_THRESHOLD = 0.6  # Minimum success ratio to skip retry
+
+    async def maybe_retry_plan(state: Dict) -> Dict:
+        """
+        ICRL plan-level retry node.
+        
+        Checks if the plan failed badly enough to warrant re-decomposition
+        with ICRL history. If yes, re-runs analyze_and_plan with ICRL context
+        injected. If no (good enough result, max retries hit, or no session),
+        passes through unchanged to send_feedback.
+        
+        This is the "plan-level" ICRL loop from the paper applied to
+        task decomposition: the coordinator treats the entire plan as one
+        "response" and the success ratio as its "reward".
+        """
+        results = state.get("results", {})
+        session_id = state.get("session_id")
+        icrl_round = state.get("_icrl_plan_round", 0)
+
+        if not session_id or not results:
+            return {**state, "_icrl_plan_round": icrl_round}
+
+        success_count = sum(1 for r in results.values() if r.status == "success")
+        total_count = len(results)
+        plan_reward = success_count / max(total_count, 1)
+
+        logger.info(
+            f"🔄 ICRL plan check: round={icrl_round}, "
+            f"reward={plan_reward:.2f} ({success_count}/{total_count}), "
+            f"max_retries={MAX_ICRL_PLAN_RETRIES}"
+        )
+
+        # Conditions to skip retry
+        if icrl_round >= MAX_ICRL_PLAN_RETRIES:
+            logger.info("🔄 ICRL: Max plan retries reached, proceeding to feedback")
+            return {**state, "_icrl_plan_round": icrl_round}
+
+        if plan_reward >= ICRL_RETRY_SUCCESS_THRESHOLD:
+            logger.info(
+                f"🔄 ICRL: Plan reward {plan_reward:.2f} >= threshold "
+                f"{ICRL_RETRY_SUCCESS_THRESHOLD}, no retry needed"
+            )
+            return {**state, "_icrl_plan_round": icrl_round}
+
+        if state.get("plan_error"):
+            # Decomposition itself failed (rate limit etc.) — don't retry
+            logger.info("🔄 ICRL: Skipping plan retry due to decomposition error")
+            return {**state, "_icrl_plan_round": icrl_round}
+
+        # ── Plan failed badly — retry with ICRL context ─────────────────────
+        logger.info(
+            f"🔄 ICRL: Plan reward {plan_reward:.2f} < threshold, "
+            f"retrying decomposition (round {icrl_round + 1})"
+        )
+
+        # Retrieve or create the plan-level ICRL buffer
+        plan_buffer_key = f"{session_id}:__plan__"
+        plan_buffer = _icrl_buffers.get(plan_buffer_key)
+        if plan_buffer is None:
+            plan_goal = state.get("input", {}).get(
+                "original_input",
+                state.get("input", {}).get("confirmation", "unknown goal")
+            )
+            plan_buffer = ICRLBuffer(goal=plan_goal)
+            _icrl_buffers[plan_buffer_key] = plan_buffer
+
+        # The plan-level reward was already recorded in execute_tasks (step 5e).
+        # Now we inject ICRL context into a fresh decomposition call.
+        new_icrl_round = icrl_round + 1
+        device_type = state.get("input", {}).get("device_type", "desktop")
+        user_id = state.get("user_id", "default_user")
+        original_message_id = state.get("original_message_id")
+
+        try:
+            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+            pref_mgr = get_preference_manager(user_id)
+            preferences_context = pref_mgr.get_relevant_preferences(
+                str(state.get("input", {}).get("original_input", "")), limit=5
+            )
+        except Exception:
+            preferences_context = state.get("preferences_context", "No preferences available")
+
+        saved_browser = _session_browser_state.get(session_id, {})
+        current_page_url = saved_browser.get("current_page_url")
+
+        plan_result = await decompose_task_to_actions_with_icrl(
+            user_request=state["input"],
+            preferences_context=preferences_context,
+            device_type=device_type,
+            conversation_history=state.get("conversation_history", []),
+            session_id=session_id,
+            http_request_id=original_message_id,
+            current_page_url=current_page_url,
+            icrl_buffer=plan_buffer,
+            icrl_round=new_icrl_round,
+        )
+
+        if plan_result.get("error") or not plan_result.get("tasks"):
+            logger.warning(
+                f"⚠️ ICRL plan retry failed to produce new tasks: "
+                f"{plan_result.get('error', 'no tasks')}"
+            )
+            return {**state, "_icrl_plan_round": new_icrl_round}
+
+        new_tasks = plan_result["tasks"]
+        logger.info(
+            f"✅ ICRL: New plan generated ({len(new_tasks)} tasks) for round {new_icrl_round}"
+        )
+
+        # Reset the task queue and results for the retry
+        task_queue.reset()
+        task_queue.add_to_current(new_tasks)
+
+        # Re-run execute_tasks with the new plan
+        new_state = {
+            **state,
+            "tasks": new_tasks,
+            "results": {},
+            "_icrl_plan_round": new_icrl_round,
+        }
+        return await execute_tasks(new_state)
+
+    def route_after_execution(state: Dict) -> str:
+        """
+        Route after execute_tasks:
+        - If plan failed badly AND retries remain → maybe_retry_plan
+        - Otherwise → feedback
+        
+        We always go through maybe_retry_plan; it decides internally
+        whether to actually retry or pass through.
+        """
+        return "maybe_retry_plan"
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Build graph
     graph.add_node("analyze", analyze_and_plan)
     graph.add_node("execute", execute_tasks)
+    graph.add_node("maybe_retry_plan", maybe_retry_plan)
     graph.add_node("feedback", send_feedback)
 
     graph.set_entry_point("analyze")
-    
+
     def route_after_analysis(state):
         return "execute"
 
     graph.add_conditional_edges("analyze", route_after_analysis)
-    graph.add_edge("execute", "feedback")
+    graph.add_edge("execute", "maybe_retry_plan")
+    graph.add_edge("maybe_retry_plan", "feedback")
     graph.add_edge("feedback", END)
 
     return graph.compile(checkpointer=checkpointer)
@@ -2270,9 +2538,9 @@ async def execute_single_task(
 
         # Fix Pydantic validation error: Convert dict content to JSON string
         if isinstance(content, dict):
-            content = json.dumps(content, indent=2)  # Pretty format for readability
+            content = json.dumps(content, indent=2)
 
-        return TaskResult(
+        result = TaskResult(
             task_id=task.task_id,
             status=payload_status,
             content=content,
@@ -2284,8 +2552,61 @@ async def execute_single_task(
             clarification_type=result_payload.get("clarification_type"),
             recoverable=bool(result_payload.get("recoverable", False)),
         )
+
+        # ── ICRL: Record attempt + reward for non-reasoning tasks ────────────
+        # We only run ICRL on action tasks (not reasoning/language) because
+        # those are the ones that fail due to UI automation errors and benefit
+        # most from reward-guided retry strategies.
+        if (
+            session_id
+            and task.target_agent == "action"
+            and payload_status in ("success", "failed")
+        ):
+            try:
+                icrl_buffer = _get_icrl_buffer(
+                    session_id, task.task_id, task.goal or task.ai_prompt
+                )
+                task_dict = task.model_dump()
+                result_dict = result.model_dump()
+                result_dict["status"] = payload_status  # ensure correct status
+
+                reward = await compute_reward(
+                    goal=task.goal or task.ai_prompt,
+                    task_dict=task_dict,
+                    result_dict=result_dict,
+                )
+                attempt_summary = summarize_task_attempt(task_dict, result_dict)
+                icrl_buffer.add(
+                    attempt_summary=attempt_summary,
+                    reward=reward,
+                    result_snippet=str(content or "")[:200],
+                )
+                logger.info(
+                    f"📊 ICRL recorded: task={task.task_id}, "
+                    f"reward={reward:.3f}, "
+                    f"buffer={icrl_buffer.summary()}"
+                )
+            except Exception as _icrl_err:
+                logger.warning(f"⚠️ ICRL recording failed (non-fatal): {_icrl_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
+        return result
+
     except asyncio.TimeoutError:
         logger.error(f"⏰ Task {task.task_id} timeout after 60 seconds")
+        # Record timeout as near-zero reward in ICRL buffer
+        if session_id and task.target_agent == "action":
+            try:
+                icrl_buffer = _get_icrl_buffer(
+                    session_id, task.task_id, task.goal or task.ai_prompt
+                )
+                icrl_buffer.add(
+                    attempt_summary=f"Task: {task.ai_prompt[:100]} | Status: timeout",
+                    reward=0.05,
+                    result_snippet="Task timed out after 60 seconds",
+                )
+            except Exception:
+                pass
         return TaskResult(
             task_id=task.task_id,
             status="failed",
@@ -2567,6 +2888,8 @@ async def start_coordinator_agent(broker_instance):
             try:
                 await save_checkpoint_compat(session_id, None, {"cleared": True})
                 logger.info(f"🗑️ Cleared session history for {session_id}")
+                # ICRL: Clear in-context RL buffers for this session
+                _clear_icrl_buffers_for_session(session_id)
             except Exception as e:
                 logger.error(f"❌ Failed to clear session: {e}")
 

@@ -100,3 +100,4 @@ chromadb
 uiautomator2
 adbutils
 apkutils
+adb

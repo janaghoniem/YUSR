@@ -1,30 +1,60 @@
-import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
+
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'dart:math' as math;
+import 'package:http/http.dart' as http;
 import 'package:video_player/video_player.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:audioplayers/audioplayers.dart'; 
+
+import 'screens/startup_screen.dart';
+import 'theme.dart';
+import 'widgets/task_execution_border.dart';
+
+// Convenience helper — plain TextStyle, no google_fonts network call
+TextStyle _f(
+  Color color, {
+  FontWeight weight = FontWeight.w400,
+  double size = 14,
+  double spacing = 0,
+  double height = 1.4,
+}) => TextStyle(
+  fontFamily: 'PlusJakartaSans',
+  color: color,
+  fontWeight: weight,
+  fontSize: size,
+  letterSpacing: spacing,
+  height: height,
+);
 
 void main() {
   runApp(const MyApp());
 }
 
-// Device Manager - Handles communication with backend
-class DeviceManager {
-  static Function(String)? onTypeReceived;
-  static const String BACKEND_URL =
-      'http://10.0.2.2:8000'; // Android emulator localhost
-  static const String DEVICE_ID = 'android_device_1';
-  static const platform = MethodChannel('com.example.automation/service');
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'AURA',
+      theme: AuraTheme.darkTheme,
+      home: const StartupScreen(),
+    );
+  }
+}
 
-  // Register device with backend
+// ─── Device Manager ───────────────────────────────────────────────────────────
+class DeviceManager {
+  static const String backendUrl = 'http://10.0.2.2:8000';
+  static const String deviceId = 'android_device_1';
+  static const _platform = MethodChannel('com.example.automation/service');
+
   static Future<bool> registerDevice() async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/register'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'name': 'Flutter Device',
@@ -34,47 +64,29 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-
-      if (response.statusCode == 200) {
-        debugPrint('✅ Device registered successfully');
-        return true;
-      } else {
-        debugPrint('❌ Device registration failed: ${response.statusCode}');
-        return false;
-      }
-    } catch (e) {
-      debugPrint('❌ Error registering device: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Send UI tree to backend
-  static Future<bool> sendUITree(Map<String, dynamic> uiTree) async {
+  static Future<bool> sendUITree(Map<String, dynamic> tree) async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/ui-tree'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/ui-tree'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(uiTree),
+        body: jsonEncode(tree),
       );
-
-      if (response.statusCode == 200) {
-        debugPrint('✅ UI tree sent successfully');
-        return true;
-      } else {
-        debugPrint('❌ Failed to send UI tree: ${response.statusCode}');
-        return false;
-      }
-    } catch (e) {
-      debugPrint('❌ Error sending UI tree: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Send device status
   static Future<bool> sendStatus() async {
     try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/device/$DEVICE_ID/status'),
+      final r = await http.post(
+        Uri.parse('$backendUrl/device/$deviceId/status'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'status': 'online',
@@ -83,205 +95,99 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-
-      if (response.statusCode == 200) {
-        return true;
-      }
-      return false;
-    } catch (e) {
-      debugPrint('❌ Error sending status: $e');
+      return r.statusCode == 200;
+    } catch (_) {
       return false;
     }
   }
 
-  // Get UI tree from real Android device via Accessibility API
   static Future<Map<String, dynamic>> getAccessibilityTree() async {
     try {
-      debugPrint('📡 Fetching accessibility tree from device...');
-      final result = await platform.invokeMethod('getAccessibilityTree');
-
-      if (result is String) {
-        final tree = jsonDecode(result) as Map<String, dynamic>;
-        debugPrint(
-          '✅ Got accessibility tree: ${tree['app_name']} - ${tree['screen_name']}',
-        );
-        debugPrint('   Elements: ${(tree['elements'] as List?)?.length ?? 0}');
-        return tree;
-      } else if (result is Map) {
-        return Map<String, dynamic>.from(result);
-      }
-
+      final result = await _platform.invokeMethod('getAccessibilityTree');
+      if (result is String) return jsonDecode(result) as Map<String, dynamic>;
+      if (result is Map) return Map<String, dynamic>.from(result);
       return {};
-    } catch (e) {
-      debugPrint('❌ Error getting accessibility tree: $e');
+    } catch (_) {
       return {};
     }
   }
 
-  /// Execute actions via MethodChannel
   static Future<Map<String, dynamic>> executeAction(
     Map<String, dynamic> action,
   ) async {
     try {
-      final actionType = action['action_type'] ?? 'unknown';
-      final elementId = action['element_id'];
-      final text = action['text'];
-
-      debugPrint('🎬 Executing action: $actionType');
-
-      switch (actionType) {
+      final type = action['action_type'] ?? '';
+      switch (type) {
         case 'click':
-          debugPrint('   📌 Executing click on element $elementId');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'click',
-              'element_id': elementId,
-            });
-
-            debugPrint('   ✅ Click executed successfully');
-            await Future.delayed(const Duration(milliseconds: 1500));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-              debugPrint('   ✅ Updated backend with real UI tree');
-            }
-          } catch (e) {
-            debugPrint('   ❌ Error executing click: $e');
-            return {
-              'action_id': action['action_id'] ?? 'unknown',
-              'success': false,
-              'error': 'Click failed: $e',
-              'execution_time_ms': 0,
-            };
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'click',
+            'element_id': action['element_id'],
+          });
+          await Future.delayed(const Duration(milliseconds: 1500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'type':
-          debugPrint('   ⌨️  Executing Type: $text');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'type',
-              'element_id': elementId,
-              'text': text,
-            });
-
-            debugPrint('   ✅ Type executed successfully');
-            await Future.delayed(const Duration(milliseconds: 500));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-              debugPrint(
-                '   ✅ Updated UI tree after typing: $elementId = $text',
-              );
-            }
-          } catch (e) {
-            debugPrint(
-              '   ⚠️  Type action completed but error updating UI: $e',
-            );
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'type',
+            'element_id': action['element_id'],
+            'text': action['text'],
+          });
+          await Future.delayed(const Duration(milliseconds: 500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'scroll':
-          final direction = action['direction'] ?? 'down';
-          debugPrint('   📜 Scrolling $direction');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'scroll',
-              'direction': direction,
-            });
-
-            await Future.delayed(const Duration(milliseconds: 800));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   ❌ Error scrolling: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'scroll',
+            'direction': action['direction'] ?? 'down',
+          });
+          await Future.delayed(const Duration(milliseconds: 800));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'wait':
-          final duration = action['duration'] ?? 500;
-          debugPrint('   ⏱️  Waiting ${duration}ms');
-          await Future.delayed(Duration(milliseconds: duration as int));
+          await Future.delayed(
+            Duration(milliseconds: (action['duration'] ?? 500) as int),
+          );
           break;
-
         case 'navigate_home':
         case 'goToHome':
-          debugPrint('   🏠 NAVIGATE HOME');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': 'HOME',
-            });
-
-            debugPrint('   ✅ HOME action executed');
-            await Future.delayed(const Duration(milliseconds: 2500));
-
-            final homeTree = await getAccessibilityTree();
-            if (homeTree.isNotEmpty) {
-              await sendUITree(homeTree);
-            }
-          } catch (e) {
-            debugPrint('   ❌ Error executing HOME: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': 'HOME',
+          });
+          await Future.delayed(const Duration(milliseconds: 2500));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'navigate_back':
-          debugPrint('   ⬅️  NAVIGATE BACK');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': 'BACK',
-            });
-
-            debugPrint('   ✅ BACK action executed');
-            await Future.delayed(const Duration(milliseconds: 1000));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   ❌ Error executing BACK: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': 'BACK',
+          });
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
         case 'global_action':
-          final actionName =
+          final name =
               action['global_action'] ?? action['action_name'] ?? 'HOME';
-          debugPrint('   🔘 Performing global action: $actionName');
-          try {
-            await platform.invokeMethod('executeAction', {
-              'action_type': 'global_action',
-              'action_name': actionName,
-            });
-
-            await Future.delayed(const Duration(milliseconds: 1000));
-
-            final updatedTree = await getAccessibilityTree();
-            if (updatedTree.isNotEmpty) {
-              await sendUITree(updatedTree);
-            }
-          } catch (e) {
-            debugPrint('   ❌ Error executing global action: $e');
-          }
+          await _platform.invokeMethod('executeAction', {
+            'action_type': 'global_action',
+            'action_name': name,
+          });
+          await Future.delayed(const Duration(milliseconds: 1000));
+          final t = await getAccessibilityTree();
+          if (t.isNotEmpty) await sendUITree(t);
           break;
-
-        default:
-          debugPrint('   ❓ Unknown action type: $actionType');
       }
-
       return {
         'action_id': action['action_id'] ?? 'unknown',
         'success': true,
         'execution_time_ms': 100,
       };
     } catch (e) {
-      debugPrint('❌ Error executing action: $e');
       return {
         'action_id': action['action_id'] ?? 'unknown',
         'success': false,
@@ -292,37 +198,32 @@ class DeviceManager {
   }
 }
 
-// Color Palette - Exact colors from reference
+// ─── App colours ──────────────────────────────────────────────────────────────
 class AppColors {
-  static const darkPlum1 = Color(0xFF280A25); // (40,10,37)
-  static const darkPlum2 = Color(0xFF401628); // (64,22,40)
-  static const darkPlum3 = Color(0xFF23071D); // (35,7,29)
-  static const darkPlum4 = Color(0xFF1B0E25); // (27,14,37)
-  static const darkPlum5 = Color(0xFF10011B); // (16,1,27)
-  static const darkPlum6 = Color(0xFF0C0114); // (12,1,20)
-  static const pink = Color(0xFFe91e63); // Bright pink accent
-  static const pinkDull = Color(0xFF9d4871); // Dull pink for inactive states
+  static const darkPlum4 = Color(0xFF1B0E25);
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
-
+// ─── HomeWrapper / AutomationDemo ────────────────────────────────────────────
+class HomeWrapper extends StatelessWidget {
+  const HomeWrapper({super.key});
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AURA',
-      theme: ThemeData(
-        primarySwatch: Colors.pink,
-        scaffoldBackgroundColor: AppColors.darkPlum6,
-        fontFamily: GoogleFonts.inter().fontFamily,
-      ),
-      home: const AutomationDemo(),
-    );
-  }
+  Widget build(BuildContext context) => const AutomationDemo();
+  // AutomationDemo defaults keep working for the existing OnboardingScreen flow
 }
 
 class AutomationDemo extends StatefulWidget {
-  const AutomationDemo({super.key});
+  final String userId;
+  final String username;
+  final String sessionId;
+  final String language;
+
+  const AutomationDemo({
+    super.key,
+    this.userId = 'flutter_user',   // fallback for HomeWrapper direct usage
+    this.username = 'User',
+    this.sessionId = '',
+    this.language = 'en',
+  });
 
   @override
   State<AutomationDemo> createState() => _AutomationDemoState();
@@ -330,7 +231,11 @@ class AutomationDemo extends StatefulWidget {
 
 class _AutomationDemoState extends State<AutomationDemo>
     with TickerProviderStateMixin {
-  static const platform = MethodChannel('com.example.automation/service');
+  static const _platform = MethodChannel('com.example.automation/service');
+
+  // ignore: unused_field
+  late String _activeUserId;
+  late String _activeSessionId;
   String _status = 'Waiting...';
   bool _serviceEnabled = false;
   bool _isLoading = false;
@@ -338,423 +243,277 @@ class _AutomationDemoState extends State<AutomationDemo>
   bool _isSidebarOpen = false;
   bool _chatMode = false;
   bool _showSettings = false;
-  String _settingsSection = 'profile';
+  int _activeSettingsSection = 0; // 0: Profile, 1: Memory
 
-  final TextEditingController _textController = TextEditingController();
+  final TextEditingController _textCtrl = TextEditingController();
   String _responseText = '';
-  String _transcribedText = ''; // ✅ NEW: Store transcribed text separately
-  bool _isThinking = false; // ✅ NEW: Thinking indicator
-  String _userName = 'Labubu';
-  String _userEmail = 'user@example.com';
-  String _selectedTheme = 'Dark';
-  String _selectedLanguage = 'English';
+  String _transcribedText = '';
+  bool _isThinking = false;
+  // final String _userName = 'User';
+  late String _userName;
 
   HttpServer? _actionServer;
-  late AnimationController _pulseController;
-  late AnimationController _thinkingController; // ✅ NEW: Thinking animation
-  late VideoPlayerController _videoController;
-  
-  // ✅ NEW: Audio player for TTS
+  late AnimationController _pulseCtrl;
+  late AnimationController _thinkCtrl;
+  late VideoPlayerController _videoCtrl;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  @override
+@override
   void initState() {
     super.initState();
+    _activeUserId = widget.userId;
+    _activeSessionId = widget.sessionId.isEmpty
+        ? 'flutter_${DateTime.now().millisecondsSinceEpoch}'
+        : widget.sessionId;
+    _userName = widget.username.isNotEmpty ? widget.username : 'User';
     _setupMethodChannelListener();
     _checkServiceStatus();
     _registerWithBackend();
     _startActionServer();
     _startPollingForActions();
 
-    _pulseController = AnimationController(
+    _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
     );
-
-    // ✅ NEW: Thinking animation controller
-    _thinkingController = AnimationController(
+    _thinkCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     );
 
-    _videoController = VideoPlayerController.asset('assets/Background3.mp4')
+    _videoCtrl = VideoPlayerController.asset('assets/aura_main.mp4')
       ..initialize().then((_) {
         setState(() {});
-        _videoController.setLooping(true);
-        _videoController.play();
+        _videoCtrl
+          ..setLooping(true)
+          ..play();
       });
   }
+
+  // ── helpers ────────────────────────────────────────────────────────────────
 
   Future<void> _startActionServer() async {
     try {
       _actionServer = await HttpServer.bind('0.0.0.0', 9999);
-      debugPrint('✅ Action server started on 0.0.0.0:9999');
-
-      _actionServer!.listen((HttpRequest request) async {
+      _actionServer!.listen((request) async {
         try {
           if (request.method == 'POST') {
-            final contentLength = request.contentLength;
-            if (contentLength == 0) {
-              request.response.statusCode = 400;
-              request.response.write('{"error": "empty body"}');
-              await request.response.close();
-              return;
-            }
-
             final body = await utf8.decoder.bind(request).join();
             final data = jsonDecode(body) as Map<String, dynamic>;
-
-            if (data.containsKey('action') &&
-                data['action'].toString().contains('START_AUTOMATION')) {
-              await _handleBroadcastIntent(data);
-              request.response.headers.contentType = ContentType(
-                'application',
-                'json',
-              );
-              request.response.write(
-                jsonEncode({'success': true, 'message': 'Broadcast received'}),
-              );
-              await request.response.close();
+            if (data['action']?.toString().contains('START_AUTOMATION') ==
+                true) {
+              await _platform.invokeMethod('receiveBroadcast', data);
+              if (data['action'].toString().contains('START_AUTOMATION')) {
+                await _platform.invokeMethod('startAutomation');
+              }
+              request.response
+                ..headers.contentType = ContentType.json
+                ..write('{"success":true}');
             } else {
               final result = await DeviceManager.executeAction(data);
-              request.response.headers.contentType = ContentType(
-                'application',
-                'json',
-              );
-              request.response.write(jsonEncode(result));
-              await request.response.close();
+              request.response
+                ..headers.contentType = ContentType.json
+                ..write(jsonEncode(result));
             }
+            await request.response.close();
           } else {
             request.response.statusCode = 405;
-            request.response.write('{"error": "method not allowed"}');
             await request.response.close();
           }
         } catch (e) {
-          debugPrint('❌ Action server error: $e');
           request.response.statusCode = 500;
-          request.response.write('{"error": "${e.toString()}"}');
+          request.response.write('{"error":"${e.toString()}"}');
           await request.response.close();
         }
       });
     } catch (e) {
-      debugPrint('❌ Failed to start action server: $e');
-    }
-  }
-
-  Future<void> _handleBroadcastIntent(
-    Map<String, dynamic> broadcastData,
-  ) async {
-    try {
-      await platform.invokeMethod('receiveBroadcast', broadcastData);
-      if (broadcastData['action'].toString().contains('START_AUTOMATION')) {
-        await platform.invokeMethod('startAutomation');
-      }
-    } catch (e) {
-      debugPrint('❌ Error handling broadcast: $e');
+      debugPrint('[Server] start error: $e');
     }
   }
 
   Future<void> _registerWithBackend() async {
-    final registered = await DeviceManager.registerDevice();
-    if (registered) {
-      final initialTree = await DeviceManager.getAccessibilityTree();
-      if (initialTree.isNotEmpty) {
-        await DeviceManager.sendUITree(initialTree);
-      }
-      _startStatusUpdates();
+    if (await DeviceManager.registerDevice()) {
+      final t = await DeviceManager.getAccessibilityTree();
+      if (t.isNotEmpty) await DeviceManager.sendUITree(t);
+      Future.doWhile(() async {
+        await Future.delayed(const Duration(seconds: 5));
+        await DeviceManager.sendStatus();
+        return true;
+      });
     }
-  }
-
-  Future<void> _sendUITree() async {
-    final uiTree = {
-      'screen_id': 'screen_main',
-      'device_id': DeviceManager.DEVICE_ID,
-      'app_name': 'AURA',
-      'app_package': 'com.aura.app',
-      'screen_name': 'Main Screen',
-      'elements': [
-        {
-          'element_id': 1,
-          'type': 'button',
-          'text': 'Send',
-          'content_description': 'Send',
-          'clickable': true,
-          'focusable': true,
-        },
-        {
-          'element_id': 2,
-          'type': 'textfield',
-          'text': _textController.text,
-          'content_description': 'Text input field',
-          'clickable': true,
-          'focusable': true,
-        },
-      ],
-      'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
-      'screen_width': 1080,
-      'screen_height': 2340,
-    };
-
-    await DeviceManager.sendUITree(uiTree);
-  }
-
-  void _startStatusUpdates() {
-    Future.doWhile(() async {
-      await Future.delayed(const Duration(seconds: 5));
-      await DeviceManager.sendStatus();
-      return true;
-    });
   }
 
   void _startPollingForActions() {
     Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 1));
       try {
-        final response = await http.get(
+        final r = await http.get(
           Uri.parse(
-            '${DeviceManager.BACKEND_URL}/device/${DeviceManager.DEVICE_ID}/pending-actions',
+            '${DeviceManager.backendUrl}/device/${DeviceManager.deviceId}/pending-actions',
           ),
         );
-        
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body) as Map<String, dynamic>;
-          final actions = data['actions'] as List<dynamic>? ?? [];
-          // if (data['status'] == 'clarification_needed' || data.containsKey('question')) {
-          // setState(() {
-          //   _isThinking = false; // Stop the loading spinner
-          //   _responseText = data['question']; // Show the question in your UI
-          // });
-          
-          // Optionally play audio for the question
-        //   
-          if (actions.isNotEmpty) {
-            for (final action in actions) {
-              await DeviceManager.executeAction(action as Map<String, dynamic>);
-            }
+        if (r.statusCode == 200) {
+          final actions =
+              ((jsonDecode(r.body) as Map)['actions'] as List?) ?? [];
+          for (final a in actions) {
+            await DeviceManager.executeAction(a as Map<String, dynamic>);
           }
         }
-      } catch (e) {
-        debugPrint('⚠️  Error polling actions: $e');
-      }
+      } catch (_) {}
       return true;
+    });
+  }
+
+  Future<void> _sendUITree() async {
+    await DeviceManager.sendUITree({
+      'screen_id': 'screen_main',
+      'device_id': DeviceManager.deviceId,
+      'app_name': 'AURA',
+      'screen_name': 'Main Screen',
+      'elements': [
+        {'element_id': 1, 'type': 'button', 'text': 'Send', 'clickable': true},
+        {
+          'element_id': 2,
+          'type': 'textfield',
+          'text': _textCtrl.text,
+          'clickable': true,
+        },
+      ],
+      'timestamp': DateTime.now().millisecondsSinceEpoch / 1000,
     });
   }
 
   Future<void> _checkServiceStatus() async {
     try {
-      final bool isEnabled = await platform.invokeMethod('isServiceEnabled');
+      final bool enabled = await _platform.invokeMethod('isServiceEnabled');
       setState(() {
-        _serviceEnabled = isEnabled;
+        _serviceEnabled = enabled;
         _status =
-            isEnabled
+            enabled
                 ? 'Accessibility Service Enabled'
                 : 'Please enable Accessibility Service';
       });
     } catch (e) {
-      setState(() {
-        _status = 'Error checking service: $e';
-      });
+      setState(() => _status = 'Error: $e');
     }
   }
 
   void _setupMethodChannelListener() {
-    platform.setMethodCallHandler((call) async {
-      switch (call.method) {
-        case 'onUITreeUpdate':
-          final tree = call.arguments;
-          debugPrint('📡 UI Tree update from native: ${tree['app_name']}');
-          return {'status': 'received'};
-        default:
-          return null;
-      }
+    _platform.setMethodCallHandler((call) async {
+      if (call.method == 'onUITreeUpdate') return {'status': 'received'};
+      return null;
     });
   }
 
   Future<void> _openAccessibilitySettings() async {
     try {
-      await platform.invokeMethod('openAccessibilitySettings');
+      await _platform.invokeMethod('openAccessibilitySettings');
+    } catch (e) {
+      setState(() => _status = 'Error: $e');
+    }
+  }
+
+  Future<void> _sendTextToBackend(String text) async {
+    if (text.trim().isEmpty) return;
+    setState(() {
+      _isLoading = true;
+      _isThinking = true;
+      _status = 'Processing...';
+      _responseText = '';
+    });
+    _thinkCtrl.repeat();
+    try {
+      await _sendUITree();
+      final resp = await http.post(
+        Uri.parse('${DeviceManager.backendUrl}/process'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'input': text,
+          'session_id': _activeSessionId,
+          'user_id': _activeUserId,
+          'device_type': 'mobile',
+          'user_language': widget.language,
+        }),
+      );
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      setState(() {
+        _isLoading = false;
+        _isThinking = false;
+        _thinkCtrl.stop();
+        _thinkCtrl.reset();
+        if (resp.statusCode == 200) {
+          if (data['status'] == 'clarification_needed') {
+            _status = 'Question:';
+            _responseText = data['question'] ?? 'Clarification needed';
+          } else {
+            _status = 'Done';
+            _responseText =
+                data['text'] ?? data['response'] ?? 'Task completed';
+          }
+          _textCtrl.clear();
+          _transcribedText = '';
+          _playTTSAudio(_responseText);
+        } else {
+          _status = 'Error';
+          _responseText = data['error']?.toString() ?? 'Unknown error';
+        }
+      });
     } catch (e) {
       setState(() {
-        _status = 'Error opening settings: $e';
+        _isLoading = false;
+        _isThinking = false;
+        _thinkCtrl.stop();
+        _thinkCtrl.reset();
+        _status = 'Error';
+        _responseText = e.toString();
       });
     }
   }
 
-  // ✅ MODIFIED: Auto-send after transcription
-  // ✅ FIXED: Handles clarification_needed responses
-Future<void> _sendTextToBackend(String text) async {
-  if (text.trim().isEmpty) return;
-
-  setState(() {
-    _isLoading = true;
-    _isThinking = true;
-    _status = 'Processing...';
-    _responseText = '';
-  });
-
-  _thinkingController.repeat();
-
-  try {
-    await _sendUITree();
-
-    debugPrint('[Backend] Sending text: $text');
-    
-    final response = await http.post(
-      Uri.parse('${DeviceManager.BACKEND_URL}/process'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'input': text,
-        'session_id': 'flutter_session_${DateTime.now().millisecondsSinceEpoch}',
-        'user_id': 'flutter_user',
-        'device_type': 'mobile',
-      }),
-    );
-
-    debugPrint('[Backend] Response status: ${response.statusCode}');
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    debugPrint('[Backend] Response data: $data');
-
-    setState(() {
-      _isLoading = false;
-      _isThinking = false;
-      _thinkingController.stop();
-      _thinkingController.reset();
-      
-      if (response.statusCode == 200) {
-        // ✅ CHECK FOR CLARIFICATION FIRST!
-        if (data['status'] == 'clarification_needed') {
-          _status = 'Question:';
-          _responseText = data['question'] ?? 'Clarification needed';
-          _textController.clear();
-          _transcribedText = '';
-          
-          // ✅ Play TTS for the question
-          _playTTSAudio(_responseText);
-          
-          debugPrint('[Clarification] Question: $_responseText');
-        } 
-        // ✅ NORMAL SUCCESS RESPONSE
-        else {
-          _status = 'Response received!';
-          _responseText = data['text'] ?? data['response'] ?? 'Task completed';
-          _textController.clear();
-          _transcribedText = '';
-          
-          // ✅ Play TTS audio
-          _playTTSAudio(_responseText);
-        }
-      } else {
-        _status = 'Error: ${data['error'] ?? 'Unknown error'}';
-        _responseText = data['error'] ?? 'Unknown error';
-      }
-    });
-  } catch (e) {
-    setState(() {
-      _isLoading = false;
-      _isThinking = false;
-      _thinkingController.stop();
-      _thinkingController.reset();
-      _status = 'Error: $e';
-      _responseText = e.toString();
-    });
-  }
-}
-  // ✅ NEW: Play TTS audio from backend
   Future<void> _playTTSAudio(String text) async {
     try {
-      debugPrint('[TTS] Requesting audio for: $text');
-      
-      final response = await http.post(
-        Uri.parse('${DeviceManager.BACKEND_URL}/text-to-speech'),
+      final r = await http.post(
+        Uri.parse('${DeviceManager.backendUrl}/text-to-speech'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'text': text,
-        }),
+        body: jsonEncode({'text': text}),
       );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body) as Map<String, dynamic>;
-        final audioData = data['audio_data'] as String;
-        final format = data['format'] ?? 'mp3';
-        
-        debugPrint('[TTS] Received audio: ${audioData.length} chars, format: $format');
-        
-        // ✅ Decode base64 to bytes
-        final bytes = base64.decode(audioData);
-        
-        // ✅ Save to temp file
-        final tempDir = Directory.systemTemp;
-        final tempFile = File('${tempDir.path}/tts_audio.$format');
-        await tempFile.writeAsBytes(bytes);
-        
-        debugPrint('[TTS] Audio saved to: ${tempFile.path}');
-        
-        // ✅ Play audio
-        await _audioPlayer.play(DeviceFileSource(tempFile.path));
-        debugPrint('[TTS] ✅ Audio playing');
-        
-        // ✅ Clean up after playback
-        _audioPlayer.onPlayerComplete.listen((_) {
-          tempFile.delete();
-          debugPrint('[TTS] ✅ Audio playback complete, temp file deleted');
-        });
-      } else {
-        debugPrint('[TTS] ❌ Failed to get audio: ${response.statusCode}');
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        final bytes = base64.decode(data['audio_data'] as String);
+        final fmt = data['format'] ?? 'mp3';
+        final tmp = File('${Directory.systemTemp.path}/tts.$fmt');
+        await tmp.writeAsBytes(bytes);
+        await _audioPlayer.play(DeviceFileSource(tmp.path));
+        _audioPlayer.onPlayerComplete.listen((_) => tmp.delete());
       }
-    } catch (e) {
-      debugPrint('[TTS] ❌ Error playing audio: $e');
-    }
+    } catch (_) {}
   }
 
-  // ✅ MODIFIED: Auto-send on second mic tap
   Future<void> _toggleRecording() async {
     try {
       if (_isRecording) {
-        // ✅ STOP RECORDING AND AUTO-SEND
-        _pulseController.stop();
-        _pulseController.reset();
-        
-        setState(() {
-          _status = 'Processing audio...';
-        });
-        
-        final result = await platform.invokeMethod('toggleRecording');
-
-        if (result is Map) {
-          final status = result['status'];
-
-          if (status == 'success') {
-            final transcript = result['transcript'] ?? '';
-            setState(() {
-              _isRecording = false;
-              _transcribedText = transcript; // ✅ Show on screen
-              _status = 'Transcribed: $transcript';
-            });
-            
-            debugPrint('[STT] ✅ Transcript: $transcript');
-            
-            // ✅ AUTO-SEND to backend
-            if (transcript.isNotEmpty) {
-              await _sendTextToBackend(transcript);
-            }
-          }
+        _pulseCtrl.stop();
+        _pulseCtrl.reset();
+        setState(() => _status = 'Processing audio...');
+        final result = await _platform.invokeMethod('toggleRecording');
+        if (result is Map && result['status'] == 'success') {
+          final transcript = result['transcript'] ?? '';
+          setState(() {
+            _isRecording = false;
+            _transcribedText = transcript;
+            _status = 'Transcribed: $transcript';
+          });
+          if (transcript.isNotEmpty) await _sendTextToBackend(transcript);
         }
       } else {
-        // ✅ START RECORDING
-        _pulseController.repeat(reverse: true);
-        
-        final result = await platform.invokeMethod('toggleRecording');
-
-        if (result is Map) {
-          final status = result['status'];
-
-          if (status == 'recording') {
-            setState(() {
-              _isRecording = true;
-              _status = 'Recording audio...';
-              _transcribedText = ''; // Clear previous transcript
-            });
-          }
+        _pulseCtrl.repeat(reverse: true);
+        final result = await _platform.invokeMethod('toggleRecording');
+        if (result is Map && result['status'] == 'recording') {
+          setState(() {
+            _isRecording = true;
+            _status = 'Recording...';
+            _transcribedText = '';
+          });
         }
       }
     } catch (e) {
@@ -762,879 +521,1175 @@ Future<void> _sendTextToBackend(String text) async {
         _isRecording = false;
         _status = 'Mic error: $e';
       });
-      _pulseController.stop();
-      _pulseController.reset();
+      _pulseCtrl.stop();
+      _pulseCtrl.reset();
     }
   }
 
-  String _getTimeGreeting() {
-    final hour = DateTime.now().hour;
-    if (hour >= 5 && hour < 9) return '🌅 Rise and shine, $_userName!';
-    if (hour >= 9 && hour < 12) return '☀️ Good morning, $_userName!';
-    if (hour >= 12 && hour < 15) return '🍽️ Lunchtime, $_userName?';
-    if (hour >= 15 && hour < 18) return '🌇 Good afternoon, $_userName!';
-    if (hour >= 18 && hour < 21) return '🌆 Evening vibes, $_userName!';
-    if (hour >= 21 && hour < 24)
-      return '🌙 Hello night owl, $_userName! Working so late?';
-    return '💤 Burning the midnight oil, $_userName?';
+  String _greeting() {
+    final h = DateTime.now().hour;
+    if (h >= 5 && h < 9) return 'Rise and shine, $_userName!';
+    if (h >= 9 && h < 12) return 'Good morning, $_userName!';
+    if (h >= 12 && h < 15) return 'Lunchtime, $_userName?';
+    if (h >= 15 && h < 18) return 'Good afternoon, $_userName!';
+    if (h >= 18 && h < 21) return 'Evening, $_userName!';
+    return 'Hello night owl, $_userName!';
   }
 
   @override
   void dispose() {
-    _textController.dispose();
+    _textCtrl.dispose();
     _actionServer?.close();
-    _pulseController.dispose();
-    _thinkingController.dispose(); // ✅ Dispose thinking controller
-    _videoController.dispose();
-    _audioPlayer.dispose(); // ✅ Dispose audio player
+    _pulseCtrl.dispose();
+    _thinkCtrl.dispose();
+    _videoCtrl.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.darkPlum6,
-      body: Stack(
-        children: [
-          // Video background
-          if (_videoController.value.isInitialized)
-            SizedBox.expand(
-              child: FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: _videoController.value.size.width,
-                  height: _videoController.value.size.height,
-                  child: VideoPlayer(_videoController),
+    return TaskExecutionBorder(
+      isExecuting: _isLoading || _isRecording,
+      child: Scaffold(
+        backgroundColor:
+            Colors
+                .black, // AuraTheme.bgBase usually, but black is good behind video
+        body: Stack(
+          children: [
+            // Video Background
+            if (_videoCtrl.value.isInitialized)
+              SizedBox.expand(
+                child: FittedBox(
+                  fit: BoxFit.cover,
+                  child: SizedBox(
+                    width: _videoCtrl.value.size.width,
+                    height: _videoCtrl.value.size.height,
+                    child: VideoPlayer(_videoCtrl),
+                  ),
                 ),
               ),
-            ),
 
-          // Main Content
-          SafeArea(
-            child: Column(
-              children: [
-                const SizedBox(height: 20),
+            SafeArea(child: _chatMode ? _buildChatMode() : _buildVoiceMode()),
 
-                // Header
-                Padding(
-                  padding: const EdgeInsets.only(
-                    top: 60.0,
-                    left: 20,
-                    right: 20,
+            _buildSidebar(),
+            if (_showSettings) _buildSettingsModal(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChatMode() {
+    return Column(
+      children: [
+        // Header
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              GestureDetector(
+                onTap: () => setState(() => _isSidebarOpen = true),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: AuraTheme.bgElevated.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.05)),
                   ),
-                  child: Column(
+                  child: const Icon(
+                    Icons.menu_rounded,
+                    color: AuraTheme.textSecondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+              Text(
+                'AURA',
+                style: _f(
+                  AuraTheme.textPrimary,
+                  size: 16,
+                  weight: FontWeight.w600,
+                  spacing: 1.5,
+                ),
+              ),
+              GestureDetector(
+                onTap: () {
+                  // close/minimize logic
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: AuraTheme.bgElevated.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withOpacity(0.05)),
+                  ),
+                  child: const Icon(
+                    Icons.close_rounded,
+                    color: AuraTheme.textSecondary,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Chat content area with frosted glass
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: Colors.white.withOpacity(0.08),
+                width: 1,
+              ),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  color: AuraTheme.bgSurface.withOpacity(0.4),
+                  padding: const EdgeInsets.all(20),
+                  child: ListView(
+                    physics: const BouncingScrollPhysics(),
                     children: [
-                      Text(
-                        _getTimeGreeting(),
-                        style: GoogleFonts.inter(
-                          fontSize: 15,
-                          color: Colors.white.withOpacity(0.65),
-                          fontWeight: FontWeight.w400,
+                      if (_transcribedText.isEmpty &&
+                          _responseText.isEmpty) ...[
+                        const SizedBox(height: 40),
+                        Text(
+                          _greeting(),
+                          style: _f(AuraTheme.textMuted, size: 14),
+                          textAlign: TextAlign.center,
                         ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        'What would you like done today?',
-                        style: GoogleFonts.inter(
-                          fontSize: 26,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                          letterSpacing: -0.5,
+                        const SizedBox(height: 12),
+                        Text(
+                          'What would you like to know?',
+                          style: _f(
+                            AuraTheme.textPrimary,
+                            size: 24,
+                            weight: FontWeight.w600,
+                          ),
+                          textAlign: TextAlign.center,
                         ),
-                        textAlign: TextAlign.center,
-                      ),
+                      ],
+
+                      // User message
+                      if (_transcribedText.isNotEmpty) ...[
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: AnimatedOpacity(
+                            opacity: 1.0,
+                            duration: const Duration(milliseconds: 500),
+                            child: Text(
+                              _transcribedText,
+                              style: _f(
+                                AuraTheme.textSecondary,
+                                size: 16,
+                                weight: FontWeight.w400,
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      // Thinking indicator
+                      if (_isThinking) ...[
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedBuilder(
+                            animation: _thinkCtrl,
+                            builder: (_, __) {
+                              return Opacity(
+                                opacity: 0.5 + (_thinkCtrl.value * 0.5),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.auto_awesome,
+                                      color: AuraTheme.pink400,
+                                      size: 16,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Thinking...',
+                                      style: _f(
+                                        AuraTheme.pink300,
+                                        size: 15,
+                                        weight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      // AI Response
+                      if (_responseText.isNotEmpty && !_isThinking) ...[
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedOpacity(
+                            opacity: 1.0,
+                            duration: const Duration(milliseconds: 500),
+                            child: Text(
+                              _responseText,
+                              style: _f(
+                                AuraTheme.textPrimary,
+                                size: 16,
+                                weight: FontWeight.w500,
+                                height: 1.6,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                      ],
+
+                      if (!_serviceEnabled)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 20, bottom: 20),
+                          child: Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: AuraTheme.pink900.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(
+                                color: AuraTheme.pink400.withOpacity(0.3),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(
+                                      Icons.warning_amber_rounded,
+                                      color: AuraTheme.pink400,
+                                      size: 20,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      'Action Service Disabled',
+                                      style: _f(
+                                        AuraTheme.pink300,
+                                        weight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  'AURA requires accessibility permissions to interact with other apps on your screen.',
+                                  style: _f(AuraTheme.textSecondary, size: 13),
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _glassButton(
+                                        icon: Icons.accessibility_new_rounded,
+                                        label: 'Settings',
+                                        onTap: _openAccessibilitySettings,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _glassButton(
+                                        icon: Icons.refresh_rounded,
+                                        label: 'Refresh',
+                                        onTap: _checkServiceStatus,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
+              ),
+            ),
+          ),
+        ),
 
-                const Spacer(),
-
-                // ✅ NEW: Transcribed Text Display
-                if (_transcribedText.isNotEmpty && !_isThinking)
-                  Container(
-                    alignment: Alignment.topLeft,
-                    margin: const EdgeInsets.symmetric(horizontal: 20),
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      color: AppColors.darkPlum4.withOpacity(0.6),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: AppColors.pink.withOpacity(0.3),
+        // Text Entry Field
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(30),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgOverlay.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.08),
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _textCtrl,
+                        style: _f(AuraTheme.textPrimary, size: 15),
+                        decoration: InputDecoration(
+                          hintText: 'Ask anything...',
+                          hintStyle: _f(AuraTheme.textMuted, size: 15),
+                          border: InputBorder.none,
+                          isDense: true,
+                        ),
+                        onSubmitted: (val) {
+                          if (val.isNotEmpty) {
+                            _sendTextToBackend(val);
+                            _textCtrl.clear();
+                          }
+                        },
                       ),
                     ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.mic_rounded,
-                          color: AppColors.pink,
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: () {
+                        if (_textCtrl.text.isNotEmpty) {
+                          _sendTextToBackend(_textCtrl.text);
+                          _textCtrl.clear();
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AuraTheme.bgMuted.withOpacity(0.5),
+                        ),
+                        child: const Icon(
+                          Icons.arrow_upward_rounded,
+                          color: AuraTheme.textPrimary,
                           size: 20,
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            _transcribedText,
-                            style: GoogleFonts.inter(
-                              fontSize: 15,
-                              color: Colors.white.withOpacity(0.9),
-                              height: 1.5,
-                            ),
-                            textAlign: TextAlign.left,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-
-                if (_transcribedText.isNotEmpty && !_isThinking)
-                  const SizedBox(height: 16),
-
-                // ✅ NEW: Thinking Indicator
-                if (_isThinking)
-                  AnimatedBuilder(
-                    animation: _thinkingController,
-                    builder: (context, child) {
-                      return Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 20),
-                        padding: const EdgeInsets.all(18),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap:
+                          () => setState(() {
+                            _chatMode = false;
+                            _toggleRecording();
+                          }),
+                      child: Container(
+                        padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: AppColors.darkPlum4.withOpacity(0.6),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: AppColors.pink.withOpacity(0.3 + _thinkingController.value * 0.3),
-                          ),
+                          shape: BoxShape.circle,
+                          color: AuraTheme.pink400.withOpacity(0.15),
                         ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  AppColors.pink.withOpacity(0.7 + _thinkingController.value * 0.3),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Text(
-                              'Thinking...',
-                              style: GoogleFonts.inter(
-                                fontSize: 15,
-                                color: Colors.white.withOpacity(0.8),
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
+                        child: const Icon(
+                          Icons.mic_rounded,
+                          color: AuraTheme.pink400,
+                          size: 20,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildVoiceGlassContainer({
+    required Widget child,
+    double borderRadius = 24,
+    double sigma = 20,
+    EdgeInsetsGeometry padding = const EdgeInsets.all(20),
+  }) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.white.withOpacity(0.08), width: 1),
+        borderRadius: BorderRadius.circular(borderRadius),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(borderRadius),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
+          child: Container(
+            padding: padding,
+            color: AuraTheme.bgSurface.withOpacity(0.4),
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVoiceMode() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+      child: Column(
+        children: [
+          // 1. Top Container (Logo & Name)
+          Expanded(
+            flex: 3,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 32,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  AnimatedBuilder(
+                    animation: _pulseCtrl,
+                    builder: (context, child) {
+                      return Transform.rotate(
+                        angle: _pulseCtrl.value * 2 * 3.14159,
+                        child: Icon(
+                          Icons.blur_on_rounded,
+                          size: 70 + (_pulseCtrl.value * 20),
+                          color: AuraTheme.pink400.withOpacity(
+                            0.6 + (_pulseCtrl.value * 0.4),
+                          ),
                         ),
                       );
                     },
                   ),
-
-                if (_isThinking)
                   const SizedBox(height: 16),
-
-                // Response Display
-                if (_responseText.isNotEmpty && !_isThinking)
-                  Container(
-                    alignment: Alignment.topLeft,
-                    margin: const EdgeInsets.symmetric(horizontal: 20),
-                    padding: const EdgeInsets.all(18),
-                    decoration: BoxDecoration(
-                      color: AppColors.darkPlum4.withOpacity(0.6),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: AppColors.darkPlum2.withOpacity(0.3),
-                      ),
-                    ),
-                    child: Text(
-                      _responseText,
-                      style: GoogleFonts.inter(
-                        fontSize: 15,
-                        color: Colors.white,
-                        height: 1.5,
-                      ),
-                      textAlign: TextAlign.left,
+                  Text(
+                    'AURA',
+                    style: _f(
+                      AuraTheme.textPrimary,
+                      size: 22,
+                      weight: FontWeight.w600,
+                      spacing: 3,
                     ),
                   ),
+                ],
+              ),
+            ),
+          ),
 
-                const Spacer(),
+          const SizedBox(height: 12),
 
-                // Accessibility Buttons
-                if (!_serviceEnabled)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
+          // 2. Middle Container (Status, X, Settings)
+          _buildVoiceGlassContainer(
+            borderRadius: 50, // More rounded corners per request
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                GestureDetector(
+                  onTap:
+                      () => setState(() {
+                        _chatMode = true;
+                        if (_isRecording) _toggleRecording();
+                      }),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.transparent,
+                    child: const Icon(
+                      Icons.close_rounded,
+                      color: AuraTheme.textSecondary,
+                      size: 24,
+                    ),
+                  ),
+                ),
+
+                AnimatedBuilder(
+                  animation: _pulseCtrl,
+                  builder: (context, child) {
+                    String status = 'Ready';
+                    if (_isRecording) status = 'Listening...';
+                    if (_isThinking) status = 'Processing...';
+
+                    return Text(
+                      status,
+                      style: _f(
+                        _isRecording
+                            ? AuraTheme.pink400
+                            : AuraTheme.textSecondary,
+                        size: 16,
+                        weight: FontWeight.w500,
+                      ),
+                    );
+                  },
+                ),
+
+                GestureDetector(
+                  onTap: () => setState(() => _showSettings = true),
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.transparent,
+                    child: const Icon(
+                      Icons.settings_rounded,
+                      color: AuraTheme.textSecondary,
+                      size: 24,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          // 3. Bottom Container (Transcription & Waveform)
+          Expanded(
+            flex: 5,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 32,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      alignment: Alignment.center,
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: Text(
+                          _transcribedText.isEmpty && _isRecording
+                              ? 'Speak now...'
+                              : (_transcribedText.isEmpty && !_isRecording
+                                  ? 'Ready'
+                                  : _transcribedText),
+                          style: _f(
+                            AuraTheme.textPrimary,
+                            size: 26,
+                            weight: FontWeight.w300,
+                            height: 1.4,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Waveform and Record Button
+                  Expanded(
+                    flex: 3,
                     child: Column(
+                      mainAxisAlignment: MainAxisAlignment.end,
                       children: [
-                        // Enable button
-                        Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            onTap: _openAccessibilitySettings,
-                            borderRadius: BorderRadius.circular(12),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 20,
-                                vertical: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                color: AppColors.darkPlum3.withOpacity(0.6),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: AppColors.pink.withOpacity(0.3),
-                                  width: 1.5,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.accessibility_new_rounded,
-                                    color: AppColors.pink,
-                                    size: 18,
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    'Enable Accessibility Service',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 13,
-                                      color: AppColors.pink,
-                                      fontWeight: FontWeight.w500,
+                        Flexible(
+                          child: AnimatedBuilder(
+                            animation: _pulseCtrl,
+                            builder: (context, child) {
+                              return Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: List.generate(15, (index) {
+                                  double height =
+                                      20.0 +
+                                      (index % 3 == 0 ? 30 : 10) *
+                                          _pulseCtrl.value;
+                                  return Container(
+                                    margin: const EdgeInsets.symmetric(
+                                      horizontal: 4,
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ),
+                                    width: 4,
+                                    height: height,
+                                    decoration: BoxDecoration(
+                                      color: AuraTheme.pink400.withOpacity(0.6),
+                                      borderRadius: BorderRadius.circular(2),
+                                    ),
+                                  );
+                                }),
+                              );
+                            },
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        // Refresh button
-                        Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            onTap: _checkServiceStatus,
-                            borderRadius: BorderRadius.circular(12),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 20,
-                                vertical: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                color: AppColors.darkPlum3.withOpacity(0.4),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: Colors.white.withOpacity(0.15),
-                                  width: 1,
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.refresh_rounded,
-                                    color: Colors.white.withOpacity(0.7),
-                                    size: 18,
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    'Refresh Status',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 13,
-                                      color: Colors.white.withOpacity(0.7),
-                                      fontWeight: FontWeight.w500,
+                        const SizedBox(height: 20),
+                        GestureDetector(
+                          onTap: _toggleRecording,
+                          child: AnimatedBuilder(
+                            animation: _pulseCtrl,
+                            builder: (context, child) {
+                              return Container(
+                                padding: const EdgeInsets.all(18),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color:
+                                      _isRecording
+                                          ? AuraTheme.pink500
+                                          : AuraTheme.bgMuted,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: (_isRecording
+                                              ? AuraTheme.pink500
+                                              : Colors.transparent)
+                                          .withOpacity(0.4 * _pulseCtrl.value),
+                                      blurRadius: 20,
+                                      spreadRadius: 10,
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ),
+                                  ],
+                                ),
+                                child: Icon(
+                                  _isRecording
+                                      ? Icons.stop_rounded
+                                      : Icons.mic_rounded,
+                                  color: AuraTheme.textPrimary,
+                                  size: 32,
+                                ),
+                              );
+                            },
                           ),
                         ),
                       ],
                     ),
                   ),
-
-                // Voice Controls
-                _buildVoiceControls(),
-
-                const SizedBox(height: 90),
-              ],
-            ),
-          ),
-
-          // Sidebar
-          _buildSidebar(),
-
-          // Settings Modal
-          if (_showSettings) _buildSettingsModal(),
-
-          // Menu button
-          if (!_isSidebarOpen && !_showSettings)
-            Positioned(
-              top: 50,
-              left: 20,
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () {
-                    setState(() {
-                      _isSidebarOpen = true;
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.darkPlum3.withOpacity(0.5),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.menu_rounded,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
+                ],
               ),
             ),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildVoiceControls() {
-    if (_chatMode) {
-      return Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        decoration: BoxDecoration(
-          color: AppColors.darkPlum3.withOpacity(0.7),
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(
-            color: AppColors.darkPlum2.withOpacity(0.5),
-            width: 1.5,
-          ),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _textController,
-                style: GoogleFonts.inter(color: Colors.white, fontSize: 14),
-                decoration: InputDecoration(
-                  hintText: 'Type your message...',
-                  hintStyle: GoogleFonts.inter(
-                    color: Colors.white.withOpacity(0.4),
-                    fontSize: 14,
-                  ),
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                ),
-                onSubmitted: (_) => _sendTextToBackend(_textController.text),
-              ),
-            ),
-            // Send button
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () => _sendTextToBackend(_textController.text),
-                borderRadius: BorderRadius.circular(24),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.pinkDull.withOpacity(0.5),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.send_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-            // Mic button
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                onTap: () {
-                  setState(() {
-                    _chatMode = false;
-                  });
-                },
-                borderRadius: BorderRadius.circular(24),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.pinkDull.withOpacity(0.5),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    Icons.mic_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 4),
-          ],
-        ),
-      );
-    }
-
-    // Voice mode
-    return AnimatedBuilder(
-      animation: _pulseController,
-      builder: (context, child) {
-        final pulseValue = _pulseController.value;
-        return Container(
-          margin: const EdgeInsets.symmetric(horizontal: 50),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color:
-                _isRecording
-                    ? AppColors.darkPlum3.withOpacity(0.8)
-                    : AppColors.darkPlum4.withOpacity(0.7),
-            borderRadius: BorderRadius.circular(32),
-            border: Border.all(
-              color:
-                  _isRecording
-                      ? AppColors.pink.withOpacity(0.4 + pulseValue * 0.3)
-                      : Colors.white.withOpacity(0.2),
-              width: 1.5,
-            ),
-            boxShadow:
-                _isRecording
-                    ? [
-                      BoxShadow(
-                        color: AppColors.pink.withOpacity(
-                          0.25 + pulseValue * 0.25,
-                        ),
-                        blurRadius: 20 + pulseValue * 15,
-                        spreadRadius: 2 + pulseValue * 4,
-                      ),
-                    ]
-                    : null,
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // X button
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () {
-                    setState(() {
-                      _chatMode = true;
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(24),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color:
-                          _isRecording
-                              ? AppColors.darkPlum2.withOpacity(0.4)
-                              : Colors.white.withOpacity(0.08),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withOpacity(0.2),
-                        width: 1,
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.close_rounded,
-                      color: Colors.white.withOpacity(0.75),
-                      size: 20,
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              // ✅ MODIFIED: Mic button (tap once to record, tap again to send)
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: _toggleRecording,
-                  borderRadius: BorderRadius.circular(40),
-                  child: Container(
-                    width: 72,
-                    height: 72,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient:
-                          _isRecording
-                              ? RadialGradient(
-                                colors: [
-                                  AppColors.pink.withOpacity(0.9),
-                                  AppColors.pink.withOpacity(0.7),
-                                ],
-                              )
-                              : RadialGradient(
-                                colors: [
-                                  AppColors.pinkDull.withOpacity(0.3),
-                                  AppColors.pinkDull.withOpacity(0.2),
-                                ],
-                              ),
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withOpacity(0.2),
-                        width: 1.5,
-                      ),
-                      boxShadow:
-                          _isRecording
-                              ? [
-                                BoxShadow(
-                                  color: AppColors.pink.withOpacity(
-                                    0.35 + pulseValue * 0.3,
-                                  ),
-                                  blurRadius: 25 + pulseValue * 20,
-                                  spreadRadius: 3 + pulseValue * 6,
-                                ),
-                              ]
-                              : null,
-                    ),
-                    child: Icon(
-                      _isRecording ? Icons.stop_rounded : Icons.mic_rounded,
-                      size: 34,
-                      color:
-                          _isRecording
-                              ? Colors.white
-                              : Colors.white.withOpacity(0.8),
-                    ),
-                  ),
-                ),
-              ),
-
-              const SizedBox(width: 12),
-
-              // Settings button
-              Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () {
-                    setState(() {
-                      _showSettings = true;
-                    });
-                  },
-                  borderRadius: BorderRadius.circular(24),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color:
-                          _isRecording
-                              ? AppColors.darkPlum2.withOpacity(0.4)
-                              : Colors.white.withOpacity(0.08),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color:
-                            _isRecording
-                                ? Colors.transparent
-                                : Colors.white.withOpacity(0.2),
-                        width: 1,
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.settings_rounded,
-                      color: Colors.white.withOpacity(0.75),
-                      size: 20,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  // ... (rest of the code remains the same: _buildSidebar, _buildSettingsModal, etc.)
-  // I'll include the complete sidebar and settings in the next section
-  
-  Widget _buildSidebar() {
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-      left: _isSidebarOpen ? 0 : -280,
-      top: 0,
-      bottom: 0,
-      child: Container(
-        width: 280,
-        decoration: BoxDecoration(
-          color: AppColors.darkPlum5,
-          border: Border(
-            right: BorderSide(
-              color: AppColors.darkPlum3.withOpacity(0.5),
-              width: 1,
-            ),
-          ),
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              // Header
-              Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'AURA',
-                      style: GoogleFonts.inter(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                        letterSpacing: 3,
-                      ),
-                    ),
-                    Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        onTap: () {
-                          setState(() {
-                            _isSidebarOpen = false;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(8),
-                        child: Container(
-                          padding: const EdgeInsets.all(4),
-                          child: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 22,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              // New Chat Button
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () {
-                      setState(() {
-                        _responseText = '';
-                        _transcribedText = '';
-                        _textController.clear();
-                        _chatMode = false;
-                        _isSidebarOpen = false;
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 14,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppColors.darkPlum3.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AppColors.darkPlum2.withOpacity(0.3),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.edit_square,
-                            color: Colors.white.withOpacity(0.8),
-                            size: 18,
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            'New chat',
-                            style: GoogleFonts.inter(
-                              color: Colors.white.withOpacity(0.9),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              const Spacer(),
-
-              // Settings Button
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    onTap: () {
-                      setState(() {
-                        _showSettings = true;
-                        _isSidebarOpen = false;
-                      });
-                    },
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 14,
-                      ),
-                      decoration: BoxDecoration(
-                        color: AppColors.darkPlum3.withOpacity(0.4),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AppColors.darkPlum2.withOpacity(0.3),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.settings_rounded,
-                            color: Colors.white.withOpacity(0.8),
-                            size: 18,
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            'Settings',
-                            style: GoogleFonts.inter(
-                              color: Colors.white.withOpacity(0.9),
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+  Widget _glassButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.1), width: 1.5),
       ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white.withOpacity(0.8), size: 18),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: _f(
+              Colors.white.withOpacity(0.8),
+              size: 13,
+              weight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  // ── Sidebar ────────────────────────────────────────────────────────────────
+
+  Widget _buildSidebar() {
+    return Stack(
+      children: [
+        if (_isSidebarOpen)
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => setState(() => _isSidebarOpen = false),
+              child: Container(color: Colors.black.withOpacity(0.3)),
+            ),
+          ),
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeInOutCubic,
+          left: _isSidebarOpen ? 0 : -280,
+          top: 0,
+          bottom: 0,
+          child: ClipRRect(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+              child: Container(
+                width: 280,
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgElevated.withOpacity(0.6),
+                  border: Border(
+                    right: BorderSide(color: Colors.white.withOpacity(0.08)),
+                  ),
+                ),
+                child: SafeArea(
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'AURA',
+                              style: _f(
+                                Colors.white,
+                                weight: FontWeight.w600,
+                                size: 17,
+                                spacing: 4,
+                              ),
+                            ),
+                            GestureDetector(
+                              onTap:
+                                  () => setState(() => _isSidebarOpen = false),
+                              child: Icon(
+                                Icons.close_rounded,
+                                color: Colors.white.withOpacity(0.6),
+                                size: 20,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: GestureDetector(
+                          onTap:
+                              () => setState(() {
+                                _responseText = '';
+                                _transcribedText = '';
+                                _textCtrl.clear();
+                                _chatMode = false;
+                                _isSidebarOpen = false;
+                              }),
+                          child: _sidebarRow(Icons.edit_square, 'New chat'),
+                        ),
+                      ),
+                      const Spacer(),
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: GestureDetector(
+                          onTap:
+                              () => setState(() {
+                                _showSettings = true;
+                                _isSidebarOpen = false;
+                              }),
+                          child: _sidebarRow(
+                            Icons.settings_rounded,
+                            'Settings',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
+
+  Widget _sidebarRow(IconData icon, String label) => AnimatedContainer(
+    duration: const Duration(milliseconds: 200),
+    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+    decoration: BoxDecoration(
+      color: Colors.white.withOpacity(0.03),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Colors.white.withOpacity(0.05)),
+    ),
+    child: Row(
+      children: [
+        Icon(icon, color: Colors.white.withOpacity(0.8), size: 16),
+        const SizedBox(width: 12),
+        Text(
+          label,
+          style: _f(
+            Colors.white.withOpacity(0.9),
+            size: 14,
+            weight: FontWeight.w500,
+          ),
+        ),
+      ],
+    ),
+  );
+
+  // ── Settings modal ─────────────────────────────────────────────────────────
 
   Widget _buildSettingsModal() {
-    return Container(
-      color: Colors.black.withOpacity(0.85),
-      child: Center(
-        child: Container(
-          width: MediaQuery.of(context).size.width * 0.92,
-          height: MediaQuery.of(context).size.height * 0.85,
-          decoration: BoxDecoration(
-            color: AppColors.darkPlum5,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: AppColors.darkPlum3.withOpacity(0.5)),
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: () => setState(() => _showSettings = false),
+            child: Container(color: Colors.black.withOpacity(0.6)),
           ),
-          child: Column(
-            children: [
-              // Top bar
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        ),
+        Center(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(24),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.fastOutSlowIn,
+                width: MediaQuery.of(context).size.width * 0.92,
+                height: MediaQuery.of(context).size.height * 0.85,
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgSurface.withOpacity(0.6),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.1),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 30,
+                      spreadRadius: -5,
+                    ),
+                  ],
+                ),
+                child: Column(
                   children: [
-                    Text(
-                      'Settings',
-                      style: GoogleFonts.inter(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white.withOpacity(0.9),
+                    // Header
+                    Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Settings',
+                            style: _f(
+                              Colors.white.withOpacity(0.95),
+                              size: 18,
+                              weight: FontWeight.w600,
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () => setState(() => _showSettings = false),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(
+                                Icons.close_rounded,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        onTap: () {
-                          setState(() {
-                            _showSettings = false;
-                          });
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: AppColors.darkPlum3.withOpacity(0.4),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(
-                            Icons.close_rounded,
-                            color: Colors.white,
-                            size: 20,
+
+                    // Nav Tabs
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.05),
                           ),
                         ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: _buildSettingsTab(
+                                0,
+                                'Profile',
+                                Icons.person_rounded,
+                              ),
+                            ),
+                            Expanded(
+                              child: _buildSettingsTab(
+                                1,
+                                'Memory',
+                                Icons.memory_rounded,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Content Area
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child:
+                            _activeSettingsSection == 0
+                                ? _buildProfileSettings()
+                                : _buildMemorySettings(),
                       ),
                     ),
                   ],
                 ),
               ),
-
-              // Tabs and content (keeping your existing implementation)
-              // ... (rest of settings modal code)
-              
-              Expanded(
-                child: Center(
-                  child: Text(
-                    'Settings content here',
-                    style: GoogleFonts.inter(color: Colors.white),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsTab(int index, String label, IconData icon) {
+    bool isActive = _activeSettingsSection == index;
+    return GestureDetector(
+      onTap: () => setState(() => _activeSettingsSection = index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: isActive ? Colors.white.withOpacity(0.1) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: isActive ? Colors.white : AuraTheme.textSecondary,
+            ),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: _f(
+                isActive ? Colors.white : AuraTheme.textSecondary,
+                size: 13,
+                weight: isActive ? FontWeight.w600 : FontWeight.w500,
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 
   Widget _buildProfileSettings() {
-    // Keep your existing implementation
-    return Container();
+    return SingleChildScrollView(
+      key: const ValueKey('profile'),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSettingsInput('Username', _userName),
+          const SizedBox(height: 16),
+          _buildSettingsInput('Email', 'user@example.com'),
+          const SizedBox(height: 16),
+          _buildSettingsDropdown('Theme', 'Dark'),
+          const SizedBox(height: 16),
+          _buildSettingsDropdown('Voice', 'Gacrux'),
+          const SizedBox(height: 30),
+          _buildActionBtn('Save Changes', AuraTheme.pink500, () {}),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
   }
 
   Widget _buildMemorySettings() {
-    // Keep your existing implementation
-    return Container();
+    return SingleChildScrollView(
+      key: const ValueKey('memory'),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Total preferences',
+                  '24',
+                  AuraTheme.pink400,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Personal info',
+                  '8',
+                  AuraTheme.pink300,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'App preferences',
+                  '16',
+                  AuraTheme.pink200,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildMemoryStatCard(
+                  'Storage used',
+                  '1.2 MB',
+                  AuraTheme.textSecondary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 30),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.03),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withOpacity(0.05)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Manage Memory',
+                  style: _f(Colors.white, size: 15, weight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Clearing memory will remove all stored preferences and context.',
+                  style: _f(AuraTheme.textSecondary, size: 13, height: 1.4),
+                ),
+                const SizedBox(height: 16),
+                _buildActionBtn(
+                  'Clear Memory',
+                  Colors.redAccent.withOpacity(0.8),
+                  () {},
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
   }
 
-  Widget _buildEditableField(
-    String label,
-    String value,
-    Function(String) onChanged,
-  ) {
-    // Keep your existing implementation
-    return Container();
+  Widget _buildSettingsInput(String label, String placeholder) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: _f(AuraTheme.textSecondary, size: 13, weight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.08)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(placeholder, style: _f(Colors.white, size: 14)),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
-  Widget _buildWorkingDropdown(
-    String label,
-    String value,
-    List<String> options,
-    Function(String?) onChanged,
-  ) {
-    // Keep your existing implementation
-    return Container();
+  Widget _buildSettingsDropdown(String label, String value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: _f(AuraTheme.textSecondary, size: 13, weight: FontWeight.w500),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.3),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white.withOpacity(0.08)),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(value, style: _f(Colors.white, size: 14)),
+              Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: AuraTheme.textSecondary,
+                size: 18,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
-  Widget _buildStatCard(String value, String label, Color color) {
-    // Keep your existing implementation
-    return Container();
+  Widget _buildMemoryStatCard(String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withOpacity(0.05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(value, style: _f(color, size: 24, weight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: _f(
+              AuraTheme.textSecondary,
+              size: 12,
+              weight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionBtn(String label, Color color, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.3),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Text(
+          label,
+          style: _f(Colors.white, size: 14, weight: FontWeight.w600),
+        ),
+      ),
+    );
   }
 }

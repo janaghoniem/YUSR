@@ -663,18 +663,88 @@ async def create_account(data: OnboardingData):
 
 @app.get("/onboarding/check-username")
 async def check_username(username: str):
-    """Check if a username is available."""
+    """Names are not required to be unique. Always returns available."""
+    return {"available": True}
+
+# INSERT after the existing /onboarding/login endpoint
+
+class SessionCreateRequest(BaseModel):
+    user_id: str
+
+@app.post("/onboarding/session/create")
+async def create_session_for_user(data: SessionCreateRequest):
+    """
+    Create a new stable session ID server-side, tied to user_id.
+    Android calls this once per app launch after login.
+    Returns a session_id the client must persist and reuse.
+    """
+    import uuid
+    session_id = f"session_{data.user_id}_{uuid.uuid4().hex[:12]}"
+    logger.info(f"✅ Session created for user {data.user_id}: {session_id}")
+    return {
+        "status": "ok",
+        "session_id": session_id,
+        "user_id": data.user_id,
+    }
+
+class IntroductionRequest(BaseModel):
+    user_id: str
+    language: str  # "en" or "ar"
+    answers: dict  # {"name": "...", "job": "...", "accessibility": "...", "tasks": "..."}
+
+@app.post("/onboarding/store-introduction")
+async def store_android_introduction(data: IntroductionRequest):
+    """
+    Store onboarding answers as Mem0 preferences for Android users.
+    Called after account creation completes.
+    """
     try:
-        from pymongo import MongoClient
-        import os
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
-        exists = db["users"].find_one({"username": username}) is not None
-        return {"available": not exists}
+        from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+        pref_mgr = get_preference_manager(data.user_id)
+
+        answers = data.answers
+        prefs_to_store = []
+
+        if answers.get("name"):
+            prefs_to_store.append((
+                f"User's name is {answers['name']}",
+                {"category": "personal_info", "source": "android_onboarding"}
+            ))
+
+        if answers.get("job"):
+            prefs_to_store.append((
+                f"User's job/role is: {answers['job']}",
+                {"category": "personal_info", "source": "android_onboarding"}
+            ))
+
+        if answers.get("accessibility"):
+            prefs_to_store.append((
+                f"Accessibility preferences: {answers['accessibility']}",
+                {"category": "accessibility", "source": "android_onboarding"}
+            ))
+
+        if answers.get("tasks"):
+            prefs_to_store.append((
+                f"User wants AURA to help with: {answers['tasks']}",
+                {"category": "task_preference", "source": "android_onboarding"}
+            ))
+
+        lang_label = "Arabic" if data.language == "ar" else "English"
+        prefs_to_store.append((
+            f"User's preferred language is {lang_label} ({data.language})",
+            {"category": "language_preference", "source": "android_onboarding",
+             "lang_code": data.language}
+        ))
+
+        for pref_text, metadata in prefs_to_store:
+            pref_mgr.add_preference_zero_token(pref_text, metadata=metadata)
+
+        logger.info(f"✅ Stored {len(prefs_to_store)} onboarding prefs for {data.user_id}")
+        return {"status": "ok", "stored_count": len(prefs_to_store)}
+
     except Exception as e:
+        logger.error(f"❌ Failed to store introduction: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 """
 Fixed message handlers for server.py
@@ -832,14 +902,14 @@ INTERRUPT_COMMANDS = {
     "aura stop": "stop", "aura cancel": "stop", "aura abort": "stop",
     "aura pause": "pause", "aura wait": "pause", "aura hold on": "pause",
     "aura continue": "resume", "aura go on": "resume", "aura resume": "resume",
-    "aura undo": "undo", "aura undo that": "undo", "aura go back": "undo",
+    "aura undo": "undo", "aura go back": "undo",
     "aura redo": "retry", "aura try again": "retry",
     # Arabic
-    "أورا وقف": "stop", "أورا أوقف": "stop", "أورا إلغاء": "stop",
-    "أورا انتظر": "pause",
-    "أورا استمر": "resume",
-    "أورا تراجع": "undo",
-    "أورا أعد": "retry",
+    "أورا وقف": "stop", "أورا توقف": "stop", "أورا إيقاف": "stop", "أورا إلغاء": "stop",
+    "أورا انتظر": "pause", "أورا لحظة": "pause",
+    "أورا استمر": "resume", "أورا كمل": "resume",
+    "أورا تراجع": "undo", "أورا ارجع": "undo",
+    "أورا أعد": "retry", "أورا حاول مجددا": "retry",
 }
 
 def detect_interrupt(text: str):
@@ -1625,67 +1695,67 @@ Return ONLY the title, nothing else."""
 
 #face authentication endpoints
 
-@app.post("/onboarding/register-face")
-async def register_face(request: Request):
-    """
-    Register face biometrics for a user (signup flow)
-    """
-    try:
-        data = await request.json()
-        username = data.get("username", "").strip()
-        user_id = data.get("user_id", "")
-        face_image = data.get("face_image", "")
+# @app.post("/onboarding/register-face")
+# async def register_face(request: Request):
+#     """
+#     Register face biometrics for a user (signup flow)
+#     """
+#     try:
+#         data = await request.json()
+#         username = data.get("username", "").strip()
+#         user_id = data.get("user_id", "")
+#         face_image = data.get("face_image", "")
         
-        # Validate inputs
-        if not username:
-            raise HTTPException(status_code=400, detail="Username is required")
+#         # Validate inputs
+#         if not username:
+#             raise HTTPException(status_code=400, detail="Username is required")
         
-        if not face_image:
-            raise HTTPException(status_code=400, detail="Face image is required")
+#         if not face_image:
+#             raise HTTPException(status_code=400, detail="Face image is required")
         
-        if not user_id:
-            raise HTTPException(status_code=400, detail="User ID is required")
+#         if not user_id:
+#             raise HTTPException(status_code=400, detail="User ID is required")
         
-        logger.info(f"Processing face registration for user: {username}")
+#         logger.info(f"Processing face registration for user: {username}")
         
-        # Process the face image
-        encoding, message = face_auth.process_face_image(face_image)
-        if not encoding:
-            raise HTTPException(status_code=400, detail=message)
+#         # Process the face image
+#         encoding, message = face_auth.process_face_image(face_image)
+#         if not encoding:
+#             raise HTTPException(status_code=400, detail=message)
         
-        # Check if username already exists with face data
-        if face_auth.get_user_face_status(username):
-            # Optionally update existing face data
-            success, msg = face_auth.store_face_data(user_id, username, encoding)
-            if not success:
-                raise HTTPException(status_code=500, detail=msg)
+#         # Check if username already exists with face data
+#         if face_auth.get_user_face_status(username):
+#             # Optionally update existing face data
+#             success, msg = face_auth.store_face_data(user_id, username, encoding)
+#             if not success:
+#                 raise HTTPException(status_code=500, detail=msg)
             
-            return {
-                "status": "success",
-                "message": "Face biometrics updated successfully",
-                "user_id": user_id,
-                "username": username,
-                "action": "updated"
-            }
-        else:
-            # Store new face data
-            success, msg = face_auth.store_face_data(user_id, username, encoding)
-            if not success:
-                raise HTTPException(status_code=500, detail=msg)
+#             return {
+#                 "status": "success",
+#                 "message": "Face biometrics updated successfully",
+#                 "user_id": user_id,
+#                 "username": username,
+#                 "action": "updated"
+#             }
+#         else:
+#             # Store new face data
+#             success, msg = face_auth.store_face_data(user_id, username, encoding)
+#             if not success:
+#                 raise HTTPException(status_code=500, detail=msg)
             
-            return {
-                "status": "success",
-                "message": "Face biometrics registered successfully",
-                "user_id": user_id,
-                "username": username,
-                "action": "registered"
-            }
+#             return {
+#                 "status": "success",
+#                 "message": "Face biometrics registered successfully",
+#                 "user_id": user_id,
+#                 "username": username,
+#                 "action": "registered"
+#             }
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Face registration error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"❌ Face registration error: {e}", exc_info=True)
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/onboarding/verify-face")
 async def verify_face_login(request: Request):
@@ -1959,8 +2029,14 @@ async def register_face(request: Request):
         if not success:
             raise HTTPException(status_code=500, detail=msg)
         
-        logger.info(f"✅ Face registered successfully for {username} (user_id: {user_id})")
+        # logger.info(f"✅ Face registered successfully for {username} (user_id: {user_id})")
+        # Verify it was actually saved
+        verify_check = face_auth.get_user_face_status(username)
+        if not verify_check:
+            logger.error(f"❌ CRITICAL: Face registered but NOT found in DB for {username}")
+            raise HTTPException(status_code=500, detail="Face data failed to persist. Please retry.")
         
+        logger.info(f"✅ Face registered and VERIFIED in DB for {username} (user_id: {user_id})")
         return {
             "status": "success",
             "message": "Face biometrics registered successfully",

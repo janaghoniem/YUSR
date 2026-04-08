@@ -1132,7 +1132,7 @@ def resolve_element(
 ) -> Optional[int]:
     """
     Try each selector in priority order against the live accessibility tree.
-    Priority: content_desc → resource_id_tail → resource_id → text → class_name
+    Priority: resource_id → resource_id_tail → content_desc → text → class_name
 
     For text-based selectors, falls back to fuzzy matching (Levenshtein)
     if exact match fails but similarity >= FUZZY_TEXT_THRESH.
@@ -1169,15 +1169,11 @@ def resolve_element(
             if eid in blacklist:
                 continue
 
-            if by == "content_desc":
-                desc = _attr(elem, "content_description")
-                if desc.lower() == value.lower():
+            if by == "resource_id":
+                rid = _attr(elem, "resource_id")
+                if rid.lower() == value.lower():
                     exact_match = eid
                     break
-                score = _fuzzy_text_match(desc, value)
-                if score > fuzzy_score:
-                    fuzzy_score = score
-                    fuzzy_match = eid
 
             elif by == "resource_id_tail":
                 rid = _attr(elem, "resource_id")
@@ -1186,11 +1182,15 @@ def resolve_element(
                     exact_match = eid
                     break
 
-            elif by == "resource_id":
-                rid = _attr(elem, "resource_id")
-                if rid.lower() == value.lower():
+            elif by == "content_desc":
+                desc = _attr(elem, "content_description")
+                if desc.lower() == value.lower():
                     exact_match = eid
                     break
+                score = _fuzzy_text_match(desc, value)
+                if score > fuzzy_score:
+                    fuzzy_score = score
+                    fuzzy_match = eid
 
             elif by == "text":
                 text = _attr(elem, "text")

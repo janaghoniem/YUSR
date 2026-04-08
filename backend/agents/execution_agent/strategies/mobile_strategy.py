@@ -265,7 +265,7 @@ class MobileReActStrategy:
         self.backend_url = "http://localhost:8000"
 
         from groq import AsyncGroq
-        self.llm_client = AsyncGroq(api_key="")
+        self.llm_client = AsyncGroq(api_key=" ")
         self.model = "llama-3.3-70b-versatile"
 
         self.current_ui_tree:      Optional[SemanticUITree]     = None
@@ -1192,6 +1192,11 @@ class MobileReActStrategy:
         if play_store_action:
             return play_store_action
 
+        # Chrome results-page follow-up: click first organic result.
+        chrome_first_result = self._handle_chrome_first_result_click(goal, ui_tree)
+        if chrome_first_result:
+            return chrome_first_result
+
         # Chrome search submission (IME/search suggestion fallback)
         chrome_submit = self._handle_chrome_search_submit(goal, ui_tree)
         if chrome_submit:
@@ -1283,9 +1288,17 @@ class MobileReActStrategy:
         return None
 
     def _global_interstitial_handler(self, ui_tree: SemanticUITree) -> Optional[Dict]:
-        # Never treat Chrome web content as a dialog/overlay.
+        # Package guards first: avoid treating rich-content app screens as overlays.
         pkg = (ui_tree.app_package or "").lower()
+        if "com.google.android.gm" in pkg or pkg.endswith(".gm") or "gmail" in pkg:
+            return None
+
+        # Never treat Chrome web content as a dialog/overlay.
         if "chrome" in pkg and len(ui_tree.elements) > 15:
+            return None
+        if "maps" in pkg and len(ui_tree.elements) > 12:
+            return None
+        if "gm" in pkg and len(ui_tree.elements) > 15:
             return None
 
         DISMISS_VOCAB = {
@@ -1807,6 +1820,44 @@ class MobileReActStrategy:
                             "reason": "Search results loaded",
                         }
 
+        return None
+
+    def _handle_chrome_first_result_click(
+        self, goal: str, ui_tree: SemanticUITree
+    ) -> Optional[Dict[str, Any]]:
+        pkg = (ui_tree.app_package or "").lower()
+        if "chrome" not in pkg:
+            return None
+
+        gl = goal.lower()
+        if not any(kw in gl for kw in ("click search", "click the search", "first result", "search button")):
+            return None
+
+        has_results = len(ui_tree.elements) > 20
+        if not has_results:
+            return None
+
+        nav_skip = {
+            "back", "forward", "reload", "tabs", "menu", "bookmark",
+            "new tab", "home", "settings", "address", "search or type",
+        }
+
+        for e in ui_tree.elements:
+            if not e.clickable:
+                continue
+            blob = f"{e.content_description or ''} {e.text or ''}".lower().strip()
+            if len(blob) < 4:
+                continue
+            if any(w in blob for w in nav_skip):
+                continue
+            if e.type in ("textfield",):
+                continue
+            logger.info(f"[T1] Chrome: clicking first search result id={e.element_id}: '{blob[:40]}'")
+            return {
+                "thought": f"click first search result: '{blob[:30]}'",
+                "action_type": "click",
+                "element_id": e.element_id,
+            }
         return None
 
     # ══════════════════════════════════════════════════════════════════════

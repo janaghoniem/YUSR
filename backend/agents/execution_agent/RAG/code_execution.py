@@ -440,7 +440,7 @@ class CoordinatorRAGBridge:
         # If no __main__, return as-is
         return full_code
 
-    async def execute_action_task(self, task: ActionTask, max_retries: int = 3, enable_cache: bool = True) -> TaskResult:
+    async def execute_action_task(self, task: ActionTask, max_retries: int = 3, enable_cache: bool = False) -> TaskResult:
         logger.info(f"🖥️ Processing DESKTOP task {task.task_id}: {task.ai_prompt[:50]}...")
 
         # Only process action tasks
@@ -994,7 +994,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             
             sandbox_config = SandboxConfig(timeout_seconds=30)
             # Try to enable cache, but continue without it if it fails
-            enable_cache = True
+            enable_cache = False
             try:
                 # Test if ChromaDB is available
                 import chromadb
@@ -1017,7 +1017,7 @@ async def initialize_execution_agent_for_server(broker_instance):
             except Exception as e:
                 logger.warning(f"⚠️ Failed to initialize with cache: {e}")
                 # Fallback: create without cache
-                sandbox_pipeline = SandboxExecutionPipeline(sandbox_config, enable_cache=True)
+                sandbox_pipeline = SandboxExecutionPipeline(sandbox_config, enable_cache=False)
             
             logger.info("✅ Desktop sandbox pipeline ready")
             

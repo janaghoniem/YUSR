@@ -595,14 +595,28 @@ async def decompose_task_to_actions(
              "do NOT add a navigate task — act directly on the current page using context: \"web\".\n\n"
          )
     
-    # ✅ FIX 3: Build conversation history context
+    # ✅ FIX 3 + Fix 5: Build conversation history context with active app/page state
     history_context = ""
     if conversation_history:
         history_context = "\n\n# CONVERSATION HISTORY (Last 3 interactions)\n"
+        history_context += (
+            "IMPORTANT: If an app or browser page is listed as 'currently open', "
+            "do NOT generate a task to re-open it. Interact with the existing window directly.\n\n"
+        )
         for entry in conversation_history[-3:]:
             history_context += f"User: {entry.get('user_message', '')}\n"
             history_context += f"Action: {entry.get('action_taken', '')}\n"
-            history_context += f"Result: {entry.get('result', '')}\n\n"
+            if entry.get('actions_detail'):
+                history_context += f"Steps taken: {'; '.join(entry['actions_detail'])}\n"
+            history_context += f"Result: {entry.get('result', '')}\n"
+            if entry.get('apps_currently_open'):
+                history_context += (
+                    f"Apps currently open (DO NOT reopen): "
+                    f"{', '.join(entry['apps_currently_open'])}\n"
+                )
+            if entry.get('current_page_url'):
+                history_context += f"Browser currently at: {entry['current_page_url']}\n"
+            history_context += "\n"
     
     prompt = f"""{device_hint}You are the AURA Task Decomposition Agent. Convert user requests into low-level executable tasks.
 
@@ -1447,16 +1461,39 @@ def create_coordinator_graph():
         # hala edit ashan el web
         saved_browser = _session_browser_state.get(session_id, {})
         current_page_url = saved_browser.get("current_page_url")
+
+        # ── Load persisted conversation_history from checkpoint if not in state ──
+        # This handles the restart case: state["conversation_history"] starts as []
+        # on each new server process, but the checkpoint may have prior entries.
+        loaded_history = state.get("conversation_history", [])
+        if not loaded_history and checkpointer and session_id:
+            try:
+                checkpoint_data = await checkpointer.aget(
+                    config={"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}
+                )
+                if checkpoint_data:
+                    # Try channel_values first (our custom save format)
+                    ch_vals = checkpoint_data.get("channel_values", {})
+                    persisted_history = ch_vals.get("conversation_history", [])
+                    if persisted_history and isinstance(persisted_history, list):
+                        loaded_history = persisted_history
+                        logger.info(
+                            f"🔄 Restored conversation_history from checkpoint: "
+                            f"{len(loaded_history)} entries"
+                        )
+            except Exception as _load_err:
+                logger.debug(f"⚠️ conversation_history load failed (non-fatal): {_load_err}")
+        # ─────────────────────────────────────────────────────────────────────
         
         # ✅ FIX 3: Pass conversation history to decomposition
         plan_result = await decompose_task_to_actions(
             raw_task, 
             preferences_context, 
             device_type,
-            conversation_history=state.get("conversation_history", []),
-            session_id=session_id,  # ✅ FIX 5: Pass these parameters
-            http_request_id=original_message_id,  # ✅ FIX 5: Pass these parameters
-            current_page_url=current_page_url  # ✅ BROWSER STATE hala edit ll web
+            conversation_history=loaded_history,
+            session_id=session_id,
+            http_request_id=original_message_id,
+            current_page_url=current_page_url
         )
         
         # Save the plan execution error if there was one
@@ -1869,18 +1906,53 @@ def create_coordinator_graph():
         total_count = len(results)
         plan_error = state.get("plan_error", "")
         
-        # ✅ FIX 3: Update conversation history
+
+        # ✅ FIX 3: Update conversation history — enriched with active app context
+        # This is what tells Turn 2 ("write hello world") that Notepad is already open.
+        # The app_name and context fields let the decomposition LLM skip re-opening apps.
         if success_count > 0:
             if "conversation_history" not in state:
                 state["conversation_history"] = []
-            
-            state["conversation_history"].append({
+
+            # Collect the apps that were successfully opened/used in this turn
+            apps_used_this_turn = list({
+                (t.extra_params or {}).get("app_name", "")
+                for t in state.get("tasks", [])
+                if hasattr(t, "extra_params")
+                and (t.extra_params or {}).get("app_name", "")
+                and results.get(t.task_id) is not None
+                and results[t.task_id].status == "success"
+            } - {""})
+
+            # Collect successful task prompts for richer context
+            successful_actions = [
+                t.ai_prompt[:80]
+                for t in state.get("tasks", [])
+                if hasattr(t, "task_id")
+                and results.get(t.task_id) is not None
+                and results[t.task_id].status == "success"
+            ]
+
+            history_entry = {
                 "user_message": state['input'].get('original_input', state['input'].get('confirmation', state['input'].get('action', ''))),
                 "action_taken": f"Executed {success_count} tasks",
+                "actions_detail": successful_actions[:3],  # top 3 for brevity
                 "result": "success" if success_count == total_count else "partial",
-                "timestamp": datetime.now().isoformat()
-            })
-            
+                "timestamp": datetime.now().isoformat(),
+            }
+
+            # If apps were used, record them so future turns can target the active window
+            if apps_used_this_turn:
+                history_entry["apps_currently_open"] = apps_used_this_turn
+                logger.info(f"📝 Conversation history: apps now open = {apps_used_this_turn}")
+
+            # If a browser page was navigated to, record it
+            saved_browser = _session_browser_state.get(session_id, {})
+            if saved_browser.get("current_page_url"):
+                history_entry["current_page_url"] = saved_browser["current_page_url"]
+
+            state["conversation_history"].append(history_entry)
+
             # Keep only last 10 interactions
             if len(state["conversation_history"]) > 10:
                 state["conversation_history"] = state["conversation_history"][-10:]
@@ -2130,6 +2202,60 @@ def create_coordinator_graph():
         )
         await broker.publish(Channels.WEBSOCKET_OUTPUT, ws_msg)
         
+# ── ICRL: Store plan-level feedback in TaskMemory via FeedbackAgent ─────
+        # This runs once per plan (not per task) to save tokens.
+        # It stores the improvements list in TaskMemory so future similar tasks
+        # get hint context from the execution agent's RAG retrieval.
+        # Only runs when there were actual tasks to evaluate.
+        if total_count > 0:
+            try:
+                from agents.feedback_agent import FeedbackAgent
+                from agents.execution_agent.strategies.task_memory import TaskMemory
+
+                # Build a compact trajectory from all tasks in this plan
+                plan_trajectory = [
+                    {
+                        "action": t.ai_prompt,
+                        "task_id": t.task_id,
+                        "context": t.context,
+                        "target_agent": t.target_agent,
+                        "result": (results.get(t.task_id).content or "") if results.get(t.task_id) else "",
+                        "status": (results.get(t.task_id).status or "unknown") if results.get(t.task_id) else "unknown",
+                        "error": (results.get(t.task_id).error or "") if results.get(t.task_id) else "",
+                    }
+                    for t in state.get("tasks", [])
+                    if hasattr(t, "task_id")
+                ]
+
+                fb_agent = FeedbackAgent()
+                try:
+                    task_memory = TaskMemory()
+                    fb_agent.attach_memory(task_memory)
+                except Exception:
+                    pass  # TaskMemory optional
+
+                # Use asyncio.to_thread since evaluate_and_store is synchronous
+                import asyncio as _asyncio
+                evaluation = await _asyncio.to_thread(
+                    fb_agent.evaluate_and_store,
+                    original_request,
+                    plan_trajectory,
+                    None,  # no user_feedback here
+                )
+                logger.info(
+                    f"🎯 Plan-level FeedbackAgent: score={evaluation.score:.3f}, "
+                    f"success={evaluation.is_success}, "
+                    f"improvements={len(evaluation.improvements)}"
+                )
+                if evaluation.improvements:
+                    logger.info(
+                        f"💡 Plan improvements stored: "
+                        + " | ".join(evaluation.improvements[:3])
+                    )
+            except Exception as _fb_err:
+                logger.debug(f"⚠️ Plan-level FeedbackAgent storage failed (non-fatal): {_fb_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         if success_count == total_count and total_count > 0:
             try:
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
@@ -2255,7 +2381,35 @@ Extract now:"""
         
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
-        
+
+        # ── Persist conversation_history to checkpoint so it survives restart ──
+        # Without this, a server restart empties the history and Turn 2 ("leave
+        # the meeting") wouldn't know Discord is open from a prior turn.
+        if checkpointer and session_id and state.get("conversation_history"):
+            try:
+                await save_checkpoint_compat(
+                    session_id,
+                    {
+                        "v": 1,
+                        "id": str(uuid.uuid4()),
+                        "ts": datetime.now().isoformat(),
+                        "channel_values": {
+                            "conversation_history": state["conversation_history"]
+                        },
+                        "channel_versions": {},
+                        "versions_seen": {},
+                        "pending_sends": [],
+                    },
+                    {"step": 0, "type": "conversation_history"}
+                )
+                logger.info(
+                    f"💾 Persisted conversation_history "
+                    f"({len(state['conversation_history'])} entries) to checkpoint"
+                )
+            except Exception as _ch_err:
+                logger.debug(f"⚠️ conversation_history persist failed (non-fatal): {_ch_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         return {"status": "completed"}
 
     # Build graph
@@ -2265,123 +2419,132 @@ Extract now:"""
 
     async def maybe_retry_plan(state: Dict) -> Dict:
         """
-        ICRL plan-level retry node.
-        
-        Checks if the plan failed badly enough to warrant re-decomposition
-        with ICRL history. If yes, re-runs analyze_and_plan with ICRL context
-        injected. If no (good enough result, max retries hit, or no session),
-        passes through unchanged to send_feedback.
-        
-        This is the "plan-level" ICRL loop from the paper applied to
-        task decomposition: the coordinator treats the entire plan as one
-        "response" and the success ratio as its "reward".
+        ICRL plan-level retry node — fully looping implementation.
+
+        Loops internally up to MAX_ICRL_PLAN_RETRIES times so that each
+        retry passes through this node's decision logic rather than bypassing it.
+        The previous implementation called execute_tasks() directly on retry,
+        which meant rounds 2+ were structurally unreachable.
+
+        Exit conditions (checked at start of every iteration):
+        - execution_clarification set → skip (not a plan failure)
+        - icrl_round >= MAX_ICRL_PLAN_RETRIES → max retries hit
+        - plan_reward >= ICRL_RETRY_SUCCESS_THRESHOLD → good enough
+        - plan_error set → decomposition itself failed
         """
-        results = state.get("results", {})
-        session_id = state.get("session_id")
-        icrl_round = state.get("_icrl_plan_round", 0)
+        current_state = state
 
-        if not session_id or not results:
-            return {**state, "_icrl_plan_round": icrl_round}
+        while True:
+            results = current_state.get("results", {})
+            session_id = current_state.get("session_id")
+            icrl_round = current_state.get("_icrl_plan_round", 0)
 
-        success_count = sum(1 for r in results.values() if r.status == "success")
-        total_count = len(results)
-        plan_reward = success_count / max(total_count, 1)
+            if not session_id or not results:
+                return {**current_state, "_icrl_plan_round": icrl_round}
 
-        logger.info(
-            f"🔄 ICRL plan check: round={icrl_round}, "
-            f"reward={plan_reward:.2f} ({success_count}/{total_count}), "
-            f"max_retries={MAX_ICRL_PLAN_RETRIES}"
-        )
+            success_count = sum(1 for r in results.values() if r.status == "success")
+            total_count = len(results)
+            plan_reward = success_count / max(total_count, 1)
 
-        # Conditions to skip retry
-        if icrl_round >= MAX_ICRL_PLAN_RETRIES:
-            logger.info("🔄 ICRL: Max plan retries reached, proceeding to feedback")
-            return {**state, "_icrl_plan_round": icrl_round}
-
-        if plan_reward >= ICRL_RETRY_SUCCESS_THRESHOLD:
             logger.info(
-                f"🔄 ICRL: Plan reward {plan_reward:.2f} >= threshold "
-                f"{ICRL_RETRY_SUCCESS_THRESHOLD}, no retry needed"
+                f"🔄 ICRL plan check: round={icrl_round}, "
+                f"reward={plan_reward:.2f} ({success_count}/{total_count}), "
+                f"max_retries={MAX_ICRL_PLAN_RETRIES}"
             )
-            return {**state, "_icrl_plan_round": icrl_round}
 
-        if state.get("plan_error"):
-            # Decomposition itself failed (rate limit etc.) — don't retry
-            logger.info("🔄 ICRL: Skipping plan retry due to decomposition error")
-            return {**state, "_icrl_plan_round": icrl_round}
+            # ── Exit conditions ───────────────────────────────────────────────
 
-        # ── Plan failed badly — retry with ICRL context ─────────────────────
-        logger.info(
-            f"🔄 ICRL: Plan reward {plan_reward:.2f} < threshold, "
-            f"retrying decomposition (round {icrl_round + 1})"
-        )
+            if current_state.get("execution_clarification"):
+                logger.info("🔄 ICRL: Skipping plan retry — execution stopped for clarification, not failure")
+                return {**current_state, "_icrl_plan_round": icrl_round}
 
-        # Retrieve or create the plan-level ICRL buffer
-        plan_buffer_key = f"{session_id}:__plan__"
-        plan_buffer = _icrl_buffers.get(plan_buffer_key)
-        if plan_buffer is None:
-            plan_goal = state.get("input", {}).get(
-                "original_input",
-                state.get("input", {}).get("confirmation", "unknown goal")
+            if icrl_round >= MAX_ICRL_PLAN_RETRIES:
+                logger.info("🔄 ICRL: Max plan retries reached, proceeding to feedback")
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
+            if plan_reward >= ICRL_RETRY_SUCCESS_THRESHOLD:
+                logger.info(
+                    f"🔄 ICRL: Plan reward {plan_reward:.2f} >= threshold "
+                    f"{ICRL_RETRY_SUCCESS_THRESHOLD}, no retry needed"
+                )
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
+            if current_state.get("plan_error"):
+                logger.info("🔄 ICRL: Skipping plan retry due to decomposition error")
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
+            # ── Plan failed — attempt retry ───────────────────────────────────
+            new_icrl_round = icrl_round + 1
+            logger.info(
+                f"🔄 ICRL: Plan reward {plan_reward:.2f} < threshold, "
+                f"retrying decomposition (round {new_icrl_round}/{MAX_ICRL_PLAN_RETRIES})"
             )
-            plan_buffer = ICRLBuffer(goal=plan_goal)
-            _icrl_buffers[plan_buffer_key] = plan_buffer
 
-        # The plan-level reward was already recorded in execute_tasks (step 5e).
-        # Now we inject ICRL context into a fresh decomposition call.
-        new_icrl_round = icrl_round + 1
-        device_type = state.get("input", {}).get("device_type", "desktop")
-        user_id = state.get("user_id", "default_user")
-        original_message_id = state.get("original_message_id")
+            plan_buffer_key = f"{session_id}:__plan__"
+            plan_buffer = _icrl_buffers.get(plan_buffer_key)
+            if plan_buffer is None:
+                plan_goal = current_state.get("input", {}).get(
+                    "original_input",
+                    current_state.get("input", {}).get("confirmation", "unknown goal")
+                )
+                plan_buffer = ICRLBuffer(goal=plan_goal)
+                _icrl_buffers[plan_buffer_key] = plan_buffer
 
-        try:
-            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = get_preference_manager(user_id)
-            preferences_context = pref_mgr.get_relevant_preferences(
-                str(state.get("input", {}).get("original_input", "")), limit=5
+            device_type = current_state.get("input", {}).get("device_type", "desktop")
+            user_id = current_state.get("user_id", "default_user")
+            original_message_id = current_state.get("original_message_id")
+
+            try:
+                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                pref_mgr = get_preference_manager(user_id)
+                preferences_context = pref_mgr.get_relevant_preferences(
+                    str(current_state.get("input", {}).get("original_input", "")), limit=5
+                )
+            except Exception:
+                preferences_context = current_state.get("preferences_context", "No preferences available")
+
+            saved_browser = _session_browser_state.get(session_id, {})
+            current_page_url = saved_browser.get("current_page_url")
+
+            plan_result = await decompose_task_to_actions_with_icrl(
+                user_request=current_state["input"],
+                preferences_context=preferences_context,
+                device_type=device_type,
+                conversation_history=current_state.get("conversation_history", []),
+                session_id=session_id,
+                http_request_id=original_message_id,
+                current_page_url=current_page_url,
+                icrl_buffer=plan_buffer,
+                icrl_round=new_icrl_round,
             )
-        except Exception:
-            preferences_context = state.get("preferences_context", "No preferences available")
 
-        saved_browser = _session_browser_state.get(session_id, {})
-        current_page_url = saved_browser.get("current_page_url")
+            if plan_result.get("error") or not plan_result.get("tasks"):
+                logger.warning(
+                    f"⚠️ ICRL plan retry failed to produce new tasks: "
+                    f"{plan_result.get('error', 'no tasks')}"
+                )
+                return {**current_state, "_icrl_plan_round": new_icrl_round}
 
-        plan_result = await decompose_task_to_actions_with_icrl(
-            user_request=state["input"],
-            preferences_context=preferences_context,
-            device_type=device_type,
-            conversation_history=state.get("conversation_history", []),
-            session_id=session_id,
-            http_request_id=original_message_id,
-            current_page_url=current_page_url,
-            icrl_buffer=plan_buffer,
-            icrl_round=new_icrl_round,
-        )
-
-        if plan_result.get("error") or not plan_result.get("tasks"):
-            logger.warning(
-                f"⚠️ ICRL plan retry failed to produce new tasks: "
-                f"{plan_result.get('error', 'no tasks')}"
+            new_tasks = plan_result["tasks"]
+            logger.info(
+                f"✅ ICRL: New plan generated ({len(new_tasks)} tasks) for round {new_icrl_round}"
             )
-            return {**state, "_icrl_plan_round": new_icrl_round}
 
-        new_tasks = plan_result["tasks"]
-        logger.info(
-            f"✅ ICRL: New plan generated ({len(new_tasks)} tasks) for round {new_icrl_round}"
-        )
+            task_queue.reset()
+            task_queue.add_to_current(new_tasks)
 
-        # Reset the task queue and results for the retry
-        task_queue.reset()
-        task_queue.add_to_current(new_tasks)
-
-        # Re-run execute_tasks with the new plan
-        new_state = {
-            **state,
-            "tasks": new_tasks,
-            "results": {},
-            "_icrl_plan_round": new_icrl_round,
-        }
-        return await execute_tasks(new_state)
+            # Execute the new plan and update current_state for the next loop iteration
+            exec_state = {
+                **current_state,
+                "tasks": new_tasks,
+                "results": {},
+                "_icrl_plan_round": new_icrl_round,
+                "execution_clarification": None,  # reset clarification for new attempt
+                "plan_error": None,
+            }
+            executed_state = await execute_tasks(exec_state)
+            current_state = executed_state
+            # Loop back to check if this new result meets the threshold
 
     def route_after_execution(state: Dict) -> str:
         """

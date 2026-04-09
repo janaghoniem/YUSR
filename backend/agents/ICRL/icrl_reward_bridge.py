@@ -36,7 +36,7 @@ HEURISTIC_REWARDS = {
 
 # Set to False to use fast heuristic rewards (no extra API calls)
 # Set to True to use FeedbackAgent LLM for nuanced scoring on failures
-USE_FEEDBACK_AGENT_FOR_FAILURES = True
+USE_FEEDBACK_AGENT_FOR_FAILURES = False
 
 
 def _build_trajectory_from_task_result(
@@ -69,22 +69,24 @@ async def compute_reward(
 ) -> float:
     """
     Compute a scalar reward (0.0–1.0) for a completed task execution.
-    
+
     Fast path: success → 1.0 (no API call needed)
-    Failure path: call FeedbackAgent for nuanced scoring OR use heuristic
-    
+    Failure path: call FeedbackAgent for nuanced scoring AND store improvements
+                  in TaskMemory so future similar tasks benefit from them.
+                  Falls back to heuristic if FeedbackAgent is unavailable.
+
     Args:
         goal: The high-level goal string (e.g., "Open calculator and compute 25*25")
         task_dict: The ActionTask as a dict (task.model_dump())
         result_dict: The TaskResult as a dict (result.model_dump())
         user_feedback: Optional user correction text
-    
+
     Returns:
         Scalar reward in [0.0, 1.0]
     """
     status = result_dict.get("status", "failed")
 
-    # Fast path for clear success
+    # Fast path for clear success — no API call needed
     if status == "success":
         content = result_dict.get("content", "")
         if content and "EXECUTION_SUCCESS" in str(content):
@@ -93,22 +95,47 @@ async def compute_reward(
         # Success but no explicit success marker — still high reward
         return 0.85
 
-    # Fast path for clear failure with no feedback available
-    if not USE_FEEDBACK_AGENT_FOR_FAILURES:
+    # # Fast path when FeedbackAgent is disabled — use heuristic
+    # if not USE_FEEDBACK_AGENT_FOR_FAILURES:
+    #     heuristic = HEURISTIC_REWARDS.get(status, 0.1)
+    #     logger.debug(f"⚡ ICRL heuristic reward: status={status} → reward={heuristic}")
+    #     return heuristic
+
+    # Fast path for statuses that FeedbackAgent cannot meaningfully evaluate:
+    # - timeout: task never ran, no trajectory to score
+    # - pending: task hasn't finished
+    # Also used when FeedbackAgent is globally disabled
+    HEURISTIC_ONLY_STATUSES = {"timeout", "pending"}
+    if status in HEURISTIC_ONLY_STATUSES or not USE_FEEDBACK_AGENT_FOR_FAILURES:
         heuristic = HEURISTIC_REWARDS.get(status, 0.1)
         logger.debug(f"⚡ ICRL heuristic reward: status={status} → reward={heuristic}")
         return heuristic
 
-    # Use FeedbackAgent for nuanced failure scoring
+    # Use FeedbackAgent for nuanced failure scoring.
+    # We call evaluate_and_store() (not just evaluate_execution()) so that the
+    # improvements list is persisted to TaskMemory — this feeds back into the
+    # execution agent's hint retrieval on future similar tasks.
     try:
         from agents.feedback_agent import FeedbackAgent
+        from agents.execution_agent.strategies.task_memory import TaskMemory
 
         trajectory = _build_trajectory_from_task_result(task_dict, result_dict)
-        feedback_agent = FeedbackAgent()
 
-        # Run synchronous FeedbackAgent in thread pool to avoid blocking event loop
+        # Build a FeedbackAgent instance with TaskMemory attached so that
+        # evaluate_and_store() can persist improvements automatically.
+        feedback_agent = FeedbackAgent()
+        try:
+            task_memory = TaskMemory()
+            feedback_agent.attach_memory(task_memory)
+        except Exception as _mem_err:
+            # TaskMemory may not be available on all machines (ChromaDB optional).
+            # Degrade gracefully — evaluate_and_store will skip storage if memory is None.
+            logger.debug(f"⚠️ TaskMemory unavailable for FeedbackAgent (non-fatal): {_mem_err}")
+
+        # Run synchronous evaluate_and_store in thread pool to avoid blocking event loop.
+        # evaluate_and_store calls evaluate_execution internally AND persists improvements.
         evaluation = await asyncio.to_thread(
-            feedback_agent.evaluate_execution,
+            feedback_agent.evaluate_and_store,
             goal,
             trajectory,
             user_feedback,
@@ -119,9 +146,21 @@ async def compute_reward(
 
         logger.info(
             f"🎯 ICRL FeedbackAgent reward: {reward:.3f} "
-            f"(success={evaluation.is_success}, "
-            f"status={status})"
+            f"(success={evaluation.is_success}, status={status}, "
+            f"improvements={len(evaluation.improvements)})"
         )
+
+        # Log the reasoning so we can distinguish legitimate 0.0 from a crash
+        if reward == 0.0:
+            logger.info(f"💬 FeedbackAgent reasoning (reward=0.0): {evaluation.reasoning[:200]}")
+
+        # Log improvements for observability
+        if evaluation.improvements:
+            logger.info(
+                f"💡 ICRL improvements stored: "
+                + " | ".join(evaluation.improvements[:3])
+            )
+
         return reward
 
     except Exception as e:
@@ -129,7 +168,6 @@ async def compute_reward(
             f"⚠️ ICRL reward computation failed, using heuristic: {e}"
         )
         return HEURISTIC_REWARDS.get(status, 0.1)
-
 
 def summarize_task_attempt(
     task_dict: Dict[str, Any],

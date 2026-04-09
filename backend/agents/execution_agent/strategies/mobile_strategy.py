@@ -141,13 +141,12 @@ _SIG_VERIFY_THRESHOLD = 0.50
 
 def compute_smart_timeout(goal: str, default: int) -> int:
     g = goal.lower()
-    if any(k in g for k in ("alarm", "schedule", "set time")):  return max(90, default)
-    if any(k in g for k in ("email", "compose", "recipient")):  return max(90, default)
-    if any(k in g for k in ("chrome", "browser", "search", "navigate", "fill",
-                             "pharmacy", "google.com", "type url")):
+    if any(k in g for k in ("alarm", "schedule", "set time")): return max(90, default)
+    if any(k in g for k in ("email", "compose", "recipient")): return max(90, default)
+    if any(k in g for k in ("open", "launch", "start", "navigate")): return max(60, default)
+    if any(k in g for k in ("chrome", "browser", "search", "fill", "pharmacy", "google.com", "type url")):
         return max(90, default)
-    if any(k in g for k in ("search", "find", "look for")):     return max(60, default)
-    return max(30, default)
+    return max(45, default)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -216,7 +215,7 @@ class MobileReActStrategy:
         self._u2_serial = ""
 
         from groq import AsyncGroq
-        self.llm_client = AsyncGroq(api_key=" ")
+        self.llm_client = AsyncGroq(api_key="")
         self.model = "llama-3.3-70b-versatile"
 
         self.current_ui_tree:      Optional[SemanticUITree]     = None
@@ -985,15 +984,17 @@ class MobileReActStrategy:
 
                 # EMAIL SENT DETECTION: compose screen -> inbox transition after click
                 if action_json.get("action_type") == "click":
-                    is_email_goal = (
+                    # Only detect email sent for tasks that are explicitly about sending
+                    is_email_send_task = (
                         "send" in task.ai_prompt.lower()
-                        or "email" in (overall_goal or "").lower()
+                        or ("compose" in task.ai_prompt.lower() and "email" in task.ai_prompt.lower())
+                        or "click the send" in task.ai_prompt.lower()
                     )
                     in_gmail_now = (
                         "gm" in (new_ui.app_package or "").lower()
                         or "gmail" in (new_ui.app_name or "").lower()
                     )
-                    if is_email_goal and in_gmail_now and prev_ui_tree is not None:
+                    if is_email_send_task and in_gmail_now and prev_ui_tree is not None:
                         was_composing = any(
                             "compose" in (e.content_description or "").lower()
                             or "send" in (e.content_description or "").lower()
@@ -1032,10 +1033,14 @@ class MobileReActStrategy:
                 target_app = self._extract_target_app(task.ai_prompt)
                 if (self.last_action_was_click and target_app
                         and not self._target_is_generic_page(target_app)
-                        and len(new_ui.elements) >= 5):
-                    # During launcher navigation (home/app drawer), app verify is expected to fail.
-                    # Skip verification until we're no longer in those transient states.
-                    if new_state in ("home_screen", "app_drawer"):
+                        and len(new_ui.elements) >= 5
+                        and new_state not in ("home_screen", "app_drawer")):
+                    already_verified = self._in_target_app(target_app, new_state)
+                    if already_verified:
+                        logger.debug(f"[T1] App verify skipped — already confirmed in '{target_app}'")
+                    elif self._is_in_time_picker(new_ui):
+                        logger.debug("[T1] App verify skipped — inside time picker")
+                    elif new_state in ("home_screen", "app_drawer"):
                         logger.debug(f"[T1] App verify skipped — still on {new_state} during navigation")
                     else:
                         verification = await self._verify_app_llm(target_app, new_ui)
@@ -1437,6 +1442,24 @@ class MobileReActStrategy:
         if state_ok:
             return state_ok
 
+        # Chrome: address bar already focused → skip click, go straight to type
+        pkg = (ui_tree.app_package or "").lower()
+        if "chrome" in pkg and len(ui_tree.elements) > 100:
+            query = self._extract_chrome_search_query(goal, task)
+            if query:
+                for e in ui_tree.elements:
+                    if e.type == "textfield" and e.focusable:
+                        blob = f"{e.text or ''} {e.hint_text or ''}".lower()
+                        if "search or type" in blob or not (e.text or "").strip():
+                            logger.info(f"[T1] Chrome bar focused → type query '{query[:30]}'")
+                            return {
+                                "thought": f"Chrome address bar ready — type '{query}'",
+                                "action_type": "type",
+                                "element_id": e.element_id,
+                                "text": query,
+                                "clear_first": True,
+                            }
+
         if device_state == "home_screen" and self._is_nav_goal(task.ai_prompt):
             nav_action = self._handle_app_navigation(task.ai_prompt, ui_tree)
             if nav_action:
@@ -1514,14 +1537,44 @@ class MobileReActStrategy:
         gl = (goal or "").lower()
         return any(kw in gl for kw in ("open", "launch", "start", "navigate to"))
 
+    def _extract_chrome_search_query(self, goal: str, task: MobileTaskRequest) -> Optional[str]:
+        """Extract what to search/type from the task goal or web_params."""
+        # Try web_params text first (coordinator puts it there)
+        web_params = (task.extra_params or {}).get("web_params") or {}
+        if isinstance(web_params, dict) and web_params.get("text"):
+            return str(web_params["text"]).strip()
+        
+        # Extract from ai_prompt patterns
+        patterns = [
+            r"type\s+['\"](.+?)['\"]",
+            r"search\s+(?:for\s+)?['\"](.+?)['\"]",
+            r"search\s+(?:for\s+)?(.+?)(?:\s+in|\s+on|\s*$)",
+        ]
+        for p in patterns:
+            m = re.search(p, goal, re.IGNORECASE)
+            if m:
+                q = m.group(1).strip().strip("'\"")
+                if len(q) > 2 and not any(w in q.lower() for w in ("the", "search", "bar", "box")):
+                    return q
+        
+        # Check overall_goal for the search term
+        overall = (task.extra_params or {}).get("overall_goal", "")
+        m = re.search(r"search\s+(?:for\s+)?(.+?)(?:\s+(?:in|on|using)\s+chrome|\s*$)", 
+                      overall, re.IGNORECASE)
+        if m:
+            return m.group(1).strip().strip("'\"")
+        return None
+
     def _handle_app_navigation(self, goal: str, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
         target = self._extract_target_app(goal)
         if not target or self._target_is_generic_page(target):
             return None
 
+        # Always check if app is visible first regardless of phase
         clickable_targets = [
             elem for elem in ui_tree.elements
-            if elem.clickable and target.lower() in f"{elem.text or ''} {elem.content_description or ''}".lower()
+            if elem.clickable and target.lower() in 
+            f"{elem.text or ''} {elem.content_description or ''}".lower()
         ]
         if clickable_targets:
             chosen = clickable_targets[0]
@@ -1535,34 +1588,51 @@ class MobileReActStrategy:
 
         if self._app_drawer_phase == 0:
             self._app_drawer_phase = 1
-            logger.info(f"[T1] Navigation: '{target}' not visible → swipe up to open app drawer")
+            logger.info(f"[T1] Nav phase 1: '{target}' not visible → swipe up to open drawer")
             return {
                 "thought": f"open app drawer to find {target}",
                 "action_type": "swipe",
-                "start_x_percent": 50,
-                "start_y_percent": 92,
-                "end_x_percent": 50,
-                "end_y_percent": 20,
+                "start_x_percent": 50, "start_y_percent": 92,
+                "end_x_percent": 50, "end_y_percent": 20,
                 "duration": 300,
             }
 
         if self._app_drawer_phase == 1:
             self._app_drawer_phase = 2
-            logger.info(f"[T1] Navigation: '{target}' still hidden → scroll app drawer once more")
+            logger.info(f"[T1] Nav phase 2: scroll drawer down to find {target}")
             return {
                 "thought": f"scroll app drawer to find {target}",
                 "action_type": "swipe",
-                "start_x_percent": 50,
-                "start_y_percent": 78,
-                "end_x_percent": 50,
-                "end_y_percent": 30,
+                "start_x_percent": 50, "start_y_percent": 75,
+                "end_x_percent": 50, "end_y_percent": 30,
                 "duration": 350,
             }
 
         if self._app_drawer_phase == 2:
-            self._app_drawer_phase = 0
-            logger.info(f"[T1] Navigation: '{target}' still hidden after 2 swipes → HOME reset")
-            return {"thought": f"reset to home and retry {target}", "action_type": "global_action", "global_action": "HOME"}
+            self._app_drawer_phase = 3
+            logger.info(f"[T1] Nav phase 3: scroll drawer further down")
+            return {
+                "thought": f"scroll app drawer further to find {target}",
+                "action_type": "swipe",
+                "start_x_percent": 50, "start_y_percent": 75,
+                "end_x_percent": 50, "end_y_percent": 25,
+                "duration": 350,
+            }
+
+        if self._app_drawer_phase == 3:
+            self._app_drawer_phase = 4
+            logger.info(f"[T1] Nav phase 4: '{target}' not found → HOME reset, try once more")
+            return {
+                "thought": f"reset to launcher root to retry {target}",
+                "action_type": "global_action",
+                "global_action": "HOME",
+            }
+
+        if self._app_drawer_phase == 4:
+            # Tried everything — hand off to T3 to handle it however it can
+            logger.info(f"[T1] Nav phase 5: giving up T1 nav for '{target}' → T3")
+            self._app_drawer_phase = 0  # reset for next task
+            return None  # T3 takes over
 
         return None
 
@@ -1622,6 +1692,16 @@ Example:
 Thought: The screen shows a "Compose" button. I will click it to start a new email.
 Action: {{"action_type": "click", "element_id": 42}}"""
 
+        # Add navigation scope guard
+        if any(kw in goal.lower() for kw in ("navigate", "open", "launch")):
+            nav_scope = (
+                f"\n🚨 SCOPE GUARD: Your ONLY job this step is: '{goal}'\n"
+                f"Do NOT send emails, type content, or perform actions beyond opening the app.\n"
+                f"Once the app is open, declare complete.\n"
+            )
+        else:
+            nav_scope = ""
+
         user_prompt = (
             f"OVERALL GOAL: {overall_goal}\n"
             f"CURRENT STEP: {goal}\n"
@@ -1631,6 +1711,7 @@ Action: {{"action_type": "click", "element_id": 42}}"""
             + (f"\n{hint_context}"    if hint_context     else "")
             + (f"\n{handoff_context}" if handoff_context  else "")
             + f"\n{blacklist_str}\n"
+            + nav_scope
             + (
                 f"\n⚠️ THIS STEP REQUIRES APP: {app.upper()}\n"
                 f"You are currently on: {self.device_state}\n"
@@ -1821,6 +1902,17 @@ Action: {{"action_type": "click", "element_id": 42}}"""
 
     def _compose_screen_context(self, goal: str) -> str:
         if not self.current_ui_tree: return ""
+        
+        # Only provide compose context if this task is about composing/typing in the email
+        gl = goal.lower()
+        is_compose_task = any(kw in gl for kw in (
+            "compose", "fill", "type", "subject", "body", "recipient", "send", "to"
+        ))
+        # Navigation tasks should NOT get compose screen context
+        is_nav_only = any(kw in gl for kw in ("navigate", "open", "launch")) and not is_compose_task
+        if is_nav_only:
+            return ""
+        
         elements = self.current_ui_tree.elements
         texts    = [(e.text or "").lower() for e in elements]
         has_to   = any(t in ("to", "to:") for t in texts)
@@ -1839,8 +1931,19 @@ Action: {{"action_type": "click", "element_id": 42}}"""
 
     def _format_extra_params(self, extra_params: Dict[str, Any]) -> str:
         parts = []
+        status_phrases = {
+            "task completed", "screen changed", "timed out",
+            "max steps", "completed", "failed",
+        }
         for k, v in extra_params.items():
             if k in _INTERNAL_KEYS or v is None: continue
+
+            if k == "input_content":
+                raw = str(v).strip().lower()
+                if any(phrase in raw for phrase in status_phrases) and len(raw) < 80:
+                    logger.debug(f"[T3] Suppressing status input_content: '{str(v)[:40]}'")
+                    continue
+
             if k == "input_content" and isinstance(v, str) and v.strip().startswith("{"):
                 try:
                     parsed = json.loads(v)
@@ -2158,6 +2261,11 @@ Action: {{"action_type": "click", "element_id": 42}}"""
             elem = None
         if not elem:
             return False
+        class_name = (elem.class_name or "").lower()
+        elem_type = (elem.type or "").lower()
+        if class_name == "android.webkit.webview" or elem_type == "webview":
+            logger.debug(f"[T3] Type verify skipped — WebView element {eid}")
+            return True
         live = (elem.text or "").strip()
         return live == text or text in live
 
@@ -2348,13 +2456,50 @@ Action: {{"action_type": "click", "element_id": 42}}"""
                         cx, cy = self._uia_center(getattr(element, "bounds", None))
                         if cx > 0 or cy > 0:
                             await asyncio.to_thread(device.click, cx, cy)
-                            await asyncio.sleep(0.15)
+                            await asyncio.sleep(0.20)
 
-                await asyncio.to_thread(
-                    device.send_keys,
-                    action.text or "",
-                    clear=bool(action.clear_first),
+                if action.clear_first:
+                    try:
+                        await asyncio.to_thread(
+                            device.send_keys,
+                            action.text or "",
+                            clear=True,
+                        )
+                    except Exception as clear_err:
+                        msg = str(clear_err).lower()
+                        if "clear_text" in msg or "null object" in msg:
+                            logger.info("[UIA2] clear_text failed (WebView?) → select-all fallback")
+                            try:
+                                await asyncio.to_thread(device.press, "ctrl+a")
+                                await asyncio.sleep(0.1)
+                            except Exception:
+                                pass
+                            await asyncio.to_thread(
+                                device.send_keys,
+                                action.text or "",
+                                clear=False,
+                            )
+                        else:
+                            raise
+                else:
+                    await asyncio.to_thread(
+                        device.send_keys,
+                        action.text or "",
+                        clear=False,
+                    )
+
+                is_chrome_type = "chrome" in (
+                    (self.current_ui_tree.app_package or "").lower()
+                    if self.current_ui_tree else ""
                 )
+                if is_chrome_type:
+                    await asyncio.sleep(0.3)
+                    try:
+                        await asyncio.to_thread(device.send_action, "search")
+                        logger.info("[UIA2] Chrome: sent IME action 'search' after typing")
+                    except Exception as send_action_err:
+                        logger.debug(f"[UIA2] Chrome send_action failed: {send_action_err}")
+
                 return ActionResult(
                     action_id=action.action_id,
                     success=True,

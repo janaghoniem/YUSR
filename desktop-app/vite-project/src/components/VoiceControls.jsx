@@ -1,6 +1,15 @@
-// VoiceControls.jsx — Claude-inspired, accessibility-first
-import React, { useState, useRef } from "react";
-import { Mic, Settings, X, Send, Pause, Square, Play } from "lucide-react";
+// VoiceControls.jsx — Claude/ChatGPT-style tall input · sleek voice mode
+import React, { useState, useRef, useEffect } from "react";
+import { Mic, Settings, X, Send, Pause, Square, Play, Paperclip } from "lucide-react";
+
+const PLACEHOLDERS = [
+  "Message AURA...",
+  "Ask me anything...",
+  "What's on your mind?",
+  "Try 'Summarize my recent conversations'",
+  "Need help with your tasks?",
+  "Type 'Set an alarm for 8 AM'"
+];
 
 const VoiceControls = ({
   isRecording,
@@ -16,7 +25,58 @@ const VoiceControls = ({
 }) => {
   const [text, setText] = useState("");
   const [isPaused, setIsPaused] = useState(false);
-  const inputRef = useRef(null);
+  const [placeholderIdx, setPlaceholderIdx] = useState(0);
+  const [placeholderText, setPlaceholderText] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showCursor, setShowCursor] = useState(true);
+  const textareaRef = useRef(null);
+
+  // Blinking cursor
+  useEffect(() => {
+    const cursorInterval = setInterval(() => {
+      setShowCursor((prev) => !prev);
+    }, 500);
+    return () => clearInterval(cursorInterval);
+  }, []);
+
+  // Typing effect for placeholders
+  useEffect(() => {
+    if (!chatMode) return;
+
+    const currentString = PLACEHOLDERS[placeholderIdx];
+    let timeout;
+    
+    if (isDeleting) {
+      if (placeholderText === "") {
+        setIsDeleting(false);
+        setPlaceholderIdx((prev) => (prev + 1) % PLACEHOLDERS.length);
+      } else {
+        timeout = setTimeout(() => {
+          setPlaceholderText(currentString.substring(0, placeholderText.length - 1));
+        }, 40); // Erase speed
+      }
+    } else {
+      if (placeholderText === currentString) {
+        timeout = setTimeout(() => {
+          setIsDeleting(true);
+        }, 2000); // Pause when full
+      } else {
+        timeout = setTimeout(() => {
+          setPlaceholderText(currentString.substring(0, placeholderText.length + 1));
+        }, 60); // Type speed
+      }
+    }
+
+    return () => clearTimeout(timeout);
+  }, [placeholderText, isDeleting, placeholderIdx, chatMode]);
+
+  // Auto-grow textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 320) + "px";
+  }, [text]);
 
   /* ── CHAT (text) MODE ─────────────────────────────────────── */
   if (chatMode) {
@@ -25,22 +85,24 @@ const VoiceControls = ({
       if (!trimmed) return;
       onSendText(trimmed);
       setText("");
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+      }
     };
 
     return (
       <div className="chat-input-wrapper" role="search" aria-label="Text input area">
         <div className="chat-input-container">
+          {/* Multiline textarea that grows */}
           <label htmlFor="chat-text-input" className="sr-only">
             Type a message to AURA
           </label>
-          <input
+          <textarea
             id="chat-text-input"
-            ref={inputRef}
-            type="text"
+            ref={textareaRef}
+            rows={1}
             placeholder={
-              isExecuting
-                ? "Type a command or message…"
-                : "Message AURA…"
+              isExecuting ? "Type a command or message…" : placeholderText + (showCursor ? "|" : "")
             }
             className="chat-input"
             aria-label={
@@ -61,74 +123,74 @@ const VoiceControls = ({
             spellCheck="false"
           />
 
-          <button
-            className="send-btn"
-            onClick={handleSend}
-            aria-label="Send message"
-            disabled={!text.trim()}
-            title="Send"
-          >
-            <Send size={16} aria-hidden="true" />
-          </button>
-
-          <button
-            className="voice-return-btn"
-            onClick={() => setChatMode(false)}
-            aria-label="Switch to voice mode"
-            title="Use voice instead"
-          >
-            <Mic size={16} aria-hidden="true" />
-          </button>
-        </div>
-
-        {/* Interrupt controls in chat mode */}
-        {isExecuting && onInterrupt && (
-          <div
-            className="interrupt-controls-inline"
-            role="group"
-            aria-label="Execution controls"
-          >
-            {!isPaused ? (
+          {/* Bottom toolbar */}
+          <div className="chat-input-toolbar">
+            {/* Left: attach + voice toggle */}
+            <div className="chat-input-left-actions">
+              {/* Left action buttons */}
               <button
-                className="interrupt-btn interrupt-pause"
-                onClick={() => {
-                  onInterrupt("pause");
-                  setIsPaused(true);
-                }}
-                aria-label='Pause execution (or say "AURA pause")'
-                title="Pause"
+                className="voice-return-btn"
+                onClick={() => setChatMode(false)}
+                aria-label="Switch to voice mode"
+                title="Use voice instead"
+                type="button"
               >
-                <Pause size={13} aria-hidden="true" />
-                <span>Pause</span>
+                <Mic size={16} aria-hidden="true" />
               </button>
-            ) : (
-              <button
-                className="interrupt-btn interrupt-resume"
-                onClick={() => {
-                  onInterrupt("resume");
-                  setIsPaused(false);
-                }}
-                aria-label='Resume execution (or say "AURA resume")'
-                title="Resume"
-              >
-                <Play size={13} aria-hidden="true" />
-                <span>Resume</span>
-              </button>
-            )}
+
+              {/* Interrupt inline controls */}
+              {isExecuting && onInterrupt && (
+                <>
+                  {!isPaused ? (
+                    <button
+                      className="interrupt-btn interrupt-pause"
+                      onClick={() => { onInterrupt("pause"); setIsPaused(true); }}
+                      aria-label='Pause execution'
+                      title="Pause"
+                      type="button"
+                    >
+                      <Pause size={12} aria-hidden="true" />
+                      <span>Pause</span>
+                    </button>
+                  ) : (
+                    <button
+                      className="interrupt-btn interrupt-resume"
+                      onClick={() => { onInterrupt("resume"); setIsPaused(false); }}
+                      aria-label='Resume execution'
+                      title="Resume"
+                      type="button"
+                    >
+                      <Play size={12} aria-hidden="true" />
+                      <span>Resume</span>
+                    </button>
+                  )}
+                  <button
+                    className="interrupt-btn interrupt-stop"
+                    onClick={() => { onInterrupt("stop"); setIsPaused(false); }}
+                    aria-label='Stop execution'
+                    title="Stop"
+                    type="button"
+                  >
+                    <Square size={12} aria-hidden="true" />
+                    <span>Stop</span>
+                  </button>
+                </>
+              )}
+            </div>
+
+            {/* Right: send */}
             <button
-              className="interrupt-btn interrupt-stop"
-              onClick={() => {
-                onInterrupt("stop");
-                setIsPaused(false);
-              }}
-              aria-label='Stop execution (or say "AURA stop")'
-              title="Stop"
+              className="send-btn"
+              onClick={handleSend}
+              aria-label="Send message"
+              disabled={!text.trim()}
+              title="Send"
+              type="button"
             >
-              <Square size={13} aria-hidden="true" />
-              <span>Stop</span>
+              <Send size={15} aria-hidden="true" />
             </button>
           </div>
-        )}
+        </div>
       </div>
     );
   }
@@ -144,11 +206,12 @@ const VoiceControls = ({
       {/* Cancel / switch to chat */}
       <button
         className="control-btn"
-        onClick={onCancel}
+        onClick={() => setChatMode(true)}
         aria-label="Switch to chat mode"
         title="Chat mode"
+        type="button"
       >
-        <X size={18} aria-hidden="true" />
+        <X size={17} aria-hidden="true" />
       </button>
 
       {/* Main mic button */}
@@ -162,8 +225,9 @@ const VoiceControls = ({
         }
         aria-pressed={isRecording}
         title={isRecording ? "Stop recording" : "Start recording"}
+        type="button"
       >
-        <Mic size={21} aria-hidden="true" />
+        <Mic size={20} aria-hidden="true" />
       </button>
 
       {/* Settings */}
@@ -172,8 +236,9 @@ const VoiceControls = ({
         onClick={onSettingsClick}
         aria-label="Open settings"
         title="Settings"
+        type="button"
       >
-        <Settings size={18} aria-hidden="true" />
+        <Settings size={17} aria-hidden="true" />
       </button>
 
       {/* Floating interrupt controls during execution */}
@@ -186,35 +251,29 @@ const VoiceControls = ({
           {!isPaused ? (
             <button
               className="interrupt-btn interrupt-pause"
-              onClick={() => {
-                onInterrupt("pause");
-                setIsPaused(true);
-              }}
-              aria-label='Pause execution (or say "AURA pause")'
+              onClick={() => { onInterrupt("pause"); setIsPaused(true); }}
+              aria-label='Pause execution'
+              type="button"
             >
-              <Pause size={14} aria-hidden="true" />
+              <Pause size={13} aria-hidden="true" />
             </button>
           ) : (
             <button
               className="interrupt-btn interrupt-resume"
-              onClick={() => {
-                onInterrupt("resume");
-                setIsPaused(false);
-              }}
-              aria-label='Resume execution (or say "AURA resume")'
+              onClick={() => { onInterrupt("resume"); setIsPaused(false); }}
+              aria-label='Resume execution'
+              type="button"
             >
-              <Play size={14} aria-hidden="true" />
+              <Play size={13} aria-hidden="true" />
             </button>
           )}
           <button
             className="interrupt-btn interrupt-stop"
-            onClick={() => {
-              onInterrupt("stop");
-              setIsPaused(false);
-            }}
-            aria-label='Stop execution (or say "AURA stop")'
+            onClick={() => { onInterrupt("stop"); setIsPaused(false); }}
+            aria-label='Stop execution'
+            type="button"
           >
-            <Square size={14} aria-hidden="true" />
+            <Square size={13} aria-hidden="true" />
           </button>
         </div>
       )}

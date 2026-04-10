@@ -1,132 +1,51 @@
-// OnboardingPage.jsx
-// Voice-first conversational onboarding with speech recognition
-// Asks all questions relevant to AURA: name, role, language, accessibility
-// needs, task preferences, working hours, device, privacy, and account creation.
-
+// OnboardingPage.jsx — Redesigned with AURA Design System v3.1
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import AuraLogo from "../AuraLogo";
 import { Mic, Send, MicOff, CheckCircle2 } from "lucide-react";
 
-const TOTAL_STEPS = 8; // 0=intro, 1=name, 2=role, 3=language, 4=accessibility, 5=tasks, 6=account, 7=done
+const TOTAL_STEPS = 8;
+const SpeechAPI = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
 
-// ── Utility: does browser support speech recognition? ─────────────
-const SpeechAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-// ── Step configs ──────────────────────────────────────────────────
 const STEPS = {
-  1: {
-    q: "What's your name? I'll use it every time we talk.",
-    qAr: "ما اسمك؟ هاستخدمه كل ما نتكلم.",
-    placeholder: "e.g. Layla, Omar, Hana…",
-    field: "name",
-    validate: (v) => v.trim().length >= 1 ? "" : "Please tell me your name.",
-  },
-  2: {
-    q: "What do you do? Knowing your role helps me give better answers.",
-    qAr: "بتشتغل في إيه؟ لو عارف دورك هقدر أساعدك أحسن.",
-    placeholder: "e.g. Software engineer, student, designer…",
-    field: "role",
-    validate: () => "",
-  },
-  3: {
-    q: "Which language do you prefer we speak in?",
-    qAr: "أيه اللغة اللي بتحب نتكلم بيها؟",
-    field: "language",
-    type: "chips",
-    options: ["English", "العربية", "Both / كلهم"],
-  },
-  4: {
-    q: "Do you have any accessibility needs I should know about? This helps me adjust how I communicate.",
-    qAr: "عندك أي احتياجات خاصة لازم أعرفها؟ ده هيساعدني أتكيف معاك.",
-    placeholder: "e.g. vision impaired, prefer slow speech, large text…",
-    field: "accessibility",
-    validate: () => "",
-    skipLabel: "No specific needs",
-    skipLabelAr: "مفيش احتياجات خاصة",
-  },
-  5: {
-    q: "What kinds of tasks do you most want AURA to help with?",
-    qAr: "أيه النوع من المهام اللي محتاج أورا تساعدك فيها أكتر؟",
-    field: "taskTypes",
-    type: "chips-multi",
-    options: [
-      "UI automation",
-      "File management",
-      "Web research",
-      "Writing & drafting",
-      "Summarising documents",
-      "Scheduling & reminders",
-      "Code & dev tasks",
-      "Arabic language tasks",
-    ],
-  },
-  6: {
-    q: "How would you like AURA to talk to you?",
-    qAr: "بتحب أورا تتكلم معاك إزاي؟",
-    field: "tone",
-    type: "chips",
-    options: ["Concise & direct", "Detailed & thorough", "Friendly & casual"],
-    optionsAr: ["مختصر ومباشر", "مفصل وشامل", "ودي وغير رسمي"],
-  },
-  7: {
-    q: "Almost done — create your account to save everything across sessions.",
-    qAr: "تقريبًا خلصنا — أنشئ حسابك عشان نحفظ كل حاجة.",
-    field: "account",
-    type: "account",
-  },
+  1: { q: "What's your name? I'll use it every time we talk.", qAr: "ما اسمك؟ هاستخدمه كل ما نتكلم.", placeholder: "e.g. Layla, Omar, Hana…", field: "name", validate: (v) => v.trim().length >= 1 ? "" : "Please tell me your name." },
+  2: { q: "What do you do? Knowing your role helps me give better answers.", qAr: "بتشتغل في إيه؟ لو عارف دورك هقدر أساعدك أحسن.", placeholder: "e.g. Software engineer, student, designer…", field: "role", validate: () => "" },
+  3: { q: "Which language do you prefer we speak in?", qAr: "أيه اللغة اللي بتحب نتكلم بيها؟", field: "language", type: "chips", options: ["English", "العربية", "Both / كلهم"] },
+  4: { q: "Do you have any accessibility needs I should know about?", qAr: "عندك أي احتياجات خاصة لازم أعرفها؟", placeholder: "e.g. vision impaired, prefer slow speech…", field: "accessibility", validate: () => "", skipLabel: "No specific needs", skipLabelAr: "مفيش احتياجات خاصة" },
+  5: { q: "What kinds of tasks do you most want AURA to help with?", qAr: "أيه النوع من المهام اللي محتاج أورا تساعدك فيها أكتر؟", field: "taskTypes", type: "chips-multi", options: ["UI automation", "File management", "Web research", "Writing & drafting", "Summarising documents", "Scheduling & reminders", "Code & dev tasks", "Arabic language tasks"] },
+  6: { q: "How would you like AURA to talk to you?", qAr: "بتحب أورا تتكلم معاك إزاي؟", field: "tone", type: "chips", options: ["Concise & direct", "Detailed & thorough", "Friendly & casual"], optionsAr: ["مختصر ومباشر", "مفصل وشامل", "ودي وغير رسمي"] },
+  7: { q: "Almost done — create your account to save everything across sessions.", qAr: "تقريبًا خلصنا — أنشئ حسابك عشان نحفظ كل حاجة.", field: "account", type: "account" },
 };
 
-// ── Mini hook: speech recognition ─────────────────────────────────
 function useSpeechInput(lang = "en-US") {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const recognizerRef = useRef(null);
-
   const start = useCallback(() => {
     if (!SpeechAPI) return;
     const r = new SpeechAPI();
-    r.lang = lang;
-    r.interimResults = true;
-    r.continuous = false;
-    r.onresult = (e) => {
-      const t = Array.from(e.results).map((res) => res[0].transcript).join("");
-      setTranscript(t);
-    };
+    r.lang = lang; r.interimResults = true; r.continuous = false;
+    r.onresult = (e) => { const t = Array.from(e.results).map((res) => res[0].transcript).join(""); setTranscript(t); };
     r.onend = () => setIsListening(false);
     r.onerror = () => setIsListening(false);
-    r.start();
-    recognizerRef.current = r;
-    setIsListening(true);
-    setTranscript("");
+    r.start(); recognizerRef.current = r; setIsListening(true); setTranscript("");
   }, [lang]);
-
-  const stop = useCallback(() => {
-    recognizerRef.current?.stop();
-    setIsListening(false);
-  }, []);
-
+  const stop = useCallback(() => { recognizerRef.current?.stop(); setIsListening(false); }, []);
   return { isListening, transcript, start, stop, supported: !!SpeechAPI };
 }
 
-// ── Voice input row (mic + text input + send) ─────────────────────
 const VoiceInputRow = ({ placeholder, value, onChange, onSubmit, lang = "en-US", disabled }) => {
   const { isListening, transcript, start, stop, supported } = useSpeechInput(lang);
-
   useEffect(() => { if (transcript) onChange(transcript); }, [transcript]);
-
-  const handleMic = () => { isListening ? stop() : start(); };
-
   return (
     <div className="ob-mic-row">
       {supported && (
         <button
           type="button"
           className={`ob-mic-btn ${isListening ? "recording" : ""}`}
-          onClick={handleMic}
+          onClick={() => isListening ? stop() : start()}
           aria-label={isListening ? "Stop recording" : "Start voice input"}
           aria-pressed={isListening}
         >
-          {isListening ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}
+          {isListening ? <MicOff size={19} aria-hidden="true" /> : <Mic size={19} aria-hidden="true" />}
         </button>
       )}
       <input
@@ -146,79 +65,43 @@ const VoiceInputRow = ({ placeholder, value, onChange, onSubmit, lang = "en-US",
         disabled={!value.trim() || disabled}
         aria-label="Continue"
       >
-        <Send size={16} aria-hidden="true" />
+        <Send size={15} aria-hidden="true" />
       </button>
     </div>
   );
 };
 
-// ── Main component ─────────────────────────────────────────────────
 const OnboardingPage = ({ userId, onComplete }) => {
   const [step, setStep] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [globalError, setGlobalError] = useState("");
   const [fieldError, setFieldError] = useState("");
   const [inputValue, setInputValue] = useState("");
-
-  const [data, setData] = useState({
-    name: "",
-    role: "",
-    language: "English",
-    accessibility: "",
-    taskTypes: [],
-    tone: "Friendly & casual",
-    username: "",
-    email: "",
-    password: "",
-    confirmPassword: "",
-    voice: "Gacrux",
-  });
-
-  // Shown conversation history in the bubble UI
+  const [data, setData] = useState({ name: "", role: "", language: "English", accessibility: "", taskTypes: [], tone: "Friendly & casual", username: "", email: "", password: "", confirmPassword: "", voice: "Gacrux" });
   const [conversation, setConversation] = useState([]);
 
   const isArabic = data.language === "العربية" || data.language === "Both / كلهم";
   const srLang = isArabic ? "ar-SA" : "en-US";
 
-  const pushAura = useCallback((text) => {
-    setConversation((prev) => [...prev, { role: "aura", text }]);
-  }, []);
+  const pushAura = useCallback((text) => setConversation((prev) => [...prev, { role: "aura", text }]), []);
+  const pushUser = useCallback((text) => setConversation((prev) => [...prev, { role: "user", text }]), []);
 
-  const pushUser = useCallback((text) => {
-    setConversation((prev) => [...prev, { role: "user", text }]);
-  }, []);
-
-  // Ask the current step's question when step changes
   useEffect(() => {
-    if (step === 0) {
-      // Intro handled by its own render
-      window.speechSynthesis.cancel();
-    } else if (STEPS[step]) {
+    if (step === 0) { window.speechSynthesis?.cancel(); }
+    else if (STEPS[step]) {
       const cfg = STEPS[step];
       const q = isArabic && cfg.qAr ? cfg.qAr : cfg.q;
       pushAura(q);
-      
-      // Speak the question and choices
-      window.speechSynthesis.cancel();
-      const utteranceText = [q];
-      if (cfg.options) {
-        const opts = isArabic && cfg.optionsAr ? cfg.optionsAr : cfg.options;
-        utteranceText.push(isArabic ? "The options are:" : "The options are:");
-        utteranceText.push(opts.join(", "));
-      }
-
-      const utterance = new SpeechSynthesisUtterance(utteranceText.join(". "));
-      utterance.lang = srLang;
-      utterance.rate = 0.9;
-      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis?.cancel();
+      const utterance = new SpeechSynthesisUtterance(q);
+      utterance.lang = srLang; utterance.rate = 0.9;
+      window.speechSynthesis?.speak(utterance);
     }
-    setInputValue("");
-    setFieldError("");
+    setInputValue(""); setFieldError("");
   }, [step, isArabic, srLang, pushAura]);
 
   const progress = (step / (TOTAL_STEPS - 1)) * 100;
 
-  // ── Advance from a text/voice answer ──
   const handleTextSubmit = () => {
     const cfg = STEPS[step];
     if (!cfg) return;
@@ -228,118 +111,46 @@ const OnboardingPage = ({ userId, onComplete }) => {
     setData((d) => ({ ...d, [cfg.field]: inputValue }));
     setStep((s) => s + 1);
   };
+  const handleChipSingle = (val) => { const cfg = STEPS[step]; pushUser(val); setData((d) => ({ ...d, [cfg.field]: val })); setStep((s) => s + 1); };
+  const handleChipMultiToggle = (val) => { setData((d) => { const arr = d.taskTypes.includes(val) ? d.taskTypes.filter((x) => x !== val) : [...d.taskTypes, val]; return { ...d, taskTypes: arr }; }); };
+  const handleChipMultiSubmit = () => { pushUser(data.taskTypes.length ? data.taskTypes.join(", ") : "Not sure yet"); setStep((s) => s + 1); };
+  const handleSkip = () => { const cfg = STEPS[step]; const label = isArabic ? cfg.skipLabelAr || "تخطى" : cfg.skipLabel || "Skip"; pushUser(label); setStep((s) => s + 1); };
 
-  // ── Advance from a chip selection ──
-  const handleChipSingle = (val) => {
-    const cfg = STEPS[step];
-    pushUser(val);
-    setData((d) => ({ ...d, [cfg.field]: val }));
-    setStep((s) => s + 1);
-  };
-
-  const handleChipMultiToggle = (val) => {
-    setData((d) => {
-      const arr = d.taskTypes.includes(val)
-        ? d.taskTypes.filter((x) => x !== val)
-        : [...d.taskTypes, val];
-      return { ...d, taskTypes: arr };
-    });
-  };
-
-  const handleChipMultiSubmit = () => {
-    pushUser(data.taskTypes.length ? data.taskTypes.join(", ") : "Not sure yet");
-    setStep((s) => s + 1);
-  };
-
-  const handleSkip = () => {
-    const cfg = STEPS[step];
-    const label = isArabic ? cfg.skipLabelAr || "تخطى" : cfg.skipLabel || "Skip";
-    pushUser(label);
-    setStep((s) => s + 1);
-  };
-
-  // ── Final account creation ──
   const handleCreateAccount = async () => {
     if (!data.username || data.username.length < 3) { setFieldError("Username must be at least 3 characters."); return; }
     if (!data.password || data.password.length < 6) { setFieldError("Password must be at least 6 characters."); return; }
     if (data.password !== data.confirmPassword) { setFieldError("Passwords don't match."); return; }
-    setFieldError("");
-    setIsSubmitting(true);
-    setGlobalError("");
+    setFieldError(""); setIsSubmitting(true); setGlobalError("");
     try {
-      // Get the current userId from localStorage (should be synced)
       const currentUserId = localStorage.getItem("userId");
-      
-      if (!currentUserId) {
-        throw new Error("User ID not found. Please restart onboarding.");
-      }
-      
-      console.log("[OnboardingPage] Submitting account creation for:", {
-        user_id: currentUserId,
-        username: formData.username,
-        has_password: !!formData.password
-      });
-      
-      const payload = {
-        user_id: currentUserId,
-        username: formData.username,
-        email: formData.email || "",
-        password: formData.password,
-        introduction: formData.introduction,
-        preferences: formData.preferences,
-      };
-
+      if (!currentUserId) throw new Error("User ID not found. Please restart onboarding.");
       const res = await fetch("http://localhost:8000/onboarding/create-account", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_id: userId,
+          user_id: currentUserId,
           username: data.username,
           password: data.password,
-          introduction: [
-            data.name && `Name: ${data.name}`,
-            data.role && `Role: ${data.role}`,
-            data.accessibility && `Accessibility needs: ${data.accessibility}`,
-            data.taskTypes.length && `Task preferences: ${data.taskTypes.join(", ")}`,
-            `Tone preference: ${data.tone}`,
-          ].filter(Boolean).join(". "),
-          preferences: {
-            language: data.language,
-            theme: "dark",
-            voice: data.voice,
-            tone: data.tone,
-            taskTypes: data.taskTypes,
-            accessibility: data.accessibility,
-          },
+          introduction: [data.name && `Name: ${data.name}`, data.role && `Role: ${data.role}`, data.accessibility && `Accessibility: ${data.accessibility}`, data.taskTypes.length && `Tasks: ${data.taskTypes.join(", ")}`, `Tone: ${data.tone}`].filter(Boolean).join(". "),
+          preferences: { language: data.language, theme: "dark", voice: data.voice, tone: data.tone, taskTypes: data.taskTypes, accessibility: data.accessibility },
         }),
       });
       if (!res.ok) { const d = await res.json(); throw new Error(d.detail || "Account creation failed"); }
       localStorage.setItem("onboardingComplete", "true");
       localStorage.setItem("userName", data.name || data.username);
       localStorage.setItem("ttsVoice", data.voice);
-      setStep(TOTAL_STEPS - 1); // done screen
-    } catch (err) {
-      setGlobalError(err.message || "Something went wrong. Please try again.");
-    } finally {
-      setIsSubmitting(false);
-    }
+      setStep(TOTAL_STEPS - 1);
+    } catch (err) { setGlobalError(err.message || "Something went wrong. Please try again."); }
+    finally { setIsSubmitting(false); }
   };
 
-  // ── Done ──
   const handleDone = () => {
     onComplete({ username: data.name || data.username, preferences: { language: data.language, voice: data.voice, tone: data.tone } });
   };
 
-  // ──────────────────────────────────────────────────────────────
-  //  RENDER
-  // ──────────────────────────────────────────────────────────────
   return (
     <div className="onboarding-overlay">
-      <div
-        className="onboarding-container"
-        role="main"
-        aria-label="AURA onboarding"
-      >
+      <div className="onboarding-container" role="main" aria-label="AURA onboarding">
         {/* Progress */}
         {step > 0 && step < TOTAL_STEPS - 1 && (
           <>
@@ -350,18 +161,16 @@ const OnboardingPage = ({ userId, onComplete }) => {
           </>
         )}
 
-        {/* ── STEP 0: Animated intro ── */}
+        {/* Step 0 — animated intro */}
         {step === 0 && <IntroStep onNext={() => setStep(1)} />}
 
-        {/* ── STEPS 1–6: Conversational ── */}
+        {/* Steps 1–6 — conversational */}
         {step >= 1 && step <= 6 && (
           <div className="onboarding-step" aria-live="polite">
-            {/* Conversation bubbles */}
+            {/* Chat bubbles */}
             <div className="ob-bubble-wrap" aria-label="Conversation">
               {conversation.map((msg, i) => (
-                <div key={i} className={`ob-bubble ${msg.role}`}>
-                  {msg.text}
-                </div>
+                <div key={i} className={`ob-bubble ${msg.role}`}>{msg.text}</div>
               ))}
             </div>
 
@@ -376,9 +185,9 @@ const OnboardingPage = ({ userId, onComplete }) => {
                     {opts.map((opt, i) => (
                       <button
                         key={i}
-                        className={`pref-chip ${(isArabic && cfg.optionsAr ? cfg.optionsAr[i] === data[cfg.field] : opt === data[cfg.field]) ? "selected" : ""}`}
+                        className={`pref-chip ${cfg.options[i] === data[cfg.field] ? "selected" : ""}`}
                         onClick={() => handleChipSingle(cfg.options[i])}
-                        aria-pressed={(cfg.options[i] === data[cfg.field])}
+                        aria-pressed={cfg.options[i] === data[cfg.field]}
                       >
                         {opt}
                       </button>
@@ -392,21 +201,12 @@ const OnboardingPage = ({ userId, onComplete }) => {
                   <div>
                     <div className="pref-options" role="group" aria-label="Select all that apply">
                       {cfg.options.map((opt) => (
-                        <button
-                          key={opt}
-                          className={`pref-chip ${data.taskTypes.includes(opt) ? "selected" : ""}`}
-                          onClick={() => handleChipMultiToggle(opt)}
-                          aria-pressed={data.taskTypes.includes(opt)}
-                        >
+                        <button key={opt} className={`pref-chip ${data.taskTypes.includes(opt) ? "selected" : ""}`} onClick={() => handleChipMultiToggle(opt)} aria-pressed={data.taskTypes.includes(opt)}>
                           {opt}
                         </button>
                       ))}
                     </div>
-                    <button
-                      className="onboarding-btn primary"
-                      onClick={handleChipMultiSubmit}
-                      style={{ marginTop: "14px" }}
-                    >
+                    <button className="onboarding-btn primary" onClick={handleChipMultiSubmit} style={{ marginTop: "14px" }}>
                       {data.taskTypes.length ? `Continue with ${data.taskTypes.length} selected →` : "Skip for now →"}
                     </button>
                   </div>
@@ -417,16 +217,9 @@ const OnboardingPage = ({ userId, onComplete }) => {
                 return <AccountForm data={data} setData={setData} fieldError={fieldError} setFieldError={setFieldError} onSubmit={handleCreateAccount} isSubmitting={isSubmitting} isArabic={isArabic} srLang={srLang} />;
               }
 
-              // Default: text input
               return (
                 <div>
-                  <VoiceInputRow
-                    placeholder={cfg.placeholder || ""}
-                    value={inputValue}
-                    onChange={setInputValue}
-                    onSubmit={handleTextSubmit}
-                    lang={srLang}
-                  />
+                  <VoiceInputRow placeholder={cfg.placeholder || ""} value={inputValue} onChange={setInputValue} onSubmit={handleTextSubmit} lang={srLang} />
                   {cfg.skipLabel && (
                     <button className="onboarding-btn ghost" onClick={handleSkip} style={{ marginTop: "10px" }}>
                       {isArabic ? cfg.skipLabelAr : cfg.skipLabel}
@@ -441,20 +234,12 @@ const OnboardingPage = ({ userId, onComplete }) => {
           </div>
         )}
 
-        {/* ── STEP 7: Done ── */}
-        {step === TOTAL_STEPS - 1 && (
-          <DoneStep name={data.name || data.username} onDone={handleDone} />
-        )}
+        {/* Step TOTAL_STEPS-1 — done */}
+        {step === TOTAL_STEPS - 1 && <DoneStep name={data.name || data.username} onDone={handleDone} />}
 
-        {/* Back */}
+        {/* Back button */}
         {step > 1 && step < TOTAL_STEPS - 1 && !isSubmitting && (
-          <button
-            className="onboarding-btn ghost back-btn"
-            onClick={() => {
-              setConversation((c) => c.slice(0, -2)); // remove last Q+A pair
-              setStep((s) => s - 1);
-            }}
-          >
+          <button className="onboarding-btn ghost back-btn" onClick={() => { setConversation((c) => c.slice(0, -2)); setStep((s) => s - 1); }}>
             ← Back
           </button>
         )}
@@ -463,7 +248,7 @@ const OnboardingPage = ({ userId, onComplete }) => {
   );
 };
 
-// ── Sub-components ────────────────────────────────────────────────
+/* ── Sub-components ── */
 
 const INTRO_LINES = [
   "Hi there. I'm AURA.",
@@ -478,7 +263,7 @@ function IntroStep({ onNext }) {
 
   useEffect(() => {
     if (visible < INTRO_LINES.length) {
-      const t = setTimeout(() => setVisible((v) => v + 1), 850);
+      const t = setTimeout(() => setVisible((v) => v + 1), 900);
       return () => clearTimeout(t);
     } else {
       const t = setTimeout(() => setDone(true), 400);
@@ -488,7 +273,7 @@ function IntroStep({ onNext }) {
 
   return (
     <div className="onboarding-step step-intro" aria-live="polite">
-      <AuraLogo size={52} color="#FF3D9A" animated={true} aria-label="AURA logo" style={{ marginBottom: 20 }} />
+      <div className="intro-orb" aria-hidden="true" />
       <div className="intro-lines">
         {INTRO_LINES.slice(0, visible).map((line, i) => (
           <p key={i} className={`intro-line ${i === visible - 1 ? "fade-in" : ""}`}>{line}</p>
@@ -503,7 +288,7 @@ function IntroStep({ onNext }) {
   );
 }
 
-function AccountForm({ data, setData, fieldError, setFieldError, onSubmit, isSubmitting, isArabic, srLang }) {
+function AccountForm({ data, setData, fieldError, setFieldError, onSubmit, isSubmitting }) {
   const [checking, setChecking] = useState(false);
   const [usernameAvailable, setUsernameAvailable] = useState(null);
 
@@ -535,7 +320,7 @@ function AccountForm({ data, setData, fieldError, setFieldError, onSubmit, isSub
           />
         </div>
         {checking && <p className="onboarding-hint">Checking…</p>}
-        {usernameAvailable === true && <p className="onboarding-hint success">✓ Available</p>}
+        {usernameAvailable === true  && <p className="onboarding-hint success">✓ Available</p>}
         {usernameAvailable === false && <p className="onboarding-error">✗ Already taken</p>}
       </div>
 
@@ -567,12 +352,7 @@ function AccountForm({ data, setData, fieldError, setFieldError, onSubmit, isSub
 
       {fieldError && <p className="onboarding-error" role="alert">{fieldError}</p>}
 
-      <button
-        className="onboarding-btn primary"
-        onClick={onSubmit}
-        disabled={isSubmitting || usernameAvailable === false}
-        style={{ marginTop: "8px" }}
-      >
+      <button className="onboarding-btn primary" onClick={onSubmit} disabled={isSubmitting || usernameAvailable === false} style={{ marginTop: "8px" }}>
         {isSubmitting ? "Creating account…" : "Create account & start →"}
       </button>
     </div>
@@ -582,19 +362,16 @@ function AccountForm({ data, setData, fieldError, setFieldError, onSubmit, isSub
 function DoneStep({ name, onDone }) {
   return (
     <div className="onboarding-step" style={{ alignItems: "center", textAlign: "center", gap: 16, paddingTop: 8 }} aria-live="polite">
-      <CheckCircle2 size={52} color="#FF3D9A" aria-hidden="true" />
+      <CheckCircle2 size={52} color="var(--blossom-400)" aria-hidden="true" style={{ filter: "drop-shadow(0 0 16px rgba(255,61,154,0.4))" }} />
       <h2 className="onboarding-title" style={{ textAlign: "center" }}>
         You're all set{name ? `, ${name}` : ""}!
       </h2>
       <p className="onboarding-subtitle" style={{ textAlign: "center", marginBottom: 0 }}>
-        AURA knows what you need. Just say <strong style={{ color: "var(--pink-300)" }}>"Hey AURA"</strong> or tap the mic to begin.
+        AURA knows what you need. Just say{" "}
+        <strong style={{ color: "var(--blossom-300)" }}>"Hey AURA"</strong>{" "}
+        or tap the mic to begin.
       </p>
-      <button
-        className="onboarding-btn primary"
-        onClick={onDone}
-        style={{ alignSelf: "center", marginTop: 4 }}
-        autoFocus
-      >
+      <button className="onboarding-btn primary" onClick={onDone} style={{ alignSelf: "center", marginTop: 4 }} autoFocus>
         Start using AURA →
       </button>
     </div>

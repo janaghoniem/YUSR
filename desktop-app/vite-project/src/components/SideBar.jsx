@@ -13,6 +13,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
       >
         <div className="sidebar-top">
           <div className="logo-area">
+            <img src="/aura_icon_colored.png" alt="AURA" style={{ width: 28, height: 28, flexShrink: 0 }} />
             {!collapsed && (
               <span className="logo-wordmark" aria-hidden="true" style={{marginLeft: 10, fontSize: "1.2rem"}}>AURA</span>
             )}

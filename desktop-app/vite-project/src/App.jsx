@@ -8,7 +8,8 @@ import SettingsModal from "./components/SettingsModal";
 import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
 import SplashScreen from "./components/splash/SplashScreen";
-import Calm3DBackground from "./components/Calm3DBackground";
+import BackgroundCanvas from "./components/BackgroundCanvas";
+import BackgroundOverlay from "./components/BackgroundOverlay";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
@@ -18,7 +19,7 @@ function App() {
   const [orbState, setOrbState] = useState("idle");
   const [userMessage, setUserMessage] = useState("");
   const [assistantMessage, setAssistantMessage] = useState("");
-  const [userId] = useState(() => {
+  const [userId, setUserId] = useState(() => {
       const stored = localStorage.getItem("userId");
       if (stored) {
           console.log("[Auth] Using existing user ID:", stored);
@@ -49,7 +50,7 @@ function App() {
   });
   const [clarificationResponseToId, setClarificationResponseToId] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
-  const [chatMode, setChatMode] = useState(false);
+  const [chatMode, setChatMode] = useState(true);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [deviceType, setDeviceType] = useState("desktop");
@@ -376,14 +377,14 @@ function App() {
 
   // Add this after your other useEffects (around line 120-150, before the WebSocket useEffect)
   useEffect(() => {
-    if (authState === "app") {
+    if (!showOnboarding) {
       const storedName = localStorage.getItem("userName");
       if (storedName && storedName !== userName) {
         console.log("[App] Syncing userName after auth change:", storedName);
         setUserName(storedName);
       }
     }
-  }, [authState]);
+  }, [showOnboarding]);
 
   /* ---------- LOAD CHAT LIST ---------- */
   useEffect(() => {
@@ -1014,7 +1015,7 @@ function App() {
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
       localStorage.setItem("onboardingComplete", "true");
-      setAuthState("app");
+      setShowOnboarding(false);
   };
   /* ---------- LOGOUT ---------- */
   // In App.jsx, update the handleLogout function
@@ -1037,7 +1038,7 @@ function App() {
       
       // Reset other states
       setUserName("User");
-      setAuthState("login");
+      setShowOnboarding(true);
       
       console.log("[Auth] Logged out, new user ID generated for next signup:", newUserId);
   };
@@ -1475,10 +1476,14 @@ function App() {
         <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
       ) : (
         <div className={appClassName}>
+          {/* <BackgroundCanvas /> */}
+          <BackgroundOverlay />
+
       {/* ===== Title bar (custom — frameless window) ===== */}
       {executionMode !== "widget" && (
         <div className="titlebar">
           <div className="titlebar-drag">
+            {/* <span className="titlebar-drag-icon" /> */}
             <span className="titlebar-title">AURA</span>
           </div>
           <div className="titlebar-buttons">
@@ -1600,9 +1605,12 @@ function App() {
         currentSessionId={sessionId}
       />
       <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-        <Calm3DBackground />
-
         <div className="main-overlay">
+          {/* Blossom halo — central identity element */}
+          <div className="blossom-halo" aria-hidden="true">
+            <img src="/auro_icon_haze.png" alt="" draggable={false} />
+          </div>
+
           <HeaderContent userName={userName} />
 
           {/* Thinking Indicator */}

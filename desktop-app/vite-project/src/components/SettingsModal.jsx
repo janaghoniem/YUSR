@@ -41,7 +41,15 @@ const SettingsModal = ({
     // Focus close button on mount
     closeBtnRef.current?.focus();
 
-// Load real profile data on mount
+    // Escape closes
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Load real profile data on mount
   useEffect(() => {
     const loadProfile = async () => {
       try {
@@ -61,16 +69,6 @@ const SettingsModal = ({
     };
     loadProfile();
   }, []);
-
-  // ✅ ADD THIS AT THE TOP OF THE FILE (after imports, before component)
-  const API_BASE_URL = "";
-    // Escape closes
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   useEffect(() => {
     if (activeSection === "memory") fetchMemoryStats();

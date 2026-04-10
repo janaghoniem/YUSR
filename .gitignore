@@ -239,3 +239,4 @@ backend/face_recognition_models
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
+conversations.jsonl

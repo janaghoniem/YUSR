@@ -57,9 +57,9 @@ const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "
 
   return (
     <header className="center-content" role="banner" style={{ animation: "fadeUp var(--dur-slow) var(--ease-out)" }}>
-      <p className="greeting" aria-live="polite" aria-atomic="true" style={{ fontSize: "16px", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "8px", fontWeight: "500" }}>
+      <p className="greeting" aria-live="polite" aria-atomic="true" style={{ fontSize: "22px", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "8px", fontWeight: "500" }}>
         {greeting}
-        {currentDate && <span style={{ opacity: 0.5, fontSize: "13px" }}>• {currentDate}</span>}
+        {currentDate && <span style={{ opacity: 0.5, fontSize: "16px" }}>• {currentDate}</span>}
       </p>
       <h1 
         className="headline" 
@@ -70,7 +70,8 @@ const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "
           background: "linear-gradient(135deg, var(--text-primary) 0%, var(--pink-300) 100%)",
           WebkitBackgroundClip: "text",
           WebkitTextFillColor: "transparent",
-          marginBottom: "8px"
+          marginBottom: "12px",
+          marginTop: "4px"
         }}
       >
         {headline}
@@ -79,8 +80,9 @@ const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "
         <p
           className="chat-session-label"
           aria-label={`Current conversation: ${chatTitle}`}
+          style={{ fontSize: "15px" }}
         >
-          <span aria-hidden="true" style={{ color: "var(--pink-400)", fontSize: "8px" }}>●</span>
+          <span aria-hidden="true" style={{ color: "var(--pink-400)", fontSize: "10px" }}>●</span>
           {chatTitle}
         </p>
       )}

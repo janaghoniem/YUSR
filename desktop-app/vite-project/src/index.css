@@ -256,7 +256,7 @@ body {
 /* ── Header ── */
 .center-content { margin-top: auto; margin-bottom: 20px; display: flex; flex-direction: column; align-items: center; text-align: center; }
 .greeting { font-size: 13.5px; color: var(--text-muted); margin-bottom: 10px; }
-.headline { font-size: 30px; font-weight: 500; line-height: 1.25; color: var(--text-primary); letter-spacing: -0.02em; }
+.headline { font-size: 48px; font-weight: 600; line-height: 1.25; color: var(--text-primary); letter-spacing: -0.02em; }
 .chat-session-label { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; display: flex; align-items: center; gap: 6px; }
 
 /* ── Thinking ── */
@@ -686,7 +686,7 @@ body {
 @keyframes fadeUp { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
 
 /* ── Responsive ── */
-@media (max-width: 1024px) { .main-overlay { padding: 52px 44px 28px; } .headline { font-size: 26px; } }
+@media (max-width: 1024px) { .main-overlay { padding: 52px 44px 28px; } .headline { font-size: 38px; } }
 @media (max-width: 768px) {
   .app-root { flex-direction: column; height: auto; min-height: 100vh; }
   .sidebar { position: fixed; top: 0; left: 0; height: 100vh; z-index: 1000; transform: translateX(-100%); transition: transform var(--dur-slow) var(--ease-out); width: 252px !important; min-width: 252px !important; box-shadow: 4px 0 28px rgba(0,0,0,0.5); }
@@ -695,7 +695,7 @@ body {
   .sidebar-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 999; }
   .main-area { width: 100%; margin: 8px; border-radius: var(--r-lg); }
   .main-overlay { padding: 50px 20px 22px; }
-  .headline { font-size: 22px; }
+  .headline { font-size: 36px; }
   .settings-modal { width: 96%; max-height: 88vh; }
   .settings-container { flex-direction: column; }
   .settings-sidebar { width: 100%; border-right: none; border-bottom: 1px solid rgba(255,61,154,0.06); flex-direction: row; padding: 14px; overflow-x: auto; }
@@ -705,7 +705,7 @@ body {
 }
 @media (max-width: 480px) {
   .main-overlay { padding: 46px 14px 18px; }
-  .headline { font-size: 20px; }
+  .headline { font-size: 28px; }
   .onboarding-container { padding: 30px 22px 26px; }
 }
 @media (prefers-reduced-motion: reduce) {

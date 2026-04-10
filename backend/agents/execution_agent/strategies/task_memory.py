@@ -1363,9 +1363,34 @@ class TaskMemory:
             self._client = None
             self._col    = None
 
-        # Auto-populate from dataset if collection is empty
-        if self._col is not None and self._col.count() == 0:
-            self._load_from_jsonl(jsonl_path)
+        # One-time migration: remove preloaded dataset and keep only agent-learned cache.
+        self._maybe_clear_preloaded_dataset()
+
+    def _maybe_clear_preloaded_dataset(self) -> None:
+        """One-time migration: delete preloaded demonstrated records, keep agent-learned entries."""
+        if self._col is None:
+            return
+
+        migration_flag = os.path.join(self._chroma_path, ".agent_only_cache_v1")
+        if os.path.exists(migration_flag):
+            return
+
+        try:
+            probe = self._col.get(where={"demonstrated": {"$eq": 1}}, limit=1)
+            has_preloaded = bool((probe or {}).get("ids"))
+
+            if has_preloaded:
+                logger.info("[CACHE] Clearing pre-loaded dataset — switching to agent-only cache")
+                records = self._col.get(where={"demonstrated": {"$eq": 1}})
+                ids = (records or {}).get("ids") or []
+                if ids:
+                    self._col.delete(ids=ids)
+                    logger.info(f"[CACHE] Cleared {len(ids)} pre-loaded records")
+
+            with open(migration_flag, "w", encoding="utf-8") as f:
+                f.write("ok\n")
+        except Exception as e:
+            logger.warning(f"[CACHE] Migration check failed: {e}")
 
     # ── Embedding ──────────────────────────────────────────────────────────
 
@@ -1774,23 +1799,24 @@ class TaskMemory:
         Keeps it short — the LLM should use it as a guide, not a hard script.
         """
         lines = [
-            "📋 SIMILAR PAST STEPS (hints only — verify elements exist before acting):"
+            "📋 SIMILAR PAST STEPS (for guidance only — find elements on current screen):"
         ]
         for r in recipes[:3]:
-            lines.append(
-                f"\n  Past: \"{r.step_instruction}\"  "
-                f"(sim={r.similarity:.0%}, used {r.success_count}×)"
-            )
-            lines.append(f"  Action: {r.action_type}")
-            if r.selectors:
+            action_desc = r.action_type
+            if r.action_type == "type" and r.typed_value:
+                action_desc = f"type '{(r.typed_value or '')[:30]}'"
+            elif r.action_type == "click" and r.selectors:
                 primary = r.selectors[0]
-                lines.append(
-                    f"  Likely target: element described as '{primary.get('value', '')[:40]}'"
-                )
+                if primary.get("by") in ("text", "content_desc"):
+                    action_desc = f"click element with label '{primary.get('value', '')[:30]}'"
+                else:
+                    action_desc = "click the appropriate on-screen element"
+
+            lines.append(f"\n  • {r.step_instruction[:60]}: {action_desc}")
             if r.direction:
                 lines.append(f"  Direction: {r.direction}")
         lines.append(
-            "\n⚠️  Screen may differ — adapt selectors to what's actually visible."
+            "\n⚠️ Find elements by current TEXT/LABEL; do not assume historical positions or IDs."
         )
         return "\n".join(lines)
 

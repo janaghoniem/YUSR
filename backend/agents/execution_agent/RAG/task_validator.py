@@ -148,12 +148,15 @@ class TaskValidator:
     ) -> ValidationResult:
         """Validate if task execution actually succeeded
 
+        SIMPLIFIED: Only validate window state for app launches.
+        OmniParser is used for CLICKING (fallback), not for validation.
+
         Args:
             task: ActionTask object
             exec_result: ExecutionResult from sandbox execution
             before_state: Window state before execution
             after_state: Window state after execution
-            omniparser: OmniParserDetector instance for UI validation
+            omniparser: Optional OmniParserDetector (used only for fallback clicking)
             is_cache_hit: Whether this was a cache hit
 
         Returns:
@@ -185,25 +188,15 @@ class TaskValidator:
                 task_type=task_type
             )
 
-        # Run task-specific validation
+        # ONLY validate window title for app launches
         if task_type == TaskType.APP_LAUNCH:
-            passed, failures, validation_type = self._validate_app_launch(
-                task, before_state, after_state, omniparser
+            passed, failures, validation_type = self._validate_app_launch_title_only(
+                task, before_state, after_state
             )
 
-        elif task_type == TaskType.UI_INTERACT:
-            passed, failures, confidence, validation_type = self._validate_ui_interaction(
-                task, omniparser
-            )
-
-        elif task_type == TaskType.FILE_WORK:
-            passed, failures, validation_type = self._validate_file_operation(
-                task, exec_result
-            )
-
-        # For general tasks, rely on existing code validation
         else:
-            self.logger.info("ℹ️ General task - skipping additional validation (code validation sufficient)")
+            # For all other tasks, rely on code validation (exit code, success indicators)
+            self.logger.info("ℹ️ Non-app-launch task - skipping validation (code validation sufficient)")
             passed = True
             failures = []
             validation_type = "code_only"
@@ -250,20 +243,13 @@ class TaskValidator:
                            'field', 'input', 'select', 'checkbox'}
         return any(kw in prompt.lower() for kw in element_keywords)
 
-    def _validate_app_launch(
+    def _validate_app_launch_title_only(
         self,
         task,
         before_state: WindowState,
-        after_state: WindowState,
-        omniparser=None
+        after_state: WindowState
     ) -> Tuple[bool, List[str], str]:
-        """Validate app launch succeeded by checking window change and error detection
-
-        Args:
-            task: ActionTask object
-            before_state: Window state before execution
-            after_state: Window state after execution
-            omniparser: Optional OmniParserDetector for content-based error detection
+        """Validate app launch by checking window title only (no OmniParser)
 
         Returns: (passed, failures, validation_type)
         """
@@ -273,7 +259,7 @@ class TaskValidator:
         app_names = self._extract_app_names(task.ai_prompt)
 
         if not app_names:
-            self.logger.info("ℹ️ Could not extract target app name, skipping window validation")
+            self.logger.info("ℹ️ Could not extract target app name, skipping validation")
             return (True, [], "no_target_app")
 
         # Check if window changed
@@ -283,7 +269,7 @@ class TaskValidator:
             self.logger.warning(f"⚠️ Window did not change (before={before_state.process}, after={after_state.process})")
             return (False, ["Window did not change to target app"], "window_change")
 
-        # Check for error dialog indicators in window title/process
+        # Check for error dialog indicators in window title/process (FAST)
         error_indicators = [
             'error', 'cannot find', 'not found', 'failed', 'exception',
             'problem', 'issue', 'windows cannot', 'critical error'

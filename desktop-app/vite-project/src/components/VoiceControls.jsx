@@ -1,6 +1,7 @@
 // VoiceControls.jsx — Claude/ChatGPT-style tall input · sleek voice mode
 import React, { useState, useRef, useEffect } from "react";
 import { Mic, Settings, X, Send, Pause, Square, Play, Paperclip } from "lucide-react";
+import BorderGlow from "./BorderGlow";
 
 const PLACEHOLDERS = [
   "Message AURA...",
@@ -92,7 +93,15 @@ const VoiceControls = ({
 
     return (
       <div className="chat-input-wrapper" role="search" aria-label="Text input area">
-        <div className="chat-input-container">
+        <BorderGlow 
+          style={{ width: '100%', maxWidth: '700px', display: 'flex' }} 
+          className="rounded-2xl" 
+          glowColor="40 80 80" 
+          colors={['#c084fc', '#f472b6', '#38bdf8']}
+          animated={true} 
+          duration={4}
+        >
+        <div className="chat-input-container" style={{ flex: 1, maxWidth: '100%' }}>
           {/* Multiline textarea that grows */}
           <label htmlFor="chat-text-input" className="sr-only">
             Type a message to AURA
@@ -191,6 +200,7 @@ const VoiceControls = ({
             </button>
           </div>
         </div>
+        </BorderGlow>
       </div>
     );
   }

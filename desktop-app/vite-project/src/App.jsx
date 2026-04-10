@@ -10,6 +10,7 @@ import OnboardingPage from "./components/onboarding/OnboardingPage";
 import SplashScreen from "./components/splash/SplashScreen";
 import BackgroundCanvas from "./components/BackgroundCanvas";
 import BackgroundOverlay from "./components/BackgroundOverlay";
+import LiquidEther from "./components/LiquidEther";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
 
@@ -1476,7 +1477,28 @@ function App() {
         <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
       ) : (
         <div className={appClassName}>
-          {/* <BackgroundCanvas /> */}
+          <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, overflow: 'hidden' }}>
+            <LiquidEther
+              colors={[ '#5227FF', '#FF9FFC', '#B19EEF' ]}
+              mouseForce={20}
+              cursorSize={100}
+              isViscous
+              viscous={30}
+              iterationsViscous={32}
+              iterationsPoisson={32}
+              resolution={0.5}
+              isBounce={false}
+              autoDemo
+              autoSpeed={0.5}
+              autoIntensity={2.2}
+              takeoverDuration={0.25}
+              autoResumeDelay={3000}
+              autoRampDuration={0.6}
+              color0="#5227FF"
+              color1="#FF9FFC"
+              color2="#B19EEF"
+            />
+          </div>
           <BackgroundOverlay />
 
       {/* ===== Title bar (custom — frameless window) ===== */}
@@ -1606,11 +1628,6 @@ function App() {
       />
       <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
         <div className="main-overlay">
-          {/* Blossom halo — central identity element */}
-          <div className="blossom-halo" aria-hidden="true">
-            <img src="/auro_icon_haze.png" alt="" draggable={false} />
-          </div>
-
           <HeaderContent userName={userName} />
 
           {/* Thinking Indicator */}

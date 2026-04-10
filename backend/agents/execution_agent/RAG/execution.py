@@ -1202,7 +1202,7 @@ class SandboxExecutionPipeline:
         # imports as a final layer before subprocess execution.
         # Addresses A4 where shutil/os/ctypes ran on host.
         STRIP_IMPORTS = [
-            'shutil', 'pathlib', 'os', 'ctypes',
+            'shutil', 'pathlib', 'ctypes',
             'subprocess', 'winreg', 'socket',
         ]
 

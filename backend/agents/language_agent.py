@@ -1052,14 +1052,27 @@ class LanguageAgent:
         logger.info(f"🔄 Cleared conversation for session {self.session_id}")
 
 
-# Store active agents by session_id
+# Store active agents by agent_key {user_id}_{session_id}
 active_agents: Dict[str, LanguageAgent] = {}
 
 def get_agent_for_session(session_id: str) -> Optional[LanguageAgent]:
+    """Retrieve an active agent purely by session_id suffix."""
     for key, agent in active_agents.items():
         if key.endswith(f"_{session_id}"):
             return agent
     return None
+
+def _get_agent_by_user(user_id: str) -> Optional[LanguageAgent]:
+    """Find the most recently used agent for a user, handling fast mobile session rotation."""
+    # Assuming the most recently created or updated agent is at the end or we just find one.
+    # We will look for an agent that has a pending confirmation in the user's name.
+    fallback_agent = None
+    for key, agent in reversed(active_agents.items()):
+        if key.startswith(f"{user_id}_"):
+            fallback_agent = agent
+            if agent.awaiting_user_response:
+                return agent
+    return fallback_agent
 
 
 async def start_language_agent(broker):
@@ -1071,11 +1084,35 @@ async def start_language_agent(broker):
     def get_or_create_agent(session_id: str, user_id: str) -> LanguageAgent:
         """Get existing agent for session or create new one"""
         agent_key = f"{user_id}_{session_id}"
-        if agent_key not in active_agents:
-            logger.info(f"🆕 Creating new agent for session {session_id}, user {user_id}")
-            active_agents[agent_key] = LanguageAgent(session_id, user_id)
-        else:
+        
+        # If it exactly matches, return it.
+        if agent_key in active_agents:
             logger.info(f"♻️ Reusing existing agent for session {session_id}")
+            return active_agents[agent_key]
+            
+        # The mobile flutter app constantly creates new session IDs on every request,
+        # destroying the pending confirmation context. 
+        # Check if this user already has an active agent pending a response:
+        existing_user_agent = _get_agent_by_user(user_id)
+        if existing_user_agent and existing_user_agent.awaiting_user_response:
+            logger.warning(f"⚠️ Mobile App Session drift detected. User {user_id} rotated session {existing_user_agent.session_id} -> {session_id}. Transferring state.")
+            # Transfer the pending response state to a new agent 
+            # Or instead of creating a new agent, we can just return the old one?
+            # Creating a new agent is safer so we comply with DB session structures.
+            new_agent = LanguageAgent(session_id, user_id)
+            new_agent.awaiting_user_response = existing_user_agent.awaiting_user_response
+            new_agent.preferred_language = existing_user_agent.preferred_language
+            
+            # Clean up old agent
+            old_key = f"{user_id}_{existing_user_agent.session_id}"
+            if old_key in active_agents:
+                del active_agents[old_key]
+                
+            active_agents[agent_key] = new_agent
+            return new_agent
+
+        logger.info(f"🆕 Creating new agent for session {session_id}, user {user_id}")
+        active_agents[agent_key] = LanguageAgent(session_id, user_id)
         return active_agents[agent_key]
 
     async def handle_user_input(message: dict):
@@ -1157,7 +1194,8 @@ async def start_language_agent(broker):
                     agent.awaiting_user_response = None
                     agent.save_memory()
 
-        if not is_security_confirmation:
+        msg_type = getattr(message, 'message_type', None)
+        if not is_security_confirmation and msg_type not in (MessageType.CONFIRMATION_RESPONSE, MessageType.CLARIFICATION_RESPONSE):
             from agents.security.intent_classifier import classify_intent
             intent_result = classify_intent(input_text)
             
@@ -1257,6 +1295,21 @@ async def start_language_agent(broker):
                     }
                 )
                 await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
+
+                # Resolve the WebSocket pending request for the user's confirmation input
+                ws_resolve_msg = AgentMessage(
+                    message_type=MessageType.TASK_RESPONSE,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=message.message_id,
+                    payload={
+                        "status": "processing",
+                        "response": "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding...",
+                        "user_language": agent.preferred_language
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
                 return
 
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
@@ -1479,8 +1532,8 @@ async def start_language_agent(broker):
             )
             await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
 
-    async def handle_execution_request(message):
-        """Handle execution request (task confirmation) from Coordinator."""
+    async def handle_confirmation_request(message):
+        """Handle confirmation request from Coordinator."""
         # Convert to AgentMessage if it's a dict
         if isinstance(message, dict):
             try:
@@ -1488,7 +1541,7 @@ async def start_language_agent(broker):
             except Exception:
                 return
 
-        if message.message_type != MessageType.EXECUTION_REQUEST:
+        if message.message_type != MessageType.CONFIRMATION_REQUEST:
             return
             
         payload_data = message.payload
@@ -1504,18 +1557,37 @@ async def start_language_agent(broker):
             
         agent = get_or_create_agent(session_id, user_id)
         
-        question = ai_prompt
+        is_ar = (agent.preferred_language == "ar")
+        question = "هل يجب أن أكمل؟\n\n" if is_ar else "I have drafted the content. Should I proceed?\n\n"
         if input_content:
-             question += f"\n\nContent:\n{input_content}"
+            try:
+                import json
+                parsed = json.loads(input_content)
+                if isinstance(parsed, dict):
+                    formatted_parts = []
+                    for k, v in parsed.items():
+                        title = k.replace("_", " ").title()
+                        if is_ar and title.upper() == "SUBJECT": title = "الموضوع"
+                        if is_ar and title.upper() == "BODY": title = "الرسالة"
+                        formatted_parts.append(f"{title}: {v}")
+                    
+                    question_hdr = "إليك المسودة. هل يجب المتابعة؟\n\n" if is_ar else "Here is the drafted content. Should I proceed?\n\n"
+                    question = question_hdr + "\n\n".join(formatted_parts)
+                else:
+                    question += f"Draft:\n{input_content}"
+            except Exception:
+                question += f"Content:\n{input_content}"
              
         agent.awaiting_user_response = {
             "type": "task_confirmation",
             "task_id": task_id,
             "original_request": message.response_to
         }
+        # If the mobile app recreates sessions, save immediately so a new session on the next turn can recover this via the DB
+        agent.save_memory()
         
         clarification_msg = AgentMessage(
-            message_type=MessageType.CLARIFICATION_REQUEST,
+            message_type=MessageType.CONFIRMATION_REQUEST,
             sender=AgentType.LANGUAGE,
             receiver=AgentType.LANGUAGE,
             session_id=session_id,
@@ -1528,13 +1600,13 @@ async def start_language_agent(broker):
         await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
         
         ws_msg = AgentMessage(
-            message_type=MessageType.CLARIFICATION_REQUEST,
+            message_type=MessageType.CONFIRMATION_REQUEST,
             sender=AgentType.LANGUAGE,
             receiver=AgentType.LANGUAGE,
             session_id=session_id,
             response_to=message.response_to,
             payload={
-                "ws_type": "clarification_needed",
+                "ws_type": "confirmation_needed",
                 "question": question
             }
         )
@@ -1542,7 +1614,7 @@ async def start_language_agent(broker):
         logger.info(f"🛑 Paused for user task confirmation: {task_id}")
 
     broker.subscribe(Channels.LANGUAGE_INPUT, handle_user_input)
-    broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_execution_request)
+    broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_confirmation_request)
     logger.info("✅ Language Agent started")
 
     while True:

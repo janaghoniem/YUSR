@@ -215,7 +215,7 @@ class MobileReActStrategy:
         self._u2_serial = ""
 
         from groq import AsyncGroq
-        self.llm_client = AsyncGroq(api_key="")
+        self.llm_client = AsyncGroq(api_key=" ")
         self.model = "llama-3.3-70b-versatile"
 
         self.current_ui_tree:      Optional[SemanticUITree]     = None

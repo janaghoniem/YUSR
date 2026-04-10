@@ -665,8 +665,31 @@ Task Description:""")
         prompt_parts.append(query)
         prompt_parts.append("""
 
+CODE STRUCTURE REQUIREMENT:
+Your code MUST be organized as:
+1. A named function that encapsulates the main logic (NOT a bare script)
+2. A __main__ block that calls this function with appropriate parameters
 
-Requirements
+Template:
+```python
+def perform_action(param1, param2, ...):
+    '''Function docstring describing what it does'''
+    try:
+        # Your task logic here
+        return True  # or status/data
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
+
+if __name__ == "__main__":
+    success = perform_action(value1, value2)
+    if success:
+        print("EXECUTION_SUCCESS")
+    else:
+        print("EXECUTION_FAILED")
+```
+
+Requirements:
 
 Execute the task exactly as described, without adding extra steps.
 Prefer the simplest and most reliable execution method.

@@ -276,7 +276,8 @@ class ICRLAttempt:
     reward: float
     result_snippet: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
-
+    # Origin of the failure: "execution" | "decomposition" | "dependency" | "unknown"
+    failure_type: str = "unknown"
     def __repr__(self):
         return f"Attempt {self.attempt_number} (reward={self.reward:.2f}): {self.attempt_summary[:60]}..."
 
@@ -468,13 +469,30 @@ class ICRLBuffer:
         return self.best_reward >= success_threshold
 
     def summary(self) -> str:
-        """Human-readable summary for logging."""
+            """Human-readable summary for logging."""
+            if not self._all_attempts:
+                return "No attempts yet."
+            rewards = [round(a.reward, 3) for a in self._all_attempts]
+            return (
+                f"Total attempts: {len(self._all_attempts)}, "
+                f"rewards: {rewards}, "
+                f"best: {self.best_reward:.3f}, "
+                f"p_keep: {self.p_keep}"
+            )
+
+    def dump(self) -> str:
+        """
+        Full verbose dump of all buffer contents for logging on retry.
+        Shows every attempt with reward, failure type, and summary.
+        """
         if not self._all_attempts:
-            return "No attempts yet."
-        rewards = [round(a.reward, 3) for a in self._all_attempts]
-        return (
-            f"Total attempts: {len(self._all_attempts)}, "
-            f"rewards: {rewards}, "
-            f"best: {self.best_reward:.3f}, "
-            f"p_keep: {self.p_keep}"
-        )
+            return "  (buffer empty)"
+        lines = []
+        for a in self._all_attempts:
+            lines.append(
+                f"  Attempt {a.attempt_number} | reward={a.reward:.3f} | "
+                f"failure_type={a.failure_type} | ts={a.timestamp}\n"
+                f"    summary: {a.attempt_summary[:200]}\n"
+                f"    snippet: {(a.result_snippet or '')[:120]}"
+            )
+        return "\n".join(lines)

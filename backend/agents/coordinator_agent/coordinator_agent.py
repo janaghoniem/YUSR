@@ -1,6 +1,7 @@
 from unittest import result
 import os, uuid, asyncio, json, re
 from dotenv import load_dotenv   
+from langgraph.func import task
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, Field
@@ -22,7 +23,7 @@ from ThinkingStepManager import ThinkingStepManager
 
 # ICRL imports — In-Context Reinforcement Learning (arXiv:2506.06303)
 from agents.ICRL.icrl_buffer import ICRLBuffer
-from agents.ICRL.icrl_reward_bridge import compute_reward, summarize_task_attempt
+from agents.ICRL.icrl_reward_bridge import compute_reward, summarize_task_attempt, classify_failure_type
 from agents.ICRL.icrl_prompt_builder import inject_icrl_into_decomposition_prompt, inject_icrl_into_execution_prompt
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,22 @@ try:
         db_name="yusr_db",
         collection_name="langgraph_checkpoints"
     )
+    # Register custom Pydantic types so LangGraph's msgpack serializer can
+    # deserialize them from checkpoints without warnings or future crashes.
+    # Without this, any checkpoint saved with ActionTask/TaskResult in state
+    # will emit a warning now and raise an error in a future LangGraph version.
+    try:
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+        _serde = checkpointer.serde if hasattr(checkpointer, 'serde') else None
+        if _serde and hasattr(_serde, 'allowed_msgpack_modules'):
+            _mod = "agents.coordinator_agent.coordinator_agent"
+            if _mod not in _serde.allowed_msgpack_modules:
+                _serde.allowed_msgpack_modules.append(_mod)
+                logger.info(f"✅ Registered {_mod} in LangGraph msgpack allowlist")
+    except Exception as _reg_err:
+        logger.debug(f"⚠️ Could not register msgpack modules (non-fatal): {_reg_err}")
     logger.info("✅ Initialized MongoDB checkpointer for LangGraph")
+
     # Clean up any corrupt checkpoints that are missing the 'step' metadata key.
     # These cause a KeyError crash when LangGraph tries to resume the session.
     try:
@@ -2303,18 +2319,11 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            # Store as zero-token preference
-                            pref_mgr.add_preference_zero_token(
-                                pref_obj["preference"],
-                                metadata={
-                                    "category": pref_obj.get("category", "general"),
-                                    "confidence": pref_obj.get("confidence", "medium"),
-                                    "extracted_from": task_summary["original_request"]
-                                }
-                            )
-                            logger.info(f"💾 Stored preference: {pref_obj['preference']}")
-                            
-                            # Also store with regular method in try-except for redundancy
+                            # Use ONLY Mem0's add() path — it runs its own LLM-based
+                            # deduplication against the vector store. The zero_token path
+                            # bypasses Mem0 entirely (raw MongoClient insert) and has no
+                            # similarity check, which caused every preference to be stored
+                            # twice with conflicting IDs that Mem0 couldn't find on update.
                             try:
                                 pref_mgr.add_preference(
                                     pref_obj["preference"],
@@ -2324,8 +2333,9 @@ Extract now:"""
                                         "extracted_from": task_summary["original_request"]
                                     }
                                 )
+                                logger.info(f"💾 Stored preference: {pref_obj['preference']}")
                             except Exception as pref_err:
-                                logger.debug(f"⚠️ Could not store individual preference (regular method): {pref_err}")
+                                logger.debug(f"⚠️ Could not store preference: {pref_err}")
                 
                 apps_used = list(set(
                     t.extra_params.get("app_name", "")
@@ -2347,38 +2357,73 @@ Extract now:"""
                     f"Steps taken: {success_count}."
                 )
                 
-                pref_mgr.add_preference_zero_token(
-                    conversation_context,
-                    metadata={
-                        "category": "conversation_history",
-                        "session_id": session_id,
-                        "timestamp": datetime.now().isoformat(),
-                        "apps_used": apps_used,
-                        "steps": success_count,
-                        "original_request": task_summary["original_request"]
-                    }
-                )
+                # pref_mgr.add_preference_zero_token(
+                #     conversation_context,
+                #     metadata={
+                #         "category": "conversation_history",
+                #         "session_id": session_id,
+                #         "timestamp": datetime.now().isoformat(),
+                #         "apps_used": apps_used,
+                #         "steps": success_count,
+                #         "original_request": task_summary["original_request"]
+                #     }
+                # )
                 
-                # Also store simpler version with regular method in try-except
-                try:
-                    conversation_context_simple = f"User requested: {task_summary['original_request']}. "
-                    conversation_context_simple += f"Successfully completed {success_count} steps."
+                # # Also store simpler version with regular method in try-except
+                # try:
+                #     conversation_context_simple = f"User requested: {task_summary['original_request']}. "
+                #     conversation_context_simple += f"Successfully completed {success_count} steps."
                     
+                #     pref_mgr.add_preference(
+                #         conversation_context_simple,
+                #         metadata={
+                #             "category": "conversation_history",
+                #             "session_id": session_id,
+                #             "timestamp": datetime.now().isoformat()
+                #         }
+                #     )
+                #     logger.info(f"💾 Stored conversation context")
+                # except Exception as ctx_err:
+                #     logger.debug(f"⚠️ Could not store conversation context (regular method): {ctx_err}")
+                
+                # Single write via Mem0's dedup-aware path only
+                try:
                     pref_mgr.add_preference(
-                        conversation_context_simple,
+                        conversation_context,
                         metadata={
                             "category": "conversation_history",
                             "session_id": session_id,
-                            "timestamp": datetime.now().isoformat()
+                            "timestamp": datetime.now().isoformat(),
+                            "apps_used": apps_used,
+                            "steps": success_count,
+                            "original_request": task_summary["original_request"]
                         }
                     )
                     logger.info(f"💾 Stored conversation context")
                 except Exception as ctx_err:
-                    logger.debug(f"⚠️ Could not store conversation context (regular method): {ctx_err}")
-                
+                    logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
             except Exception as e:
                 logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
         
+        # ── Pattern Learning: detect behavioral patterns from history ─────────
+        # Runs after every fully successful task. Patterns are stored in Mem0
+        # under category="learned_pattern" and surface in the next request's
+        # decomposition prompt via get_relevant_preferences(), giving the
+        # coordinator a head start on tasks the user repeats frequently.
+        # This is the bridge between pattern_learner and the ICRL loop:
+        # better priors → better first-round plans → fewer ICRL retries needed.
+        if success_count == total_count and total_count > 0:
+            try:
+                from agents.coordinator_agent.memory.pattern_learner import run_pattern_learning
+                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                _pl_mgr = get_preference_manager(user_id)
+                _new_patterns = run_pattern_learning(user_id, _pl_mgr)
+                if _new_patterns:
+                    logger.info(f"🧠 Pattern learner stored {_new_patterns} new/updated patterns for {user_id}")
+            except Exception as _pl_err:
+                logger.debug(f"⚠️ Pattern learning failed (non-fatal): {_pl_err}")
+        # ─────────────────────────────────────────────────────────────────────
+
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
 
@@ -2473,6 +2518,34 @@ Extract now:"""
                 logger.info("🔄 ICRL: Skipping plan retry due to decomposition error")
                 return {**current_state, "_icrl_plan_round": icrl_round}
 
+            # ── Guard: only retry decomposition if failure was decomposition-related ──
+            # If all failures were execution errors (bad selectors, timeouts, pyautogui
+            # crashes), re-decomposing produces the same plan and wastes an API call.
+            # Only retry when at least one task failed due to wrong decomposition or
+            # broken dependency chains.
+            failed_tasks_this_round = [
+                t for t in current_state.get("tasks", [])
+                if results.get(t.task_id) and results[t.task_id].status == "failed"
+            ]
+            failure_types_this_round = set()
+            for ft in failed_tasks_this_round:
+                ft_result = results[ft.task_id]
+                failure_types_this_round.add(
+                    classify_failure_type(ft.model_dump(), ft_result.model_dump())
+                )
+
+            # If every failure is a pure execution error, skip re-decomposition
+            DECOMP_RETRYABLE_TYPES = {"decomposition", "dependency", "unknown"}
+            has_retryable_failure = bool(
+                failure_types_this_round & DECOMP_RETRYABLE_TYPES
+            )
+            if not has_retryable_failure and failure_types_this_round:
+                logger.info(
+                    f"🔄 ICRL: Skipping plan retry — all failures are execution-level "
+                    f"({failure_types_this_round}), re-decomposing would not help"
+                )
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
             # ── Plan failed — attempt retry ───────────────────────────────────
             new_icrl_round = icrl_round + 1
             logger.info(
@@ -2529,6 +2602,23 @@ Extract now:"""
             logger.info(
                 f"✅ ICRL: New plan generated ({len(new_tasks)} tasks) for round {new_icrl_round}"
             )
+            # Log the full new decomposition so you can see what changed
+            try:
+                new_tasks_dump = [t.model_dump() if hasattr(t, 'model_dump') else t for t in new_tasks]
+                logger.info(
+                    f"📋 ICRL Retry Round {new_icrl_round} — New Decomposition:\n"
+                    + "\n".join(
+                        f"  [{i+1}] {t.get('task_id')} | agent={t.get('target_agent')} | "
+                        f"context={t.get('context')} | prompt={t.get('ai_prompt', '')[:80]}"
+                        for i, t in enumerate(new_tasks_dump)
+                    )
+                )
+                logger.info(
+                    f"📋 ICRL Plan Buffer state BEFORE executing round {new_icrl_round}:\n"
+                    f"{plan_buffer.dump()}"
+                )
+            except Exception as _log_err:
+                logger.debug(f"ICRL decomposition log failed (non-fatal): {_log_err}")
 
             task_queue.reset()
             task_queue.add_to_current(new_tasks)
@@ -2544,6 +2634,45 @@ Extract now:"""
             }
             executed_state = await execute_tasks(exec_state)
             current_state = executed_state
+
+            # ── Update plan buffer with this retry's result ───────────────────
+            # Without this, the LLM sees the same buffer on round N+1 as round N.
+            retry_results = executed_state.get("results", {})
+            retry_success = sum(1 for r in retry_results.values() if r.status == "success")
+            retry_total = len(retry_results)
+            retry_reward = retry_success / max(retry_total, 1)
+
+            tasks_summary = "; ".join(
+                t.ai_prompt[:60] for t in new_tasks
+            )
+            # Classify plan failure type from the failed tasks in this retry
+            failed_tasks_in_retry = [
+                t for t in new_tasks
+                if retry_results.get(t.task_id) and retry_results[t.task_id].status == "failed"
+            ]
+            plan_failure_type = "unknown"
+            if failed_tasks_in_retry:
+                ft = classify_failure_type(
+                    failed_tasks_in_retry[0].model_dump(),
+                    retry_results[failed_tasks_in_retry[0].task_id].model_dump(),
+                )
+                plan_failure_type = ft
+
+            new_attempt = plan_buffer.add(
+                attempt_summary=f"[Round {new_icrl_round}] Plan with {retry_total} tasks: {tasks_summary}",
+                reward=retry_reward,
+                result_snippet=f"{retry_success}/{retry_total} tasks succeeded",
+            )
+            new_attempt.failure_type = plan_failure_type
+
+            logger.info(
+                f"📊 ICRL plan buffer updated after retry round {new_icrl_round}: "
+                f"reward={retry_reward:.3f}, failure_type={plan_failure_type}"
+            )
+            logger.info(
+                f"📋 ICRL plan buffer full state after round {new_icrl_round}:\n"
+                f"{plan_buffer.dump()}"
+            )
             # Loop back to check if this new result meets the threshold
 
     def route_after_execution(state: Dict) -> str:
@@ -2739,15 +2868,21 @@ async def execute_single_task(
                     result_dict=result_dict,
                 )
                 attempt_summary = summarize_task_attempt(task_dict, result_dict)
-                icrl_buffer.add(
+                failure_type = classify_failure_type(task_dict, result_dict)
+                new_attempt = icrl_buffer.add(
                     attempt_summary=attempt_summary,
                     reward=reward,
                     result_snippet=str(content or "")[:200],
                 )
+                new_attempt.failure_type = failure_type
                 logger.info(
                     f"📊 ICRL recorded: task={task.task_id}, "
-                    f"reward={reward:.3f}, "
+                    f"reward={reward:.3f}, failure_type={failure_type}, "
                     f"buffer={icrl_buffer.summary()}"
+                )
+                logger.debug(
+                    f"📋 ICRL buffer full state for task={task.task_id}:\n"
+                    f"{icrl_buffer.dump()}"
                 )
             except Exception as _icrl_err:
                 logger.warning(f"⚠️ ICRL recording failed (non-fatal): {_icrl_err}")

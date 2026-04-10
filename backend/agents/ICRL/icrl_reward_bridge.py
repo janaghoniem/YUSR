@@ -169,6 +169,101 @@ async def compute_reward(
         )
         return HEURISTIC_REWARDS.get(status, 0.1)
 
+# ── Strings your execution layer actually emits ───────────────────────────────
+# Sourced from: LocalSandbox, ExecutionValidator, coordinator_agent.py error paths
+
+# These appear in result.error or result.content when the EXECUTION layer failed
+# (the plan was structurally correct, but the automation/subprocess failed)
+_EXECUTION_ERROR_SIGNALS = [
+    # From LocalSandbox subprocess runner (execution.py)
+    "execution timeout after",          # LocalSandbox timeout
+    "execution timeout",                # ExecutionValidator
+    "non-zero exit code",               # ExecutionValidator
+    "code reported failure",            # ExecutionValidator: FAILED: found in stdout
+    "no success indicator found",       # ExecutionValidator: EXECUTION_SUCCESS missing
+    "error indicator found in stderr",  # ExecutionValidator
+    "security validation failed",       # SecurityValidator blocked the code
+    "blocked import",                   # SecurityValidator AST check
+    "blocked builtin",                  # SecurityValidator AST check
+    "blocked method call",              # SecurityValidator AST check
+    "mobile execution error",           # mobile_action_handler in coordinator
+    "task timeout",                     # asyncio.TimeoutError in execute_single_task
+    # Python runtime errors that come through as stderr/content
+    "syntaxerror",
+    "nameerror",
+    "attributeerror",
+    "typeerror",
+    "indexerror",
+    "keyerror",
+    "runtimeerror",
+    "zerodivisionerror",
+    "importerror",
+    "modulenotfounderror",
+    "filenotfounderror",
+    "permissionerror",
+    "valueerror",
+    "traceback (most recent call last)",
+    "execution_failed",                 # printed by generated code on failure
+]
+
+# These appear when the COORDINATOR / PLAN was wrong
+# (wrong task ordering, missing steps, wrong dependency chain)
+_DECOMPOSITION_ERROR_SIGNALS = [
+    "dependency failed",                # exact string set by coordinator_agent.py
+    "dependency output was empty",      # coordinator: upstream reasoning task empty
+    "all contexts exhausted",           # RAGWithSandbox: no RAG context matched task
+    "no code generated",               # RAGWithSandbox: RAG returned nothing
+    "planning error",                   # coordinator plan_error field
+    "task planning error",              # coordinator send_feedback fallback text
+]
+
+
+def classify_failure_type(
+    task_dict: Dict[str, Any],
+    result_dict: Dict[str, Any],
+) -> str:
+    """
+    Classify whether a failure originated from:
+    - "execution"     → the plan structure was fine, but the subprocess/automation failed
+    - "decomposition" → the coordinator generated the wrong plan (bad deps, wrong order)
+    - "dependency"    → an upstream task failed and skipped this task
+    - "success"       → not a failure
+    - "unknown"       → cannot classify
+
+    Uses only strings that your actual system emits (verified from execution.py,
+    coordinator_agent.py, and LocalSandbox/ExecutionValidator error paths).
+    """
+    status = result_dict.get("status", "")
+
+    if status == "success":
+        return "success"
+
+    error = str(result_dict.get("error", "")).lower()
+    content = str(result_dict.get("content", "")).lower()
+    combined = error + " " + content
+
+    # Dependency chain: coordinator sets this exact string
+    if "dependency failed" in combined:
+        return "dependency"
+
+    # Check decomposition signals first (more specific / higher priority)
+    for signal in _DECOMPOSITION_ERROR_SIGNALS:
+        if signal in combined:
+            return "decomposition"
+
+    # Check execution signals
+    for signal in _EXECUTION_ERROR_SIGNALS:
+        if signal in combined:
+            return "execution"
+
+    # Fallback: action tasks with unclassified failures lean execution
+    # (reasoning/language failures that aren't classified are "unknown")
+    if task_dict.get("target_agent") == "action" and status == "failed":
+        return "execution"
+
+    return "unknown"
+
+
 def summarize_task_attempt(
     task_dict: Dict[str, Any],
     result_dict: Dict[str, Any],
@@ -176,7 +271,7 @@ def summarize_task_attempt(
     """
     Build a concise human-readable summary of a task attempt.
     This is what the LLM sees in the ICRL context block.
-    
+
     Kept short on purpose — the LLM doesn't need full details,
     just enough to distinguish this attempt from others.
     """
@@ -184,8 +279,9 @@ def summarize_task_attempt(
     status = result_dict.get("status", "unknown")
     error = result_dict.get("error", "")
     content_preview = str(result_dict.get("content", ""))[:100]
+    failure_type = classify_failure_type(task_dict, result_dict)
 
-    parts = [f"Task: {prompt}", f"Status: {status}"]
+    parts = [f"Task: {prompt}", f"Status: {status}", f"FailureType: {failure_type}"]
     if error:
         parts.append(f"Error: {error[:100]}")
     elif content_preview:

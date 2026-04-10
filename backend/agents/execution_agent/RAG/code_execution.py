@@ -144,6 +144,11 @@ class CoordinatorRAGBridge:
         self.omniparser = None
         self.last_file_path = None  # Tracks active file across sequential tasks
 
+        # Initialize task validator for post-execution validation
+        from agents.execution_agent.RAG.task_validator import TaskValidator, WindowState
+        self.validator = TaskValidator()
+        self.window_state_class = WindowState
+
     #added by shahd for omniparser
     def _detect_element_coordinates(self, element_description: str) -> Optional[tuple]:
         """
@@ -238,79 +243,73 @@ class CoordinatorRAGBridge:
 
     def _extract_element_description(self, task: ActionTask, error_msg: str) -> Optional[str]:
         """
-        FIXED: Extract UI element from task prompt - prioritize app/section names
-        
+        Extract UI element from task prompt - handle both capitalized and lowercase names
+
         Examples:
-        - "Navigate to gaming section" → "Gaming"
-        - "Click on Settings icon" → "Settings"
+        - "Click on the join button in Zoom" → "join button"
+        - "Click the Send button" → "send button"
+        - "Navigate to gaming section" → "gaming"
         - "Open YouTube app" → "YouTube"
         """
         prompt = task.ai_prompt.lower()
-        
+
         # Skip OmniParser for app launch tasks
         app_launch_keywords = ['open', 'launch', 'start', 'run']
         is_app_launch = any(keyword in prompt.split()[:2] for keyword in app_launch_keywords)
-        
+
         if is_app_launch:
             logger.info(f"⏭️ Skipping OmniParser - this is an app launch task")
             return None
-        
+
         # ═══════════════════════════════════════════════════════════════════
-        # CRITICAL FIX: Extract target element, NOT navigation verbs
+        # Strategy 1: Extract from "click on/the X [location]" patterns
+        # Handle both lowercase and capitalized: "join button" or "Send Button"
         # ═══════════════════════════════════════════════════════════════════
-        
-        # Strategy 1: Look for "X section/tab/menu" patterns
-        section_patterns = [
-            r'(?:to|the)\s+([a-z]+)\s+(?:section|tab|menu|page)',  # "to gaming section"
-            r'([a-z]+)\s+(?:section|tab|menu|page)',               # "gaming section"
+
+        click_patterns = [
+            # "click on the join button in Zoom" → "join button"
+            r'click\s+on\s+(?:the\s+)?([a-z]+(?:\s+[a-z]+)*?)(?:\s+(?:in|at|from|for)\s|\s*$)',
+            # "click the send button" → "send button"
+            r'click\s+(?:the\s+)?([a-z]+(?:\s+[a-z]+)*?)(?:\s+(?:in|at|from|for)\s|\s*$)',
+            # "tap/press the X" → "X"
+            r'(?:tap|press)\s+(?:on\s+)?(?:the\s+)?([a-z]+(?:\s+[a-z]+)*?)(?:\s+(?:in|at|from|for)\s|\s*$)',
         ]
-        
+
+        for pattern in click_patterns:
+            match = re.search(pattern, prompt)
+            if match:
+                element_text = match.group(1).strip()
+
+                # Filter out common action words
+                stopwords = {'the', 'a', 'an', 'on', 'in', 'at'}
+                if element_text not in stopwords:
+                    logger.info(f"📝 Extracted from click pattern: '{element_text}'")
+                    return element_text
+
+        # Strategy 2: Look for "X section/tab/menu" patterns
+        section_patterns = [
+            r'(?:to|the)\s+([a-z]+)\s+(?:section|tab|menu|page)',
+            r'([a-z]+)\s+(?:section|tab|menu|page)',
+        ]
+
         for pattern in section_patterns:
             match = re.search(pattern, prompt)
             if match:
-                element_text = match.group(1).capitalize()
+                element_text = match.group(1).strip()
                 logger.info(f"📝 Extracted from section pattern: '{element_text}'")
                 return element_text
-        
-        # Strategy 2: Look for "click [on] X" patterns (skip verbs)
-        click_patterns = [
-            r'click\s+(?:on\s+)?(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-            r'tap\s+(?:on\s+)?(?:the\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)',
-        ]
-        
-        navigation_verbs = {'Navigate', 'Open', 'Go', 'Close', 'Switch', 'Move'}
-        
-        for pattern in click_patterns:
-            match = re.search(pattern, task.ai_prompt)  # Use original case
-            if match:
-                element_text = match.group(1).strip()
-                
-                # ✅ FIX: Skip navigation verbs, get NEXT word instead
-                if element_text in navigation_verbs:
-                    logger.info(f"⚠️ Skipped verb '{element_text}', looking for actual target...")
-                    # Try to get the word after "to" or next capitalized word
-                    after_verb = task.ai_prompt[match.end():].strip()
-                    # Pattern: "Navigate to Gaming" → extract "Gaming"
-                    next_match = re.search(r'(?:to|the)\s+([A-Z][a-z]+)', after_verb)
-                    if next_match:
-                        element_text = next_match.group(1)
-                        logger.info(f"📝 Extracted target after verb: '{element_text}'")
-                        return element_text
-                else:
-                    logger.info(f"📝 Extracted element name: '{element_text}'")
-                    return element_text
-        
-        # Strategy 3: Look for capitalized words (skip common verbs)
+
+        # Strategy 3: Look for capitalized words (last resort)
         capital_words = re.findall(r'\b[A-Z][a-z]+\b', task.ai_prompt)
         if capital_words:
-            stopwords = {'Click', 'Open', 'The', 'In', 'Microsoft', 'Store', 'On', 
-                        'Navigate', 'Go', 'To', 'Close', 'Switch'}
+            stopwords = {'Click', 'Open', 'The', 'In', 'Microsoft', 'Store', 'On',
+                        'Navigate', 'Go', 'To', 'Close', 'Switch', 'Tap', 'Press'}
             filtered = [w for w in capital_words if w not in stopwords]
             if filtered:
                 element_text = filtered[0]
                 logger.info(f"📝 Extracted from capitalized words: '{element_text}'")
                 return element_text
-        
+
         # If nothing found, skip OmniParser
         logger.warning(f"⚠️ Could not extract UI element - skipping OmniParser")
         return None
@@ -440,6 +439,160 @@ class CoordinatorRAGBridge:
         # If no __main__, return as-is
         return full_code
 
+    async def _attempt_omniparser_fallback(self, task: ActionTask, error_context: str) -> Optional[TaskResult]:
+        """
+        Attempt OmniParser fallback when UI element detection is needed
+
+        Args:
+            task: The ActionTask to process
+            error_context: Error message from execution failure
+
+        Returns:
+            TaskResult if fallback succeeds, None if fallback fails or not applicable
+        """
+        try:
+            # Extract what to look for
+            element_desc = self._extract_element_description(task, error_context)
+
+            if element_desc is None:
+                logger.info("⏭️ Skipping OmniParser - not a UI interaction task")
+                return None
+            elif not element_desc:
+                logger.info("⏭️ Could not extract element description")
+                return None
+
+            # Try to detect coordinates
+            logger.info(f"🎯 Attempting OmniParser detection for: '{element_desc}'")
+            coords = self._detect_element_coordinates(element_desc)
+
+            if not coords:
+                logger.warning(f"❌ OmniParser couldn't find: '{element_desc}'")
+                return None
+
+            logger.info(f"✅ OmniParser found element at {coords}!")
+
+            # Generate new code with exact coordinates
+            new_code = self._regenerate_code_with_coordinates(
+                task, coords, element_desc
+            )
+
+            # Execute the new code
+            logger.info("🔄 Executing OmniParser-assisted code...")
+            logger.debug(f"Generated code:\n{new_code}")
+
+            exec_result = self.sandbox.execute_code(
+                code=new_code,
+                use_docker=False,
+                retry_on_failure=False
+            )
+
+            if exec_result.validation_passed and exec_result.security_passed:
+                logger.info(f"✅✅✅ Task succeeded with OmniParser assistance!")
+
+                # Parse [FILE]: from stdout
+                if exec_result.stdout:
+                    for line in exec_result.stdout.splitlines():
+                        if line.startswith('[FILE]:'):
+                            self.last_file_path = line[7:].strip()
+                            logger.info(f"[FILE CONTEXT] Captured: {self.last_file_path}")
+                            break
+
+                return self.adapter.execution_result_to_task_result(task, exec_result)
+            else:
+                logger.warning("⚠️ OmniParser-assisted code also failed")
+                logger.debug(f"OmniParser execution stdout: {exec_result.stdout}")
+                logger.debug(f"OmniParser execution stderr: {exec_result.stderr}")
+                return None
+
+        except Exception as e:
+            logger.warning(f"⚠️ OmniParser fallback error: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def _execute_click_task_with_omniparser(self, task: ActionTask) -> TaskResult:
+        """Execute click tasks using OmniParser for element detection
+
+        For tasks like "Click the Send button", use OmniParser to:
+        1. Find the button coordinates
+        2. Generate code to click those exact coordinates
+        3. Execute and return result
+        """
+        try:
+            logger.info(f"🎯 Executing click task with OmniParser: {task.ai_prompt}")
+
+            # Initialize OmniParser if needed
+            if self.omniparser is None:
+                logger.info("🔄 Initializing OmniParser...")
+                from agents.execution_agent.fallback.omniparser_detector import OmniParserDetector
+                import logging as logging_module
+                omni_logger = logging_module.getLogger("OmniParser")
+                self.omniparser = OmniParserDetector(omni_logger)
+                logger.info("✅ OmniParser ready")
+
+            # Extract what element to click
+            element_desc = self._extract_element_description(task, task.ai_prompt)
+
+            if not element_desc:
+                logger.warning("⚠️ Could not extract element description from task")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error="Could not determine what to click"
+                )
+
+            logger.info(f"🔍 Finding element: '{element_desc}'")
+
+            # Use OmniParser to find coordinates
+            coords = self._detect_element_coordinates(element_desc)
+
+            if not coords:
+                logger.warning(f"❌ OmniParser could not find: '{element_desc}'")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=f"Element not found: {element_desc}"
+                )
+
+            logger.info(f"✅ Found element at coordinates: {coords}")
+
+            # Generate code to click those coordinates
+            click_code = self._regenerate_code_with_coordinates(task, coords, element_desc)
+
+            logger.info(f"🔧 Executing click code at {coords}...")
+            logger.debug(f"Generated code:\n{click_code}")
+
+            # Execute the code
+            exec_result = self.sandbox.execute_code(
+                code=click_code,
+                use_docker=False,
+                retry_on_failure=False
+            )
+
+            # Return result
+            if exec_result.validation_passed and exec_result.security_passed:
+                logger.info(f"✅ Click task succeeded!")
+                return self.adapter.execution_result_to_task_result(task, exec_result)
+            else:
+                logger.warning(f"⚠️ Click execution failed")
+                logger.debug(f"Stdout: {exec_result.stdout}")
+                logger.debug(f"Stderr: {exec_result.stderr}")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=f"Click failed: {', '.join(exec_result.validation_errors)}"
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Click task exception: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return TaskResult(
+                task_id=task.task_id,
+                status="failed",
+                error=str(e)
+            )
+
     async def execute_action_task(self, task: ActionTask, max_retries: int = 3, enable_cache: bool = False) -> TaskResult:
         logger.info(f"🖥️ Processing DESKTOP task {task.task_id}: {task.ai_prompt[:50]}...")
 
@@ -453,12 +606,30 @@ class CoordinatorRAGBridge:
             )
 
         # ========================================================================
+        # FAST PATH: CLICK TASKS - Use OmniParser directly (no guessing)
+        # ========================================================================
+        is_click_task = any(
+            keyword in task.ai_prompt.lower()
+            for keyword in ['click', 'tap', 'press', 'select', 'button']
+        )
+
+        if is_click_task:
+            logger.info("🖱️ Click task detected - using OmniParser for direct clicking")
+            return await self._execute_click_task_with_omniparser(task)
+
+        # ========================================================================
         # STEP 0A: ROUTE TASK TO MODULE (word/excel/powerpoint/general)
         # ========================================================================
         from agents.execution_agent.RAG.module_router import ModuleRouter
         router = ModuleRouter()
         module = router.route_task(task.ai_prompt)
         logger.info(f"[ROUTING] Task routed to module: '{module}'")
+
+        # ========================================================================
+        # CAPTURE WINDOW STATE FOR TASK VALIDATION
+        # ========================================================================
+        before_state = self.window_state_class.capture()
+        logger.debug(f"📸 Captured initial window state: {before_state.process}")
 
         # Build enhanced query for RAG
         rag_query = self.adapter.build_rag_query(task)
@@ -582,6 +753,35 @@ class CoordinatorRAGBridge:
                                         logger.info(f"[FILE CONTEXT] Captured: {self.last_file_path}")
                                         break
 
+                            # ============================================================
+                            # Validate cache hit execution (validate only on failures)
+                            # ============================================================
+                            if not (exec_result.validation_passed and exec_result.security_passed):
+                                after_state = self.window_state_class.capture()
+                                task_validation = self.validator.validate_execution(
+                                    task=task,
+                                    exec_result=exec_result,
+                                    before_state=before_state,
+                                    after_state=after_state,
+                                    omniparser=self.omniparser,
+                                    is_cache_hit=True
+                                )
+
+                                if not task_validation.passed and task_validation.should_trigger_fallback:
+                                    logger.warning(f"⚠️ Cache hit validation failed, attempting OmniParser fallback...")
+                                    fallback_result = await self._attempt_omniparser_fallback(task, "Cache hit validation failed")
+                                    if fallback_result:
+                                        return fallback_result
+
+                                # If task validation failed (even without fallback), return failure
+                                if not task_validation.passed:
+                                    logger.error(f"❌ Cache hit task validation failed: {task_validation.failures}")
+                                    return TaskResult(
+                                        task_id=task.task_id,
+                                        status="failed",
+                                        error=f"Task validation failed: {'; '.join(task_validation.failures)}"
+                                    )
+
                             return self.adapter.execution_result_to_task_result(task, exec_result)
 
                         except Exception as e:
@@ -612,7 +812,7 @@ class CoordinatorRAGBridge:
 
         try:
             active_window = gw.getActiveWindow()
-            
+
             if active_window:
                 screen_state = {
                     'active_window': active_window.title,
@@ -628,7 +828,7 @@ class CoordinatorRAGBridge:
                     'controls': []
                 }
                 logger.info("🪟 No active window, using Desktop")
-                
+
         except Exception as e:
             logger.warning(f"⚠️ Could not get active window: {e}")
             # Fallback
@@ -637,7 +837,7 @@ class CoordinatorRAGBridge:
                 'process': 'Unknown',
                 'controls': []
             }
-                
+
         attempt = 0
         error_context = ""
         start_context_index = 0
@@ -678,7 +878,7 @@ class CoordinatorRAGBridge:
                 
                 logger.info(f"✅ Generated {len(generated_code)} chars of code")
                 logger.debug(f"Generated code preview: {generated_code[:200]}...")
-                
+
                 # Step 2: Execute in LOCAL sandbox
                 logger.info(f"🔧 Executing code in local sandbox...")
                 exec_result = self.sandbox.execute_code(
@@ -686,7 +886,41 @@ class CoordinatorRAGBridge:
                     use_docker=False,
                     retry_on_failure=False
                 )
-                
+
+                # ========================================================================
+                # NEW: Post-Execution Task Validation
+                # ========================================================================
+                # Capture window state AFTER execution
+                after_state = self.window_state_class.capture()
+                logger.debug(f"📸 Captured window state after execution: {after_state.process}")
+
+                # Validate task succeeded (beyond code-level validation)
+                task_validation = self.validator.validate_execution(
+                    task=task,
+                    exec_result=exec_result,
+                    before_state=before_state,
+                    after_state=after_state,
+                    omniparser=self.omniparser,
+                    is_cache_hit=False  # This is full RAG execution, not cache hit
+                )
+
+                # Check if validation failed and should trigger OmniParser fallback
+                if not task_validation.passed and task_validation.should_trigger_fallback:
+                    logger.warning(f"⚠️ Task validation failed but OmniParser-eligible. Attempting fallback...")
+                    fallback_result = await self._attempt_omniparser_fallback(task, error_context)
+                    if fallback_result:
+                        return fallback_result
+                    # If fallback fails or returns None, continue to normal failure handling below
+
+                # NEW: If task validation failed and we can't fallback, return failure immediately
+                if not task_validation.passed:
+                    logger.error(f"❌ Task validation failed (non-recoverable): {task_validation.failures}")
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error=f"Task validation failed: {'; '.join(task_validation.failures)}"
+                    )
+
                 # Step 3: Check execution result
                 if exec_result.validation_passed and exec_result.security_passed:
                     logger.info(f"✅ Task {task.task_id} completed successfully")

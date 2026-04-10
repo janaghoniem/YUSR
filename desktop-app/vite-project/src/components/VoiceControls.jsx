@@ -207,13 +207,29 @@ const VoiceControls = ({
 
   /* ── VOICE MODE ───────────────────────────────────────────── */
   return (
-    <div
-      className={`voice-controls ${isRecording ? "recording" : ""}`}
-      role="region"
-      aria-label="Voice controls"
-      aria-live="polite"
-    >
-      {/* Cancel / switch to chat */}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', marginTop: 'auto' }}>
+      <BorderGlow 
+        className={`rounded-full ${isRecording ? "recording" : ""}`}
+        style={{ 
+          width: 'fit-content', 
+          display: 'flex', 
+          borderRadius: '9999px',
+          alignSelf: 'center'
+        }}
+        glowColor={isRecording ? "330 100 60" : "40 80 80"}
+        colors={isRecording ? ['#ff4d6d', '#ff758c', '#ff8fa3'] : ['#c084fc', '#f472b6', '#38bdf8']}
+        backgroundColor="transparent"
+        animated={true} 
+        duration={isRecording ? 2 : 4}
+      >
+        <div
+          className={`voice-controls ${isRecording ? "recording" : ""}`}
+          role="region"
+          aria-label="Voice controls"
+          aria-live="polite"
+          style={{ marginTop: 0, alignSelf: 'center', backgroundColor: 'rgba(25,20,15,0.72)', backdropFilter: 'blur(28px)', WebkitBackdropFilter: 'blur(28px)' }}
+        >
+          {/* Cancel / switch to chat */}
       <button
         className="control-btn"
         onClick={() => setChatMode(true)}
@@ -287,6 +303,8 @@ const VoiceControls = ({
           </button>
         </div>
       )}
+        </div>
+      </BorderGlow>
     </div>
   );
 };

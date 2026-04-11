@@ -1,6 +1,7 @@
 // components/FaceCapture.jsx
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
+import { ArrowLeft } from 'lucide-react';
 import ShinyText from './onboarding/ShinyText';
 import screenReader from '../utils/ScreenReader';
 
@@ -199,6 +200,41 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
           ? "Look at the camera. We'll capture your face for secure login."
           : "Look at the camera to verify your identity."}
       </p>
+
+      {/* Back button (matching OnboardingPage styling, prominent edge positioning) */}
+      <button
+        onClick={onCancel}
+        className="onboarding-back-btn tooltip-trigger"
+        aria-label="Go back to login screen"
+        style={{
+          position: "absolute",
+          top: "40px", // Below titlebar matches OnboardingPage
+          left: "24px",
+          zIndex: 100,
+          background: "rgba(255, 61, 154, 0.15)",
+          border: "1px solid rgba(255, 61, 154, 0.3)",
+          borderRadius: "50%",
+          width: "44px",
+          height: "44px",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          color: "var(--blossom-300)",
+          cursor: "pointer",
+          backdropFilter: "blur(8px)",
+          transition: "all 0.2s ease"
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "rgba(255, 61, 154, 0.25)";
+          e.currentTarget.style.transform = "scale(1.05)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "rgba(255, 61, 154, 0.15)";
+          e.currentTarget.style.transform = "scale(1)";
+        }}
+      >
+        <ArrowLeft size={20} />
+      </button>
       
       <div className={`camera-wrapper ${capturing ? "capturing" : ""}`}>
         {!preview ? (

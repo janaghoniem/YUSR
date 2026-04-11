@@ -262,7 +262,21 @@ class _FaceScanScreenState extends State<FaceScanScreen>
                                             ],
                                           ),
                                         )
-                                      : CameraPreview(_cameraController!),
+                                      : FittedBox(
+                                          fit: BoxFit.cover,
+                                          child: SizedBox(
+                                            width: _cameraController!
+                                                .value
+                                                .previewSize!
+                                                .height,
+                                            height: _cameraController!
+                                                .value
+                                                .previewSize!
+                                                .width,
+                                            child: CameraPreview(
+                                                _cameraController!),
+                                          ),
+                                        ),
                             ),
                           ),
                         ],

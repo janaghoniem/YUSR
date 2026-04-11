@@ -245,6 +245,20 @@ class _AutomationDemoState extends State<AutomationDemo>
   bool _showSettings = false;
   int _activeSettingsSection = 0; // 0: Profile, 1: Memory
 
+  // Chat history
+  List<Map<String, dynamic>> _chats = [];
+  bool _chatsLoading = false;
+
+  // Chat viewer modal
+  String? _viewingSessionId;
+  String? _viewingTitle;
+  List<Map<String, dynamic>> _viewingMessages = [];
+  bool _viewingLoading = false;
+  // Profile settings controllers
+  late TextEditingController _usernameSettingsCtrl;
+  late TextEditingController _emailSettingsCtrl;
+  bool _profileSaving = false;
+  String? _profileSaveStatus;
   final TextEditingController _textCtrl = TextEditingController();
   String _responseText = '';
   String _transcribedText = '';
@@ -266,7 +280,11 @@ class _AutomationDemoState extends State<AutomationDemo>
         ? 'flutter_${DateTime.now().millisecondsSinceEpoch}'
         : widget.sessionId;
     _userName = widget.username.isNotEmpty ? widget.username : 'User';
+    _usernameSettingsCtrl = TextEditingController(text: _userName);
+    _emailSettingsCtrl = TextEditingController();
     _setupMethodChannelListener();
+    _loadChats();
+    _loadProfile();
     _checkServiceStatus();
     _registerWithBackend();
     _startActionServer();
@@ -526,6 +544,104 @@ class _AutomationDemoState extends State<AutomationDemo>
     }
   }
 
+  Future<void> _openChatViewer(String sessionId, String title) async {
+    setState(() {
+      _viewingSessionId = sessionId;
+      _viewingTitle = title;
+      _viewingMessages = [];
+      _viewingLoading = true;
+    });
+    try {
+      final r = await http.get(
+        Uri.parse(
+            '${DeviceManager.backendUrl}/chat-messages/$sessionId?user_id=$_activeUserId'),
+      );
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        setState(() {
+          _viewingMessages =
+              List<Map<String, dynamic>>.from(data['messages'] ?? []);
+        });
+      }
+    } catch (_) {}
+    setState(() => _viewingLoading = false);
+  }
+
+  Future<void> _loadChats() async {
+    setState(() => _chatsLoading = true);
+    try {
+      final r = await http.get(
+        Uri.parse('${DeviceManager.backendUrl}/chats/$_activeUserId'),
+      );
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        setState(() {
+          _chats = List<Map<String, dynamic>>.from(data['chats'] ?? []);
+        });
+      }
+    } catch (_) {}
+    setState(() => _chatsLoading = false);
+  }
+
+  Future<void> _deleteChat(String sessionId) async {
+    try {
+      final r = await http.delete(
+        Uri.parse(
+            '${DeviceManager.backendUrl}/chats/$sessionId?user_id=$_activeUserId'),
+      );
+      if (r.statusCode == 200) {
+        setState(() {
+          _chats.removeWhere((c) => c['session_id'] == sessionId);
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _loadProfile() async {
+    try {
+      final r = await http.get(
+        Uri.parse(
+            '${DeviceManager.backendUrl}/user/profile?user_id=$_activeUserId'),
+      );
+      if (r.statusCode == 200) {
+        final data = jsonDecode(r.body) as Map<String, dynamic>;
+        _usernameSettingsCtrl.text = data['username'] ?? _userName;
+        _emailSettingsCtrl.text = data['email'] ?? '';
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveProfile() async {
+    setState(() {
+      _profileSaving = true;
+      _profileSaveStatus = null;
+    });
+    try {
+      final r = await http.put(
+        Uri.parse('${DeviceManager.backendUrl}/user/profile'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'user_id': _activeUserId,
+          'username': _usernameSettingsCtrl.text.trim(),
+          'email': _emailSettingsCtrl.text.trim(),
+        }),
+      );
+      if (r.statusCode == 200) {
+        setState(() {
+          _userName = _usernameSettingsCtrl.text.trim();
+          _profileSaveStatus = '✓ Saved';
+        });
+      } else {
+        final err = jsonDecode(r.body);
+        setState(() => _profileSaveStatus =
+            err['detail'] ?? 'Save failed');
+      }
+    } catch (e) {
+      setState(() => _profileSaveStatus = 'Error: $e');
+    }
+    setState(() => _profileSaving = false);
+  }
+
   String _greeting() {
     final h = DateTime.now().hour;
     if (h >= 5 && h < 9) return 'Rise and shine, $_userName!';
@@ -539,6 +655,8 @@ class _AutomationDemoState extends State<AutomationDemo>
   @override
   void dispose() {
     _textCtrl.dispose();
+    _usernameSettingsCtrl.dispose();
+    _emailSettingsCtrl.dispose();
     _actionServer?.close();
     _pulseCtrl.dispose();
     _thinkCtrl.dispose();
@@ -576,6 +694,7 @@ class _AutomationDemoState extends State<AutomationDemo>
 
             _buildSidebar(),
             if (_showSettings) _buildSettingsModal(),
+            if (_viewingSessionId != null) _buildChatViewerModal(),
           ],
         ),
       ),
@@ -1197,7 +1316,7 @@ class _AutomationDemoState extends State<AutomationDemo>
 
   // ── Sidebar ────────────────────────────────────────────────────────────────
 
-  Widget _buildSidebar() {
+Widget _buildSidebar() {
     return Stack(
       children: [
         if (_isSidebarOpen)
@@ -1227,6 +1346,7 @@ class _AutomationDemoState extends State<AutomationDemo>
                 child: SafeArea(
                   child: Column(
                     children: [
+                      // ── Header ─────────────────────────────────────────
                       Padding(
                         padding: const EdgeInsets.all(20),
                         child: Row(
@@ -1234,52 +1354,206 @@ class _AutomationDemoState extends State<AutomationDemo>
                           children: [
                             Text(
                               'AURA',
-                              style: _f(
-                                Colors.white,
-                                weight: FontWeight.w600,
-                                size: 17,
-                                spacing: 4,
-                              ),
+                              style: _f(Colors.white,
+                                  weight: FontWeight.w600,
+                                  size: 17,
+                                  spacing: 4),
                             ),
                             GestureDetector(
-                              onTap:
-                                  () => setState(() => _isSidebarOpen = false),
-                              child: Icon(
-                                Icons.close_rounded,
-                                color: Colors.white.withOpacity(0.6),
-                                size: 20,
-                              ),
+                              onTap: () =>
+                                  setState(() => _isSidebarOpen = false),
+                              child: Icon(Icons.close_rounded,
+                                  color: Colors.white.withOpacity(0.6),
+                                  size: 20),
                             ),
                           ],
                         ),
                       ),
+
+                      // ── New Chat button ────────────────────────────────
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: GestureDetector(
-                          onTap:
-                              () => setState(() {
-                                _responseText = '';
-                                _transcribedText = '';
-                                _textCtrl.clear();
-                                _chatMode = false;
-                                _isSidebarOpen = false;
-                              }),
-                          child: _sidebarRow(Icons.edit_square, 'New chat'),
+                          onTap: () async {
+                            final ts =
+                                DateTime.now().millisecondsSinceEpoch;
+                            final newSession =
+                                'session_${_activeUserId}_$ts';
+                            final r = await http.post(
+                              Uri.parse(
+                                  '${DeviceManager.backendUrl}/onboarding/session/create'),
+                              headers: {
+                                'Content-Type': 'application/json'
+                              },
+                              body: jsonEncode(
+                                  {'user_id': _activeUserId}),
+                            ).catchError((_) => http.Response('', 500));
+                            final sid = r.statusCode == 200
+                                ? (jsonDecode(r.body)['session_id']
+                                        as String? ??
+                                    newSession)
+                                : newSession;
+                            setState(() {
+                              _activeSessionId = sid;
+                              _responseText = '';
+                              _transcribedText = '';
+                              _textCtrl.clear();
+                              _chatMode = true;
+                              _isSidebarOpen = false;
+                            });
+                            _loadChats();
+                          },
+                          child: _sidebarRow(
+                              Icons.edit_square, 'New chat'),
                         ),
                       ),
-                      const Spacer(),
+
+                      const SizedBox(height: 12),
+
+                      // ── Recent chats label ─────────────────────────────
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 20, vertical: 4),
+                        child: Row(
+                          mainAxisAlignment:
+                              MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text('Recent chats',
+                                style: _f(AuraTheme.textSecondary,
+                                    size: 11,
+                                    weight: FontWeight.w600)),
+                            if (_chatsLoading)
+                              const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 1.5,
+                                      color: AuraTheme.pink400)),
+                          ],
+                        ),
+                      ),
+
+                      // ── Chat list ──────────────────────────────────────
+                      Expanded(
+                        child: _chats.isEmpty && !_chatsLoading
+                            ? Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 20, vertical: 8),
+                                child: Text('No chats yet',
+                                    style: _f(AuraTheme.textDisabled,
+                                        size: 12)),
+                              )
+                            : ListView.builder(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 0),
+                                itemCount: _chats.length,
+                                itemBuilder: (ctx, i) {
+                                  final chat = _chats[i];
+                                  final sid =
+                                      chat['session_id'] as String;
+                                  final title =
+                                      chat['title'] as String? ??
+                                          'Chat';
+                                  final isActive =
+                                      sid == _activeSessionId;
+                                  return Container(
+                                    margin: const EdgeInsets.only(
+                                        bottom: 4),
+                                    decoration: BoxDecoration(
+                                      color: isActive
+                                          ? AuraTheme.pink500
+                                              .withOpacity(0.15)
+                                          : Colors.transparent,
+                                      borderRadius:
+                                          BorderRadius.circular(10),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        // Tap to switch to this chat
+                                        Expanded(
+                                          child: GestureDetector(
+                                            onTap: () {
+                                              setState(() {
+                                                _activeSessionId = sid;
+                                                _responseText = '';
+                                                _transcribedText = '';
+                                                _textCtrl.clear();
+                                                _chatMode = true;
+                                                _isSidebarOpen = false;
+                                              });
+                                            },
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 12,
+                                                      vertical: 10),
+                                              child: Text(
+                                                title,
+                                                style: _f(
+                                                  isActive
+                                                      ? Colors.white
+                                                      : Colors.white
+                                                          .withOpacity(
+                                                              0.75),
+                                                  size: 13,
+                                                  weight: isActive
+                                                      ? FontWeight.w600
+                                                      : FontWeight.w400,
+                                                ),
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        // Eye button
+                                        GestureDetector(
+                                          onTap: () =>
+                                              _openChatViewer(sid, title),
+                                          child: Padding(
+                                            padding:
+                                                const EdgeInsets.all(8),
+                                            child: Icon(
+                                              Icons.remove_red_eye_outlined,
+                                              size: 16,
+                                              color: Colors.white
+                                                  .withOpacity(0.35),
+                                            ),
+                                          ),
+                                        ),
+                                        // Delete button
+                                        GestureDetector(
+                                          onTap: () =>
+                                              _deleteChat(sid),
+                                          child: Padding(
+                                            padding:
+                                                const EdgeInsets.all(8),
+                                            child: Icon(
+                                              Icons.delete_outline_rounded,
+                                              size: 16,
+                                              color: Colors.white
+                                                  .withOpacity(0.35),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+
+                      // ── Settings button ────────────────────────────────
                       Padding(
                         padding: const EdgeInsets.all(16),
                         child: GestureDetector(
-                          onTap:
-                              () => setState(() {
-                                _showSettings = true;
-                                _isSidebarOpen = false;
-                              }),
+                          onTap: () => setState(() {
+                            _showSettings = true;
+                            _isSidebarOpen = false;
+                          }),
                           child: _sidebarRow(
-                            Icons.settings_rounded,
-                            'Settings',
-                          ),
+                              Icons.settings_rounded, 'Settings'),
                         ),
                       ),
                     ],
@@ -1292,7 +1566,6 @@ class _AutomationDemoState extends State<AutomationDemo>
       ],
     );
   }
-
   Widget _sidebarRow(IconData icon, String label) => AnimatedContainer(
     duration: const Duration(milliseconds: 200),
     padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
@@ -1316,6 +1589,146 @@ class _AutomationDemoState extends State<AutomationDemo>
       ],
     ),
   );
+
+// ── Chat viewer modal ──────────────────────────────────────────────────────
+
+  Widget _buildChatViewerModal() {
+    return Stack(
+      children: [
+        // Dim backdrop — tap outside to close
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: () => setState(() => _viewingSessionId = null),
+            child: Container(color: Colors.black.withOpacity(0.6)),
+          ),
+        ),
+        Center(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(24),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.92,
+                height: MediaQuery.of(context).size.height * 0.85,
+                decoration: BoxDecoration(
+                  color: AuraTheme.bgSurface.withOpacity(0.6),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                      color: Colors.white.withOpacity(0.1), width: 1.5),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 30,
+                      spreadRadius: -5,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  children: [
+                    // Header
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _viewingTitle ?? 'Chat',
+                              style: _f(Colors.white,
+                                  size: 16, weight: FontWeight.w600),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () =>
+                                setState(() => _viewingSessionId = null),
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.05),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(Icons.close_rounded,
+                                  color: Colors.white, size: 18),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    Divider(
+                        color: Colors.white.withOpacity(0.07), height: 1),
+
+                    // Body
+                    Expanded(
+                      child: _viewingLoading
+                          ? const Center(
+                              child: CircularProgressIndicator(
+                                  color: AuraTheme.pink400))
+                          : _viewingMessages.isEmpty
+                              ? Center(
+                                  child: Text('No messages',
+                                      style: _f(AuraTheme.textSecondary,
+                                          size: 14)))
+                              : ListView.builder(
+                                  padding: const EdgeInsets.fromLTRB(
+                                      16, 16, 16, 24),
+                                  itemCount: _viewingMessages.length,
+                                  itemBuilder: (ctx, i) {
+                                    final msg = _viewingMessages[i];
+                                    final isUser =
+                                        msg['role'] == 'user';
+                                    final content =
+                                        msg['content'] as String? ?? '';
+                                    return Align(
+                                      alignment: isUser
+                                          ? Alignment.centerRight
+                                          : Alignment.centerLeft,
+                                      child: Container(
+                                        margin: EdgeInsets.only(
+                                          top: 6,
+                                          bottom: 2,
+                                          left: isUser ? 48 : 0,
+                                          right: isUser ? 0 : 48,
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 14, vertical: 10),
+                                        decoration: BoxDecoration(
+                                          color: isUser
+                                              ? AuraTheme.pink500
+                                                  .withOpacity(0.85)
+                                              : Colors.white
+                                                  .withOpacity(0.08),
+                                          borderRadius: BorderRadius.only(
+                                            topLeft:
+                                                const Radius.circular(16),
+                                            topRight:
+                                                const Radius.circular(16),
+                                            bottomLeft: Radius.circular(
+                                                isUser ? 16 : 4),
+                                            bottomRight: Radius.circular(
+                                                isUser ? 4 : 16),
+                                          ),
+                                        ),
+                                        child: Text(
+                                          content,
+                                          style: _f(Colors.white,
+                                              size: 13, height: 1.45),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
   // ── Settings modal ─────────────────────────────────────────────────────────
 
@@ -1484,15 +1897,75 @@ class _AutomationDemoState extends State<AutomationDemo>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSettingsInput('Username', _userName),
+          // Username editable
+          Text('Username',
+              style: _f(AuraTheme.textSecondary,
+                  size: 13, weight: FontWeight.w500)),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.3),
+              borderRadius: BorderRadius.circular(12),
+              border:
+                  Border.all(color: Colors.white.withOpacity(0.08)),
+            ),
+            child: TextField(
+              controller: _usernameSettingsCtrl,
+              style: _f(Colors.white, size: 14),
+              decoration: InputDecoration(
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 14),
+                border: InputBorder.none,
+                hintText: 'Username',
+                hintStyle: _f(AuraTheme.textDisabled, size: 14),
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
-          _buildSettingsInput('Email', 'user@example.com'),
-          const SizedBox(height: 16),
-          _buildSettingsDropdown('Theme', 'Dark'),
-          const SizedBox(height: 16),
-          _buildSettingsDropdown('Voice', 'Gacrux'),
+          // Email editable
+          Text('Email',
+              style: _f(AuraTheme.textSecondary,
+                  size: 13, weight: FontWeight.w500)),
+          const SizedBox(height: 8),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.3),
+              borderRadius: BorderRadius.circular(12),
+              border:
+                  Border.all(color: Colors.white.withOpacity(0.08)),
+            ),
+            child: TextField(
+              controller: _emailSettingsCtrl,
+              style: _f(Colors.white, size: 14),
+              keyboardType: TextInputType.emailAddress,
+              decoration: InputDecoration(
+                contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16, vertical: 14),
+                border: InputBorder.none,
+                hintText: 'Email',
+                hintStyle: _f(AuraTheme.textDisabled, size: 14),
+              ),
+            ),
+          ),
           const SizedBox(height: 30),
-          _buildActionBtn('Save Changes', AuraTheme.pink500, () {}),
+          if (_profileSaveStatus != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                _profileSaveStatus!,
+                style: _f(
+                  _profileSaveStatus!.startsWith('✓')
+                      ? AuraTheme.success
+                      : AuraTheme.error,
+                  size: 13,
+                ),
+              ),
+            ),
+          _buildActionBtn(
+            _profileSaving ? 'Saving...' : 'Save Changes',
+            AuraTheme.pink500,
+            _profileSaving ? () {} : _saveProfile,
+          ),
           const SizedBox(height: 30),
         ],
       ),
@@ -1570,7 +2043,24 @@ class _AutomationDemoState extends State<AutomationDemo>
                 _buildActionBtn(
                   'Clear Memory',
                   Colors.redAccent.withOpacity(0.8),
-                  () {},
+                  () async {
+                    final r = await http.delete(
+                      Uri.parse(
+                          '${DeviceManager.backendUrl}/api/memory/clear-preferences?user_id=$_activeUserId'),
+                    ).catchError((_) => http.Response('', 500));
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(r.statusCode == 200
+                              ? 'Memory cleared'
+                              : 'Failed to clear memory'),
+                          backgroundColor: r.statusCode == 200
+                              ? AuraTheme.success
+                              : AuraTheme.error,
+                        ),
+                      );
+                    }
+                  },
                 ),
               ],
             ),

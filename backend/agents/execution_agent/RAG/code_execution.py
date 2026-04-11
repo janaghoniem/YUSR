@@ -58,18 +58,42 @@ class ActionTask:
         }
 
 class TaskResult:
-    def __init__(self, task_id: str, status: str, content: Optional[str] = None, error: Optional[str] = None):
+    def __init__(
+        self,
+        task_id: str,
+        status: str,
+        content: Optional[str] = None,
+        error: Optional[str] = None,
+        details: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        needs_clarification: bool = False,
+        clarification_question: Optional[str] = None,
+        clarification_type: Optional[str] = None,
+        recoverable: bool = False,
+    ):
         self.task_id = task_id
         self.status = status
         self.content = content
         self.error = error
+        self.details = details
+        self.metadata = metadata or {}
+        self.needs_clarification = needs_clarification
+        self.clarification_question = clarification_question
+        self.clarification_type = clarification_type
+        self.recoverable = recoverable
     
     def dict(self) -> Dict[str, Any]:
         return {
             'task_id': self.task_id,
             'status': self.status,
             'content': self.content,
-            'error': self.error
+            'error': self.error,
+            'details': self.details,
+            'metadata': self.metadata,
+            'needs_clarification': self.needs_clarification,
+            'clarification_question': self.clarification_question,
+            'clarification_type': self.clarification_type,
+            'recoverable': self.recoverable,
         }
 
 # ============================================================================
@@ -760,6 +784,7 @@ class CoordinatorWebRAGBridge:
                     'task_id': task.task_id,
                     'ai_prompt': enhanced_query,
                     'web_params': task.web_params,
+                    'extra_params': task.extra_params,
                 }
                 
                 exec_result = await self.web.execute_web_task(task_dict, session_id)
@@ -772,6 +797,24 @@ class CoordinatorWebRAGBridge:
                         status="success",
                         content=exec_result.output or '',
                         error=None
+                    )
+
+                auth_required_prefix = "AUTH_REQUIRED:"
+                exec_error = (exec_result.error or "").strip()
+                if exec_error.startswith(auth_required_prefix):
+                    question = exec_error[len(auth_required_prefix):].strip() or "I need credentials to continue."
+                    logger.info(f"🛑 Pausing web task for credentials: {question}")
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="awaiting_confirmation",
+                        content=question,
+                        error=exec_error,
+                        details="google_auth_required",
+                        metadata={"domain": "google_auth", "attempt": attempt},
+                        needs_clarification=True,
+                        clarification_question=question,
+                        clarification_type="credentials_required",
+                        recoverable=True,
                     )
                 
                 logger.warning(f"⚠️ Web execution failed (attempt {attempt})")

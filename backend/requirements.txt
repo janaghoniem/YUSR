@@ -95,5 +95,12 @@ pyautogui
 pytesseract
 pillow
 playwright
+playwright-stealth
 docker
 chromadb
+
+# Bot evasion and verification
+bezier>=2024.1.1
+scikit-image>=0.21.0
+cryptography>=41.0.0
+2captcha-python>=1.2.0

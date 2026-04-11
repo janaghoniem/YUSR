@@ -24,13 +24,10 @@ from enum import Enum
 from pathlib import Path
 import hashlib
 from .web_rag_sandbox import rag_sandbox
+from .bot_evasion import BotEvasion, ProxyRotator
+from .verification import ScreenshotVerifier
 
 logger = logging.getLogger(__name__)
-
-# ============================================================================
-# IMPORT PER-USER GOOGLE ACCOUNT CREDENTIALS
-# ============================================================================
-from .google_accounts import USER_ACCOUNTS
 
 def get_current_system_user() -> str:
     """Get current system username (cross-platform: Windows/Mac/Linux)"""
@@ -74,6 +71,14 @@ class WebExecutionConfig:
     use_stealth_plugin: bool = True
     randomize_fingerprint: bool = True
     use_real_user_agent: bool = True
+
+    # Launch + fallback strategy
+    google_launch_mode: str = field(default_factory=lambda: os.getenv("GOOGLE_LAUNCH_MODE", "installed_chrome").strip().lower())
+    google_auth_safe_mode: bool = field(default_factory=lambda: os.getenv("GOOGLE_AUTH_SAFE_MODE", "true").strip().lower() in {"1", "true", "yes", "on"})
+    enable_visual_fallback: bool = field(default_factory=lambda: os.getenv("ENABLE_VISUAL_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"})
+    omniparser_confidence_threshold: float = field(default_factory=lambda: float(os.getenv("OMNIPARSER_CONFIDENCE_THRESHOLD", "0.65")))
+    google_recovery_max_retries: int = field(default_factory=lambda: int(os.getenv("GOOGLE_RECOVERY_MAX_RETRIES", "2")))
+    google_manual_login_timeout_ms: int = field(default_factory=lambda: int(os.getenv("GOOGLE_MANUAL_LOGIN_TIMEOUT_MS", "45000")))
 
 @dataclass
 class WebExecutionResult:
@@ -1097,6 +1102,19 @@ class StealthBrowser:
             '--disable-save-password-bubble',
         ]
 
+    @staticmethod
+    def get_auth_safe_launch_args() -> List[str]:
+        """Get a safer launch profile for authentication-heavy flows."""
+        base_args = StealthBrowser.get_stealth_launch_args()
+        remove_args = {
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-gpu',
+            '--disable-gpu-sandbox',
+            '--disable-gpu-compositing',
+        }
+        return [arg for arg in base_args if arg not in remove_args]
+
 # ============================================================================
 # ENHANCED WEB EXECUTION PIPELINE
 # ============================================================================
@@ -1126,7 +1144,813 @@ class WebExecutionPipeline:
         self.context_cache = PageContextCache(ttl_seconds=config.context_cache_ttl)
         self.stealth = StealthBrowser()
         
+        # ✅ Bot Evasion & Verification
+        self.bot_evasion = BotEvasion()
+        self.proxy_rotator = self._initialize_proxy_rotator()
+        self.screenshot_verifier = ScreenshotVerifier(output_dir=config.screenshot_dir)
+        self.active_launch_mode = "unknown"
+        self.last_google_auth_block_reason = None
+        self._google_profile_client = None
+        self._google_profile_collection = None
+        self._session_google_auth_hints: Dict[str, Dict[str, str]] = {}
+        self._init_google_profile_store()
+
+        # Lightweight telemetry to tune fallback behavior safely.
+        self.stats = {
+            "dom_success": 0,
+            "visual_fallback_used": 0,
+            "google_block_detected": 0,
+            "google_recovery_attempted": 0,
+            "google_recovery_succeeded": 0,
+        }
+
+        self.omniparser_detector = None
+        if self.config.enable_visual_fallback:
+            try:
+                from agents.execution_agent.fallback.omniparser_detector import OmniParserDetector
+                self.omniparser_detector = OmniParserDetector(logger)
+                logger.info("✅ OmniParser visual fallback enabled")
+            except Exception as e:
+                logger.warning(f"⚠️ OmniParser fallback unavailable: {e}")
+                self.omniparser_detector = None
+        
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
+
+    def _init_google_profile_store(self):
+        """Initialize MongoDB-backed store for per-user Google defaults."""
+        mongo_uri = os.getenv("MONGODB_URI", "").strip()
+        if not mongo_uri:
+            logger.info("ℹ️ MONGODB_URI not set; Google default-email persistence disabled")
+            return
+
+        try:
+            from pymongo import MongoClient
+        except Exception as e:
+            logger.warning(f"⚠️ PyMongo unavailable; Google default-email persistence disabled: {e}")
+            return
+
+        try:
+            db_name = os.getenv("MONGODB_DB_NAME", "yusr_db").strip() or "yusr_db"
+            collection_name = os.getenv("GOOGLE_PROFILE_COLLECTION", "google_user_profiles").strip() or "google_user_profiles"
+            self._google_profile_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+            self._google_profile_collection = self._google_profile_client[db_name][collection_name]
+            self._google_profile_collection.create_index("user_key", unique=True)
+            logger.info(f"✅ Google profile store ready: {db_name}.{collection_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize Google profile store: {e}")
+            self._google_profile_client = None
+            self._google_profile_collection = None
+
+    def _resolve_google_user_key(self, task: Dict[str, Any], session_id: str) -> str:
+        """Resolve stable user key for Google account preferences."""
+        extra_params = task.get("extra_params") or {}
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+
+        candidate = str(extra_params.get("user_id") or task.get("user_id") or "").strip()
+        if candidate and candidate.lower() not in {"unknown", "default_user", "none", "null"}:
+            return candidate
+
+        if session_id and session_id != "default":
+            return f"session:{session_id}"
+
+        return str(getattr(self, "current_user", "") or get_current_system_user())
+
+    def _is_switch_account_prompt(self, prompt_text: str) -> bool:
+        prompt = (prompt_text or "").lower()
+        switch_markers = [
+            "different account",
+            "another account",
+            "switch account",
+            "use another gmail",
+            "use another google account",
+            "login with a different",
+            "log in with a different",
+            "sign in with a different",
+        ]
+        return any(marker in prompt for marker in switch_markers)
+
+    def _is_set_default_account_prompt(self, prompt_text: str) -> bool:
+        prompt = (prompt_text or "").lower()
+        set_default_markers = [
+            "set as default",
+            "make this default",
+            "use this as default",
+            "save this account as default",
+            "remember this account",
+        ]
+        return any(marker in prompt for marker in set_default_markers)
+
+    def _extract_google_credentials(self, task: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """Extract email/password hints from task payload and prompt text."""
+        extra_params = task.get("extra_params") or {}
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+        web_params = task.get("web_params") or {}
+        if not isinstance(web_params, dict):
+            web_params = {}
+
+        email = None
+        password = None
+
+        for key in ("google_email", "email", "username", "login_email"):
+            value = extra_params.get(key)
+            if isinstance(value, str) and "@" in value:
+                email = value.strip()
+                break
+
+        for key in ("google_password", "password", "pass", "pwd"):
+            value = extra_params.get(key)
+            if isinstance(value, str) and value.strip():
+                password = value.strip()
+                break
+
+        prompt_text = str(task.get("ai_prompt", ""))
+        prompt_text_lower = prompt_text.lower()
+        web_action = str(web_params.get("action", "")).strip().lower()
+        web_text = str(web_params.get("text", "")).strip()
+
+        # Some login decompositions pass credentials as web_params.text (fill/type tasks).
+        if web_text:
+            if not email and "@" in web_text:
+                email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", web_text)
+                if email_match:
+                    email = email_match.group(0).strip()
+
+            if not password and web_action in {"fill", "type"} and "password" in prompt_text_lower:
+                password = web_text
+
+        if not email:
+            email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", prompt_text)
+            if email_match:
+                email = email_match.group(0).strip()
+
+        if not password:
+            password_patterns = [
+                r"password\s*(?:is|=|:)\s*['\"]([^'\"]+)['\"]",
+                r"password\s*(?:is|=|:)\s*([^\s,;]+)",
+                r"pass(?:word)?\s*['\"]([^'\"]+)['\"]",
+                r"password(?:\s+field)?\s+(?:with|as)\s*['\"]?([^'\"\s,;]+)",
+                r"with\s+password\s*['\"]?([^'\"\s,;]+)",
+            ]
+            for pattern in password_patterns:
+                match = re.search(pattern, prompt_text, re.IGNORECASE)
+                if match and match.group(1).strip():
+                    password = match.group(1).strip()
+                    break
+
+        return email, password
+
+    def _update_session_google_auth_hints(
+        self,
+        session_id: str,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+    ) -> None:
+        """Store partial Google auth hints across clarification turns."""
+        if not session_id:
+            return
+        hints = self._session_google_auth_hints.get(session_id, {})
+        if isinstance(email, str) and "@" in email:
+            hints["email"] = email.strip()
+        if isinstance(password, str) and password.strip():
+            hints["password"] = password.strip()
+        if hints:
+            self._session_google_auth_hints[session_id] = hints
+
+    def _clear_session_google_auth_hints(self, session_id: str, clear_email: bool = False) -> None:
+        """Clear cached auth hints for a session (always clears password)."""
+        if not session_id:
+            return
+        hints = self._session_google_auth_hints.get(session_id)
+        if not hints:
+            return
+        hints.pop("password", None)
+        if clear_email:
+            hints.pop("email", None)
+        if hints:
+            self._session_google_auth_hints[session_id] = hints
+        else:
+            self._session_google_auth_hints.pop(session_id, None)
+
+    async def _detect_google_identifier_hint(self, page) -> Optional[str]:
+        """Try to infer the active Google identifier from the sign-in page state."""
+        try:
+            candidates = await page.evaluate(
+                """() => {
+                    const out = [];
+                    const push = (v) => {
+                        if (typeof v === 'string') {
+                            const s = v.trim();
+                            if (s.includes('@')) out.push(s);
+                        }
+                    };
+
+                    const emailInput = document.querySelector('input[type="email"], #identifierId, input[name="identifier"]');
+                    if (emailInput) {
+                        push(emailInput.value);
+                        push(emailInput.getAttribute('value'));
+                    }
+
+                    const passwordInput = document.querySelector('input[type="password"], input[name="Passwd"]');
+                    if (passwordInput) {
+                        const chips = document.querySelectorAll('[data-email], [data-identifier], [aria-label]');
+                        chips.forEach((el) => {
+                            push(el.getAttribute('data-email'));
+                            push(el.getAttribute('data-identifier'));
+                            push(el.getAttribute('aria-label'));
+                        });
+                    }
+
+                    return out.slice(0, 20);
+                }"""
+            )
+        except Exception:
+            return None
+
+        email_regex = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+        for candidate in candidates or []:
+            match = email_regex.search(str(candidate))
+            if match:
+                return match.group(0).strip().lower()
+        return None
+
+    def _google_secure_browser_auth_required_message(self) -> str:
+        return (
+            "AUTH_REQUIRED: Google blocked automated sign-in with 'This browser or app may not be secure'. "
+            "Please complete Google login manually in the opened browser window, then tell me to continue."
+        )
+
+    async def _detect_google_secure_browser_warning(self, page) -> bool:
+        """Detect Google's secure-browser warning on sign-in flows."""
+        try:
+            current_url = (page.url or "").lower()
+            if "google" not in current_url:
+                return False
+
+            title = ((await page.title()) or "").lower()
+            page_text = await page.evaluate("() => document.body && document.body.innerText || ''")
+            text = (page_text or "").lower()
+
+            indicators = [
+                "this browser or app may not be secure",
+                "try using a different browser",
+                "you can try again to sign in",
+                "browser not secure",
+            ]
+
+            return any(indicator in text for indicator in indicators) or any(indicator in title for indicator in indicators)
+        except Exception as e:
+            logger.debug(f"⚠️ Secure-browser warning detection skipped: {e}")
+            return False
+
+    async def _is_google_password_step(self, page) -> bool:
+        """Return True when Google sign-in password field is truly visible and interactable."""
+        try:
+            return bool(
+                await page.evaluate(
+                    """() => {
+                        const pw = document.querySelector('input[type="password"], input[name="Passwd"]');
+                        if (!pw) return false;
+                        const style = window.getComputedStyle(pw);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && pw.offsetWidth > 0 && pw.offsetHeight > 0;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    async def _type_google_field_like_user(self, page, selector: str, text: str, timeout: int = 8000) -> bool:
+        """Type into Google auth fields in a way that triggers frontend listeners reliably."""
+        try:
+            await page.wait_for_selector(selector, state='visible', timeout=timeout)
+            locator = page.locator(selector).first
+            await locator.click()
+            await page.wait_for_timeout(250)
+            await locator.press('Control+A')
+            await locator.press('Backspace')
+            await locator.type(text, delay=80)
+            await page.wait_for_timeout(450)
+            return True
+        except Exception:
+            return False
+
+    async def _submit_google_login_with_credentials(self, page, email: Optional[str], password: str) -> bool:
+        """Fill Google signin fields and submit using provided credentials."""
+        try:
+            self.last_google_auth_block_reason = None
+
+            if "accounts.google.com" not in (page.url or "").lower():
+                await page.goto('https://accounts.google.com/signin', wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(500)
+
+            if await self._detect_google_secure_browser_warning(page):
+                logger.warning("⚠️ Google secure-browser warning detected before credential submission")
+                self.last_google_auth_block_reason = "browser_not_secure"
+                return False
+
+            email_selector = 'input[type="email"], #identifierId, input[name="identifier"]'
+            password_selector = 'input[type="password"], input[name="Passwd"]'
+
+            if email:
+                try:
+                    typed = await self._type_google_field_like_user(page, email_selector, email, timeout=7000)
+                    if not typed:
+                        await page.wait_for_selector(email_selector, state='visible', timeout=5000)
+                        await page.locator(email_selector).first.fill(email)
+
+                    next_selectors = [
+                        '#identifierNext button',
+                        '#identifierNext',
+                        'button:has-text("Next")',
+                    ]
+                    clicked_next = False
+                    for next_selector in next_selectors:
+                        try:
+                            next_btn = page.locator(next_selector).first
+                            if await next_btn.count() > 0:
+                                await next_btn.click(timeout=2500)
+                                clicked_next = True
+                                break
+                        except Exception:
+                            continue
+                    if not clicked_next:
+                        await page.keyboard.press('Enter')
+
+                    await page.wait_for_timeout(2000)
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=10000)
+                    except Exception:
+                        pass
+
+                    await page.wait_for_function(
+                        """() => {
+                            const pw = document.querySelector('input[type="password"], input[name="Passwd"]');
+                            if (!pw) return false;
+                            const style = window.getComputedStyle(pw);
+                            return style.display !== 'none' && style.visibility !== 'hidden' && pw.offsetWidth > 0 && pw.offsetHeight > 0;
+                        }""",
+                        timeout=15000,
+                    )
+
+                    if await self._detect_google_secure_browser_warning(page):
+                        logger.warning("⚠️ Google secure-browser warning detected after email step")
+                        self.last_google_auth_block_reason = "browser_not_secure"
+                        return False
+                except Exception:
+                    # If email field is skipped (e.g., already on password step), continue.
+                    pass
+
+            await page.wait_for_function(
+                """() => {
+                    const pw = document.querySelector('input[type="password"], input[name="Passwd"]');
+                    if (!pw) return false;
+                    const style = window.getComputedStyle(pw);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && pw.offsetWidth > 0 && pw.offsetHeight > 0;
+                }""",
+                timeout=15000,
+            )
+            typed_password = await self._type_google_field_like_user(page, password_selector, password, timeout=7000)
+            if not typed_password:
+                await page.wait_for_selector(password_selector, state='visible', timeout=15000)
+                await page.locator(password_selector).first.fill(password)
+            await page.keyboard.press('Enter')
+            await page.wait_for_timeout(700)
+
+            if await self._detect_google_secure_browser_warning(page):
+                logger.warning("⚠️ Google secure-browser warning detected after password submission")
+                self.last_google_auth_block_reason = "browser_not_secure"
+                return False
+
+            for _ in range(12):
+                if await self._detect_google_secure_browser_warning(page):
+                    logger.warning("⚠️ Google secure-browser warning detected while waiting for auth completion")
+                    self.last_google_auth_block_reason = "browser_not_secure"
+                    return False
+                if await self._is_google_login_complete(page):
+                    try:
+                        await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
+                    except Exception:
+                        pass
+                    return True
+                await page.wait_for_timeout(1000)
+
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ Automated Google login with credentials failed: {e}")
+            return False
+
+    def _get_saved_google_default_email(self, user_key: str) -> Optional[str]:
+        if self._google_profile_collection is None:
+            return None
+        try:
+            doc = self._google_profile_collection.find_one(
+                {"user_key": user_key},
+                {"_id": 0, "default_email": 1}
+            )
+            email = (doc or {}).get("default_email")
+            if isinstance(email, str) and "@" in email:
+                return email.strip()
+        except Exception as e:
+            logger.warning(f"⚠️ Failed reading saved Google email for '{user_key}': {e}")
+        return None
+
+    def _save_google_default_email(self, user_key: str, email: str, source: str = "manual_login") -> bool:
+        if self._google_profile_collection is None:
+            return False
+        normalized = (email or "").strip().lower()
+        if "@" not in normalized:
+            return False
+        try:
+            self._google_profile_collection.update_one(
+                {"user_key": user_key},
+                {
+                    "$set": {
+                        "default_email": normalized,
+                        "updated_at": datetime.now().isoformat(),
+                        "source": source,
+                    }
+                },
+                upsert=True,
+            )
+            logger.info(f"💾 Saved default Google email for '{user_key}': {normalized}")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed saving default Google email for '{user_key}': {e}")
+            return False
+
+    async def _prefill_google_email(self, page, email: str) -> bool:
+        """Auto-fill saved email in Google sign-in page and continue to password step."""
+        try:
+            selector = 'input[type="email"], #identifierId, input[name="identifier"]'
+            typed = await self._type_google_field_like_user(page, selector, email, timeout=7000)
+            if not typed:
+                await page.wait_for_selector(selector, state='visible', timeout=7000)
+                await page.locator(selector).first.fill(email)
+            await page.keyboard.press('Enter')
+            await page.wait_for_timeout(1200)
+            logger.info(f"✍️ Auto-filled saved Google email: {email}")
+            return True
+        except Exception as e:
+            logger.debug(f"Could not auto-fill saved email: {e}")
+            return False
+
+    async def _google_has_session_cookie(self) -> bool:
+        """Check for known Google auth cookies in current browser context."""
+        if not self.context:
+            return False
+        try:
+            cookies = await self.context.cookies(["https://accounts.google.com", "https://www.google.com"])
+            names = {c.get("name", "") for c in cookies}
+            auth_names = {
+                "SID", "HSID", "SSID", "SAPISID", "APISID",
+                "__Secure-1PSID", "__Secure-3PSID",
+            }
+            return any(name in names for name in auth_names)
+        except Exception:
+            return False
+
+    async def _is_google_login_complete(self, page) -> bool:
+        """Return True when we appear to be authenticated with Google."""
+        try:
+            current_url = (page.url or "").lower()
+
+            has_auth_cookie = await self._google_has_session_cookie()
+            if has_auth_cookie and "accounts.google.com" not in current_url:
+                return True
+
+            if "accounts.google.com" in current_url and "signin" in current_url:
+                has_login_form = await page.evaluate(
+                    """() => !!document.querySelector('input[type="email"], input[type="password"], #identifierId')"""
+                )
+                if has_login_form:
+                    return False
+
+            account_ui = await page.evaluate(
+                """() => {
+                    const selectors = [
+                        'a[aria-label*="Google Account" i]',
+                        'a[href*="SignOutOptions"]',
+                        '[data-ogsr-up]'
+                    ];
+                    return selectors.some(s => !!document.querySelector(s));
+                }"""
+            )
+
+            return bool(account_ui or has_auth_cookie)
+        except Exception:
+            return False
+
+    async def _wait_for_manual_google_login(self, page, timeout_ms: int) -> bool:
+        """Wait for user to complete Google sign-in manually."""
+        timeout_ms = max(3000, int(timeout_ms))
+        deadline = asyncio.get_event_loop().time() + (timeout_ms / 1000.0)
+
+        while asyncio.get_event_loop().time() < deadline:
+            if await self._is_google_login_complete(page):
+                return True
+            await page.wait_for_timeout(1000)
+
+        return False
+
+    async def _capture_logged_in_google_email(self, page) -> Optional[str]:
+        """Try to capture signed-in Google account email from current/account pages."""
+        probe_urls = [
+            "https://accounts.google.com/AccountChooser",
+            "https://myaccount.google.com/",
+        ]
+
+        email_regex = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+        for url in probe_urls:
+            try:
+                await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(700)
+                candidates = await page.evaluate(
+                    """() => {
+                        const found = new Set();
+                        const push = (value) => {
+                            if (typeof value === 'string' && value.includes('@')) {
+                                found.add(value.trim());
+                            }
+                        };
+
+                        document.querySelectorAll('[data-email], [data-identifier]').forEach(el => {
+                            push(el.getAttribute('data-email'));
+                            push(el.getAttribute('data-identifier'));
+                        });
+
+                        document.querySelectorAll('[aria-label]').forEach(el => {
+                            push(el.getAttribute('aria-label'));
+                        });
+
+                        const bodyText = (document.body && document.body.innerText) || '';
+                        const parts = bodyText.split(/\\s+/).filter(Boolean);
+                        for (const p of parts) {
+                            if (p.includes('@')) {
+                                push(p);
+                            }
+                        }
+
+                        return Array.from(found).slice(0, 40);
+                    }"""
+                )
+            except Exception:
+                continue
+
+            if not candidates:
+                continue
+
+            for candidate in candidates:
+                match = email_regex.search(str(candidate))
+                if match:
+                    return match.group(0).lower()
+
+        return None
+    
+    async def _apply_bot_evasion_before_request(self, page, session_id: str):
+        """Apply bot evasion techniques before making requests"""
+        try:
+            # Apply behavioral randomization
+            if random.random() < 0.7:  # 70% chance
+                delay = BotEvasion.random_delay()
+                await page.wait_for_timeout(int(delay * 1000))
+                logger.debug(f"⏳ Applied behavioral delay: {delay:.2f}s")
+            
+            # Apply fingerprint spoofing script
+            try:
+                spoof_script = BotEvasion.get_fingerprint_spoof_script()
+                await page.evaluate(spoof_script)
+                logger.debug("✅ Applied fingerprint spoofing script")
+            except Exception as e:
+                logger.debug(f"⚠️ Fingerprint spoofing failed (non-critical): {e}")
+            
+            # Apply proxy if rotator is configured
+            if self.proxy_rotator:
+                proxy = self.proxy_rotator.get_proxy_for_session(session_id)
+                if proxy:
+                    logger.info(f"🔄 Using proxy: {proxy}")
+                    # Note: Proxy must be set via Playwright context, not per-page
+                    # This would require recreating the context with new proxy
+                    # For now, just track it for logging
+        
+        except Exception as e:
+            logger.warning(f"⚠️ Bot evasion setup failed: {e}")
+    
+    async def _apply_mouse_evasion(self, page, selector: str):
+        """Apply Bezier curve mouse movement before clicking"""
+        try:
+            locator = page.locator(selector)
+            box = await locator.bounding_box()
+            if not box:
+                return
+            
+            # Calculate element center
+            target_x = int(box['x'] + box['width'] / 2)
+            target_y = int(box['y'] + box['height'] / 2)
+            
+            # Get current cursor position (if possible)
+            try:
+                pos = await page.evaluate("() => ({x: window.innerWidth * 0.5, y: window.innerHeight * 0.5})")
+                start_x, start_y = int(pos['x']), int(pos['y'])
+            except:
+                start_x, start_y = 0, 0
+            
+            # Generate Bezier path
+            path = BotEvasion.bezier_curve_path((start_x, start_y), (target_x, target_y), steps=30)
+            
+            # Move mouse along path
+            for x, y in path[::3]:  # Sample every 3rd point
+                await page.mouse.move(x, y)
+                await page.wait_for_timeout(random.randint(10, 30))
+            
+            logger.debug(f"✅ Applied Bezier mouse movement to {selector}")
+        
+        except Exception as e:
+            logger.debug(f"⚠️ Mouse evasion failed (non-critical): {e}")
+    
+    async def _check_bot_block(self, page) -> bool:
+        """Check if page shows bot detection/rate limiting"""
+        try:
+            # Check for Google's bot block page
+            if await BotEvasion.detect_google_bot_block(page):
+                logger.warning("🚨 Google bot block detected!")
+                return True
+            
+            # Check HTTP status
+            status = getattr(page, 'response', None)
+            if status and hasattr(status, 'status'):
+                if await BotEvasion.detect_rate_limit(status.status):
+                    logger.warning("🚨 Rate limiting detected!")
+                    return True
+            
+            return False
+        
+        except Exception as e:
+            logger.debug(f"⚠️ Bot block detection failed: {e}")
+            return False
+
+    def _is_google_auth_prompt(self, prompt_text: str) -> bool:
+        prompt = (prompt_text or "").lower()
+        auth_keywords = [
+            "sign in",
+            "login",
+            "log in",
+            "authenticate",
+            "account",
+            "gmail login",
+            "google login",
+        ]
+        return any(keyword in prompt for keyword in auth_keywords)
+
+    async def _detect_google_interstitial(self, page) -> bool:
+        """Detect common Google block/interstitial states that require bounded recovery."""
+        try:
+            current_url = (page.url or "").lower()
+            page_text = await page.evaluate("() => document.body && document.body.innerText || ''")
+            text = (page_text or "").lower()
+
+            indicators = [
+                "unusual traffic",
+                "about this page",
+                "having trouble accessing google search",
+                "our systems have detected unusual traffic",
+                "sorry/index",
+                "verify you are human",
+            ]
+
+            if any(indicator in text for indicator in indicators):
+                return True
+
+            if "google.com/sorry" in current_url or "/sorry/index" in current_url:
+                return True
+
+            return False
+        except Exception as e:
+            logger.debug(f"⚠️ Google interstitial detection skipped: {e}")
+            return False
+
+    async def _recover_google_interstitial(self, page) -> bool:
+        """Bounded recovery sequence for Google interstitial pages."""
+        max_retries = max(0, int(self.config.google_recovery_max_retries))
+        if max_retries == 0:
+            return False
+
+        self.stats["google_recovery_attempted"] += 1
+        for attempt in range(1, max_retries + 1):
+            try:
+                await page.wait_for_timeout(random.randint(1500, 3000))
+                await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
+                await page.wait_for_timeout(random.randint(800, 1500))
+
+                blocked = await self._detect_google_interstitial(page)
+                if not blocked:
+                    self.stats["google_recovery_succeeded"] += 1
+                    logger.info(f"✅ Google recovery succeeded on attempt {attempt}/{max_retries}")
+                    return True
+            except Exception as e:
+                logger.debug(f"⚠️ Google recovery attempt {attempt} failed: {e}")
+
+        return False
+
+    async def _try_visual_fallback_action(self, page, task: Dict[str, Any], task_id: str) -> Optional[Dict[str, Any]]:
+        """Use OmniParser only when DOM execution fails."""
+        if not self.config.enable_visual_fallback or self.omniparser_detector is None:
+            return None
+
+        web_params = task.get('web_params', {}) or {}
+        action_type = str(web_params.get('action', 'unknown')).lower()
+        if action_type not in {"click", "fill", "type", "submit"}:
+            return None
+
+        target_text = str(web_params.get('text') or web_params.get('selector') or task.get('ai_prompt', '')).strip()
+        if not target_text:
+            return None
+
+        try:
+            screenshot_path = os.path.join(
+                self.config.screenshot_dir,
+                f"{task_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_visual_fallback.png"
+            )
+            await page.screenshot(path=screenshot_path)
+
+            loop = asyncio.get_event_loop()
+            vision_result = await loop.run_in_executor(
+                None,
+                lambda: self.omniparser_detector.detect_element_by_text(target_text, screenshot_path)
+            )
+
+            if not vision_result or not getattr(vision_result, "success", False):
+                return None
+
+            confidence = float(getattr(vision_result, "confidence", 0.0) or 0.0)
+            threshold = float(self.config.omniparser_confidence_threshold)
+            coords = getattr(vision_result, "coordinates", None)
+
+            auth_sensitive = any(k in (task.get('ai_prompt', '').lower()) for k in ["password", "otp", "verification", "2fa", "sign in", "login"])
+            if confidence < threshold:
+                if auth_sensitive:
+                    return {
+                        "success": False,
+                        "error": f"Visual fallback confidence too low for auth action ({confidence:.2f} < {threshold:.2f}). Manual intervention required."
+                    }
+                return None
+
+            if not coords or len(coords) < 2:
+                return None
+
+            x, y = int(coords[0]), int(coords[1])
+            await page.mouse.click(x, y)
+            await page.wait_for_timeout(random.randint(200, 450))
+
+            typed_text = str(web_params.get('text') or '')
+            if action_type in {"fill", "type"} and typed_text:
+                await page.keyboard.type(typed_text, delay=random.randint(40, 90))
+                await page.keyboard.press("Enter")
+
+            self.stats["visual_fallback_used"] += 1
+            return {
+                "success": True,
+                "output": "EXECUTION_SUCCESS (visual_fallback)",
+                "extracted_data": {
+                    "method": "omniparser",
+                    "confidence": confidence,
+                    "coordinates": [x, y],
+                    "target_text": target_text,
+                }
+            }
+        except Exception as e:
+            logger.warning(f"⚠️ Visual fallback failed: {e}")
+            return None
+    
+    def _initialize_proxy_rotator(self) -> Optional[ProxyRotator]:
+        """Initialize proxy rotator if proxies are configured"""
+        try:
+            proxy_pool_str = os.getenv("PROXY_POOL", "").strip()
+            if not proxy_pool_str:
+                logger.info("ℹ️ No proxies configured (PROXY_POOL not set)")
+                return None
+            
+            proxy_pool = [p.strip() for p in proxy_pool_str.split(",") if p.strip()]
+            if not proxy_pool:
+                logger.warning("⚠️ PROXY_POOL env var is empty")
+                return None
+            
+            strategy_str = os.getenv("PROXY_STRATEGY", "round_robin").lower()
+            from .bot_evasion import ProxyRotationStrategy
+            try:
+                strategy = ProxyRotationStrategy[strategy_str.upper()]
+            except KeyError:
+                logger.warning(f"⚠️ Unknown proxy strategy '{strategy_str}', using ROUND_ROBIN")
+                strategy = ProxyRotationStrategy.ROUND_ROBIN
+            
+            rotator = ProxyRotator(proxy_pool=proxy_pool, strategy=strategy)
+            logger.info(f"✅ ProxyRotator initialized with {len(proxy_pool)} proxies")
+            return rotator
+        
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to initialize proxy rotator: {e}")
+            return None
     
     async def initialize(self):
         """Initialize Playwright with advanced stealth mode"""
@@ -1137,13 +1961,48 @@ class WebExecutionPipeline:
             
             self.playwright = await async_playwright().start()
             
-            launch_args = self.stealth.get_stealth_launch_args()
-            
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.config.headless,
-                slow_mo=self.config.slow_mo,
-                args=launch_args
+            launch_args = (
+                self.stealth.get_auth_safe_launch_args()
+                if self.config.google_auth_safe_mode
+                else self.stealth.get_stealth_launch_args()
             )
+
+            launch_mode = (self.config.google_launch_mode or "installed_chrome").lower()
+            logger.info(
+                f"🧭 Browser launch config: requested_mode={launch_mode}, auth_safe_mode={self.config.google_auth_safe_mode}, headless={self.config.headless}"
+            )
+            launch_kwargs = {
+                "headless": self.config.headless,
+                "slow_mo": self.config.slow_mo,
+                "args": launch_args,
+            }
+
+            if launch_mode == "installed_chrome":
+                try:
+                    chrome_executable_path = os.getenv("CHROME_EXECUTABLE_PATH", "").strip()
+                    if chrome_executable_path:
+                        self.browser = await self.playwright.chromium.launch(
+                            **launch_kwargs,
+                            executable_path=chrome_executable_path,
+                        )
+                        self.active_launch_mode = "installed_chrome:executable_path"
+                    else:
+                        chrome_channel = os.getenv("CHROME_CHANNEL", "chrome").strip() or "chrome"
+                        self.browser = await self.playwright.chromium.launch(
+                            **launch_kwargs,
+                            channel=chrome_channel,
+                        )
+                        self.active_launch_mode = f"installed_chrome:channel={chrome_channel}"
+                    logger.info(f"✅ Browser launch mode active: {self.active_launch_mode}")
+                except Exception as e:
+                    logger.warning(f"⚠️ installed_chrome launch failed ({e}); falling back to playwright_default")
+                    self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+                    self.active_launch_mode = "playwright_default:fallback"
+                    logger.info(f"✅ Browser launch mode active: {self.active_launch_mode}")
+            else:
+                self.browser = await self.playwright.chromium.launch(**launch_kwargs)
+                self.active_launch_mode = "playwright_default"
+                logger.info(f"✅ Browser launch mode active: {self.active_launch_mode}")
             
             viewport = self.stealth.get_random_viewport() if self.config.randomize_fingerprint else {
                 'width': self.config.viewport_width,
@@ -1189,7 +2048,7 @@ class WebExecutionPipeline:
                 context_options['storage_state'] = str(self.cookies_path)
                 logger.info(f"✅ Loading persistent browser state for user '{self.current_user}'")
             else:
-                logger.info(f"📝 No existing browser state found for '{self.current_user}' - will auto-login on-demand when Google is needed")
+                logger.info(f"📝 No existing browser state found for '{self.current_user}' - manual Google sign-in required")
             
             self.context = await self.browser.new_context(**context_options)
             
@@ -1208,13 +2067,23 @@ class WebExecutionPipeline:
                 from urllib.parse import urlparse
                 current_domain = urlparse(current_url).netloc
                 referer_domain = urlparse(referer).netloc if referer else ''
+                current_domain_lower = current_domain.lower()
+
+                # Keep Google authentication traffic close to native browser behavior.
+                is_google_auth_host = (
+                    'accounts.google.com' in current_domain_lower
+                    or 'myaccount.google.com' in current_domain_lower
+                )
+                if self.config.google_auth_safe_mode and is_google_auth_host:
+                    await route.continue_(headers=headers)
+                    return
                 
                 # ✅ FIX: Google search requires Referer header to not trigger bot detection
                 # If referer is missing on search operations, set Google's homepage as referer
                 if not referer or not referer_domain:
-                    if 'google' in current_domain.lower() and '/search' in current_url:
+                    if 'google' in current_domain_lower and '/search' in current_url:
                         headers['Referer'] = 'https://www.google.com/'
-                    elif 'google' in current_domain.lower():
+                    elif 'google' in current_domain_lower:
                         headers['Referer'] = 'https://www.google.com/'
                 # Only set Referer if cross-site; otherwise let browser default
                 elif referer_domain and referer_domain != current_domain:
@@ -1224,7 +2093,7 @@ class WebExecutionPipeline:
                 headers['Origin'] = '/'.join(current_url.split('/')[:3])
                 
                 # Ensure Google sees real Accept headers
-                if 'google' in current_domain.lower():
+                if 'google' in current_domain_lower:
                     headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9'
                     headers['Accept-Encoding'] = 'gzip, deflate, br'
                     headers['Accept-Language'] = 'en-US,en;q=0.9,en;q=0.8'
@@ -1289,9 +2158,17 @@ class WebExecutionPipeline:
             # ✅ FIX 6: Apply playwright-stealth to patch Runtime.enable CDP leak
             # This is essential for defeating runtime-based bot detection
             try:
-                from playwright_stealth import stealth_async
-                await stealth_async(page)
-                logger.info("✅ playwright-stealth injected successfully")
+                try:
+                    # playwright-stealth v2 API
+                    from playwright_stealth import Stealth
+                    stealth = Stealth()
+                    await stealth.apply_stealth_async(page)
+                    logger.info("✅ playwright-stealth (v2 API) injected successfully")
+                except Exception:
+                    # Fallback to playwright-stealth v1 API
+                    from playwright_stealth import stealth_async
+                    await stealth_async(page)
+                    logger.info("✅ playwright-stealth (v1 API) injected successfully")
             except ImportError:
                 logger.warning("⚠️  playwright-stealth not installed. Install with: pip install playwright-stealth")
             except Exception as e:
@@ -1472,34 +2349,192 @@ class WebExecutionPipeline:
         
         try:
             page = await self.get_or_create_page(session_id)
-            
-            # ── ON-DEMAND GOOGLE LOGIN ───────────────────────────────────────
-            # If this is a Google task and we don't have valid cookies, auto-login now
-            ai_prompt = task.get('ai_prompt', '').lower()
-            is_google_task = any(keyword in ai_prompt for keyword in ['google', 'search', 'gmail', 'youtube'])
-            
-            if is_google_task and not self.cookies_path.exists():
-                logger.info(f"🔐 Google task detected and no saved session found. Triggering on-demand auto-login...")
-                # IMPORTANT: Use the SAME page for login AND navigation (don't close it)
-                # This ensures cookies are preserved and used for the actual task
+
+            prompt_text = task.get('ai_prompt', '')
+            ai_prompt = prompt_text.lower()
+            is_auth_prompt = self._is_google_auth_prompt(ai_prompt)
+            current_url_lower = (page.url or "").lower()
+            # Treat as Google task only for explicit Google/Gmail intent or when already on Google domain.
+            is_google_task = (
+                any(keyword in ai_prompt for keyword in ['google', 'gmail'])
+                or 'google.' in current_url_lower
+                or 'gmail.' in current_url_lower
+            )
+            google_user_key = self._resolve_google_user_key(task, session_id)
+            saved_default_email = self._get_saved_google_default_email(google_user_key)
+            force_switch_account = self._is_switch_account_prompt(ai_prompt)
+            set_default_requested = self._is_set_default_account_prompt(ai_prompt)
+
+            is_google_authenticated = False
+            if is_google_task and not force_switch_account:
                 try:
-                    await self._humanize_page(page)
-                    login_success = await self.auto_login_google(page, self.current_user)
-                    if login_success:
-                        logger.info(f"✅ On-demand Google auto-login successful for '{self.current_user}'")
-                        # Save cookies immediately after successful login (not just at cleanup)
-                        try:
-                            # Ensure directory exists
+                    is_google_authenticated = await self._is_google_login_complete(page)
+                    if is_google_authenticated and not self.cookies_path.exists():
+                        self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+                        await self.context.storage_state(path=str(self.cookies_path))
+                        logger.info(f"💾 Persisted browser state from live authenticated session to {self.cookies_path}")
+                except Exception as e:
+                    logger.debug(f"Could not resolve live Google auth state before bootstrap: {e}")
+
+            needs_google_bootstrap = is_google_task and (force_switch_account or not is_google_authenticated)
+
+            if needs_google_bootstrap:
+                if force_switch_account:
+                    logger.info("🔄 Explicit account-switch request detected; forcing fresh Google login")
+                    self._clear_session_google_auth_hints(session_id, clear_email=True)
+                    try:
+                        if self.context:
+                            await self.context.clear_cookies()
+                    except Exception as e:
+                        logger.debug(f"Could not clear context cookies: {e}")
+                    try:
+                        if self.cookies_path.exists():
+                            self.cookies_path.unlink()
+                    except Exception as e:
+                        logger.debug(f"Could not remove local browser state: {e}")
+
+                logger.info("🔐 Google session bootstrap required - credential handshake flow")
+                try:
+                    await page.goto('https://accounts.google.com/signin', wait_until='domcontentloaded', timeout=15000)
+                    await page.wait_for_timeout(600)
+                except Exception as e:
+                    logger.debug(f"⚠️ Could not open Google sign-in page during bootstrap: {e}")
+
+                if await self._detect_google_secure_browser_warning(page):
+                    return WebExecutionResult(
+                        validation_passed=False,
+                        security_passed=True,
+                        error=self._google_secure_browser_auth_required_message(),
+                        execution_time=(datetime.now() - start_time).total_seconds()
+                    )
+
+                if saved_default_email and not force_switch_account:
+                    await self._prefill_google_email(page, saved_default_email)
+
+                provided_email, provided_password = self._extract_google_credentials(task)
+                self._update_session_google_auth_hints(
+                    session_id,
+                    email=provided_email,
+                    password=provided_password,
+                )
+
+                session_hints = self._session_google_auth_hints.get(session_id, {})
+                inferred_email = await self._detect_google_identifier_hint(page)
+                login_email = (
+                    provided_email
+                    or inferred_email
+                    or session_hints.get("email")
+                    or (None if force_switch_account else saved_default_email)
+                )
+                login_password = provided_password or session_hints.get("password")
+                on_password_step = await self._is_google_password_step(page)
+
+                logger.info(
+                    "🔐 Auth hints: provided_email=%s provided_password=%s session_email=%s session_password=%s inferred_email=%s password_step=%s",
+                    bool(provided_email),
+                    bool(provided_password),
+                    bool(session_hints.get("email")),
+                    bool(session_hints.get("password")),
+                    bool(inferred_email),
+                    on_password_step,
+                )
+
+                if login_email and not login_password and not on_password_step:
+                    try:
+                        await self._prefill_google_email(page, login_email)
+                        on_password_step = await self._is_google_password_step(page)
+                    except Exception as e:
+                        logger.debug(f"Could not prefill provided email before password prompt: {e}")
+
+                if not login_email and login_password and on_password_step:
+                    login_email = await self._detect_google_identifier_hint(page)
+
+                if not login_email or not login_password:
+                    if not login_email and not login_password:
+                        question = "Please provide your Google email and password so I can automate the login."
+                    elif not login_password:
+                        question = "I have your Google email. Please provide your Google password so I can continue login automatically."
+                    else:
+                        if on_password_step:
+                            question = None
+                        else:
+                            question = "Please provide your Google email so I can continue login automatically."
+
+                    if question:
+                        return WebExecutionResult(
+                            validation_passed=False,
+                            security_passed=True,
+                            error=f"AUTH_REQUIRED: {question}",
+                            execution_time=(datetime.now() - start_time).total_seconds()
+                        )
+
+                login_success = await self._submit_google_login_with_credentials(
+                    page,
+                    email=login_email,
+                    password=login_password,
+                )
+                if not login_success:
+                    # Manual intervention may have completed auth while automation path failed.
+                    try:
+                        if await self._is_google_login_complete(page):
+                            login_success = True
                             self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
                             await self.context.storage_state(path=str(self.cookies_path))
-                            logger.info(f"💾 Cookies saved immediately after auto-login for '{self.current_user}' to {self.cookies_path}")
-                        except Exception as e:
-                            logger.warning(f"⚠️  Could not save cookies after auto-login: {e}")
-                        # After login succeeds, page is already authenticated. Continue with the task on this page.
+                            logger.info("✅ Detected manual Google login completion after automation failure")
+                    except Exception as e:
+                        logger.debug(f"Could not verify manual login completion after automation failure: {e}")
+
+                if not login_success:
+                    if self.last_google_auth_block_reason == "browser_not_secure":
+                        auth_error = self._google_secure_browser_auth_required_message()
                     else:
-                        logger.warning(f"⚠️  On-demand auto-login failed. Continuing anyway (might trigger bot detection)...")
+                        auth_error = (
+                            "AUTH_REQUIRED: I could not complete Google login automatically. "
+                            "Please verify credentials or complete any verification challenge, then retry."
+                        )
+                    return WebExecutionResult(
+                        validation_passed=False,
+                        security_passed=True,
+                        error=auth_error,
+                        execution_time=(datetime.now() - start_time).total_seconds()
+                    )
+
+                try:
+                    self.cookies_path.parent.mkdir(parents=True, exist_ok=True)
+                    await self.context.storage_state(path=str(self.cookies_path))
+                    logger.info(f"💾 Saved Google browser state to {self.cookies_path}")
                 except Exception as e:
-                    logger.error(f"❌ On-demand login failed: {e}")
+                    logger.warning(f"⚠️ Could not persist browser state after manual login: {e}")
+
+                detected_email = await self._capture_logged_in_google_email(page) or login_email
+                if detected_email:
+                    self._update_session_google_auth_hints(session_id, email=detected_email)
+                    should_update_default = (
+                        saved_default_email is None
+                        or (force_switch_account and set_default_requested)
+                        or set_default_requested
+                    )
+                    if should_update_default:
+                        self._save_google_default_email(
+                            google_user_key,
+                            detected_email,
+                            source="manual_login",
+                        )
+                    else:
+                        logger.info("ℹ️ Different account used without default-update request; keeping stored default email unchanged")
+
+                # Do not retain password in memory after successful auth.
+                self._clear_session_google_auth_hints(session_id, clear_email=False)
+
+                if is_auth_prompt:
+                    return WebExecutionResult(
+                        validation_passed=True,
+                        security_passed=True,
+                        output="EXECUTION_SUCCESS: Google sign-in completed.",
+                        page_url=page.url,
+                        page_title=await page.title(),
+                        execution_time=(datetime.now() - start_time).total_seconds()
+                    )
 
             # ── GOOGLE BOT-DETECTION ERROR PAGE RECOVERY ─────────────────────
             # When Google shows "having trouble accessing Google Search", the page
@@ -1507,27 +2542,41 @@ class WebExecutionPipeline:
             # The next task then runs on about:blank (wrong page) or tries to
             # interact with the error page and crashes.  Detect this state here
             # and reload back to google.com so the existing session is preserved.
-            try:
-                current_url = page.url
-                if 'google' in current_url and current_url != 'about:blank':
-                    page_text = await page.evaluate("() => document.body && document.body.innerText || ''")
-                    if 'having trouble' in page_text.lower() or (
-                        'google search' in page_text.lower() and len(page_text.strip()) < 500
-                    ):
-                        logger.warning("⚠️ Google bot-detection error page detected — reloading to google.com")
-                        await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
-                        await page.wait_for_timeout(2000)
-                        logger.info("✅ Recovered to google.com homepage")
-            except Exception as _recovery_err:
-                logger.debug(f"Bot-detection recovery check skipped: {_recovery_err}")
+            if is_google_task:
+                try:
+                    if await self._detect_google_secure_browser_warning(page):
+                        return WebExecutionResult(
+                            validation_passed=False,
+                            security_passed=True,
+                            error=self._google_secure_browser_auth_required_message(),
+                            execution_time=(datetime.now() - start_time).total_seconds()
+                        )
+
+                    blocked = await self._detect_google_interstitial(page)
+                    if blocked:
+                        self.stats["google_block_detected"] += 1
+                        logger.warning("⚠️ Google interstitial detected — starting bounded recovery")
+                        recovered = await self._recover_google_interstitial(page)
+                        if not recovered:
+                            return WebExecutionResult(
+                                validation_passed=False,
+                                security_passed=True,
+                                error="Google interstitial detected and recovery failed after bounded retries. Please wait and retry.",
+                                execution_time=(datetime.now() - start_time).total_seconds()
+                            )
+                except Exception as _recovery_err:
+                    logger.debug(f"Bot-detection recovery check skipped: {_recovery_err}")
 
             # ── Strip any error context that was appended by the bridge on
             #    retry so it never contaminates the original prompt.
             # The bridge appends " | Previous errors: ..." — remove that part.
-            clean_prompt = re.split(r'\s*\|\s*Previous errors?:', ai_prompt)[0].strip()
+            clean_prompt = re.split(r'\s*\|\s*Previous errors?:', prompt_text, flags=re.IGNORECASE)[0].strip()
             
             # ✅ INJECT INPUT_CONTENT FROM CROSS-AGENT DATA BRIDGE
-            input_content = task.get('extra_params', {}).get('input_content')
+            extra_params = task.get('extra_params', {})
+            if not isinstance(extra_params, dict):
+                extra_params = {}
+            input_content = extra_params.get('input_content')
             if input_content:
                 clean_prompt = f"{clean_prompt}\n\n⚙️ Use the following content from a previous step:\n{input_content}"
                 logger.info(f"📬 Prepended input_content ({len(input_content)} chars) to web RAG prompt")
@@ -1677,6 +2726,17 @@ class WebExecutionPipeline:
             logger.info(f"🚀 Executing RAG-generated code")
             _url_before_exec = page.url
             result = await self._execute_generated_code(page, generated_code, task_id)
+
+            if result.get('success'):
+                self.stats["dom_success"] += 1
+            else:
+                visual_result = await self._try_visual_fallback_action(page, task, task_id)
+                if visual_result is not None:
+                    result = visual_result
+                    if result.get('success'):
+                        logger.info("✅ Visual fallback succeeded after DOM failure")
+                    else:
+                        logger.warning(f"⚠️ Visual fallback returned failure: {result.get('error')}")
 
             # FIX: invalidate cache after ANY click/submit — Google auth keeps same URL
             # but swaps the entire DOM (email page → password page). Force refresh.
@@ -2228,88 +3288,34 @@ async def __rag_step__(page):
         except Exception:
             pass  # non-fatal
     
-    async def auto_login_google(self, page, username: str) -> bool:
+    async def auto_login_google(self, page, user_key: str) -> bool:
         """
-        Automatically log into Google account using credentials from USER_ACCOUNTS.
-        Called on-demand when a Google task is executed.
-        Returns True if login succeeded, False otherwise.
+        Backward-compatible login helper.
+        Uses saved default email, then waits for user to complete password/2FA manually.
         """
         try:
-            if username not in USER_ACCOUNTS:
-                logger.error(f"❌ User '{username}' not found in USER_ACCOUNTS mapping")
-                logger.info(f"📝 Configure your account in USER_ACCOUNTS dict in google_accounts.py")
+            saved_default_email = self._get_saved_google_default_email(user_key)
+            if not saved_default_email:
+                logger.info(f"ℹ️ No saved default Google email for '{user_key}'")
                 return False
-            
-            account = USER_ACCOUNTS[username]
-            email = account['email']
-            password = account['password']
-            
-            logger.info(f"🔐 Auto-logging in Google account for user: {username}")
-            
-            # Navigate to Google login
-            await page.goto('https://accounts.google.com/signin', wait_until='networkidle')
-            await page.wait_for_timeout(2000)
-            
-            # Step 1: Enter email and press Enter (NOT clicking Next button)
-            try:
-                # IMPORTANT: Do NOT await the locator itself. Locators are synchronous.
-                # Only await the .fill() method call on the locator.
-                await page.locator('input[type="email"]').first.fill(email)
-                await page.keyboard.press('Enter')
-                await page.wait_for_timeout(2000)
-                logger.info(f"✅ Entered email and pressed Enter")
-            except Exception as e:
-                logger.error(f"❌ Failed to enter email: {e}")
+
+            await page.goto('https://accounts.google.com/signin', wait_until='domcontentloaded', timeout=15000)
+            await page.wait_for_timeout(400)
+            if not await self._prefill_google_email(page, saved_default_email):
                 return False
-            
-            # Step 2: Wait for password field and enter password, then press Enter
-            try:
-                await page.wait_for_selector('input[type="password"]', state='visible', timeout=10000)
-                await page.locator('input[type="password"]').first.fill(password)
-                await page.keyboard.press('Enter')
-                await page.wait_for_timeout(3000)
-                logger.info(f"✅ Entered password and pressed Enter")
-            except Exception as e:
-                logger.error(f"❌ Failed to enter password: {e}")
+
+            logged_in = await self._wait_for_manual_google_login(
+                page,
+                timeout_ms=self.config.google_manual_login_timeout_ms,
+            )
+            if not logged_in:
                 return False
-            
-            # Step 3: Verify login success by checking we're off the signin page
+
             try:
-                await page.wait_for_url(lambda url: 'signin' not in url.lower(), timeout=10000)
-                # Verify we're actually logged in by checking for account indicators
-                # Wait a moment for page to fully load
-                await page.wait_for_timeout(1000)
-                
-                # Try to verify authentication by checking for Google account elements
-                try:
-                    # Look for account email in page (indicates logged in state)
-                    account_email = await page.evaluate("""() => {
-                        const elements = Array.from(document.querySelectorAll('[aria-label*="account"], [aria-label*="Account"]'));
-                        return elements.length > 0 || document.body.innerText.includes(arguments[0] || 'accounts');
-                    }""")
-                    if account_email:
-                        logger.info(f"✅ Account indicators found - login verified for {username}")
-                except:
-                    pass  # Verification check failed but we're off signin page anyway
-                
-                # CRITICAL: Navigate to google.com to establish the authenticated session properly
-                # This ensures cookies work across all Google domains (search, account, etc.)
-                logger.info(f"🌐 Navigating to google.com to establish authenticated session...")
                 await page.goto('https://www.google.com', wait_until='domcontentloaded', timeout=15000)
-                await page.wait_for_timeout(1500)
-                
-                logger.info(f"✅ Google auto-login succeeded for {username}")
-                return True
-            except Exception as e:
-                current_url = page.url
-                if '/signin' in current_url.lower():
-                    logger.error(f"❌ Still on signin page. URL: {current_url}")
-                    return False
-                else:
-                    # We're off the signin page, so login probably worked
-                    logger.info(f"✅ Navigation succeeded. URL: {current_url}")
-                    return True
-                
+            except Exception:
+                pass
+            return True
         except Exception as e:
             logger.error(f"❌ Auto-login failed: {e}")
             return False
@@ -2341,6 +3347,12 @@ async def __rag_step__(page):
             
             if self.playwright:
                 await self.playwright.stop()
+
+            if self._google_profile_client is not None:
+                try:
+                    self._google_profile_client.close()
+                except Exception:
+                    pass
             
             logger.info("✅ Playwright cleanup complete")
             
@@ -2512,6 +3524,7 @@ class CoordinatorWebBridge:
                     'task_id': task.task_id,
                     'ai_prompt': task.ai_prompt,   # ← always the original, no suffix
                     'web_params': task.web_params,
+                    'extra_params': task.extra_params,
                 }
                 
                 exec_result = await self.web.execute_web_task(task_dict, session_id)

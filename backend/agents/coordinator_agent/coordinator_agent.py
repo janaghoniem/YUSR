@@ -168,6 +168,78 @@ def sanitize_confirmation_for_prompt(text: str) -> str:
 
     return text
 
+
+def _get_user_request_text(user_request: Dict[str, Any]) -> str:
+    """Get best-effort raw user text for intent parsing."""
+    if not isinstance(user_request, dict):
+        return str(user_request or "")
+    for key in ("original_input", "action", "confirmation"):
+        value = user_request.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(user_request)
+
+
+def _looks_like_email_send_intent(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(re.search(r"\b(send|compose|draft|write)\s+(an?\s+)?(email|mail|gmail|message)\b", t))
+
+
+def _clean_email_field_value(value: str) -> str:
+    cleaned = (value or "").strip().strip('"\'').strip()
+    while cleaned and cleaned[0] in {":", "=", "-", ","}:
+        cleaned = cleaned[1:].strip()
+    return cleaned.rstrip(".,;!?").strip()
+
+
+def _extract_email_send_payload(user_request: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Extract direct send-email payload (to, subject, body) when explicitly provided."""
+    text = _get_user_request_text(user_request)
+    if not _looks_like_email_send_intent(text):
+        return None
+
+    recipient = None
+    recipient_match = re.search(
+        r"\bto\s+([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
+        text,
+        re.IGNORECASE,
+    )
+    if recipient_match:
+        recipient = recipient_match.group(1).strip()
+    else:
+        any_email = re.search(r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", text)
+        if any_email:
+            recipient = any_email.group(1).strip()
+
+    subject = None
+    subject_patterns = [
+        r"\bsubject\s*(?:is|=|:)?\s*[\"']?(.+?)[\"']?(?=\s+(?:and\s+)?(?:body|content|message|text)\b|$)",
+        r"\bwith\s+subject\s*[\"']?(.+?)[\"']?(?=\s+(?:and\s+)?(?:body|content|message|text)\b|$)",
+    ]
+    for pattern in subject_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            subject = _clean_email_field_value(match.group(1))
+            if subject:
+                break
+
+    body = None
+    body_patterns = [
+        r"\b(?:body|content|message|text)\s*(?:is|=|:)?\s*[\"']?(.+?)[\"']?(?=\s+(?:and\s+)?subject\b|$)",
+        r"\bwith\s+(?:body|content|message|text)\s*[\"']?(.+?)[\"']?(?=\s+(?:and\s+)?subject\b|$)",
+    ]
+    for pattern in body_patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            body = _clean_email_field_value(match.group(1))
+            if body:
+                break
+
+    if recipient and subject and body:
+        return {"to": recipient, "subject": subject, "body": body}
+
+    return None
+
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -185,12 +257,14 @@ def extract_credentials_from_request(user_request: Dict) -> Dict[str, Optional[s
     - "write password mypass"
     """
     
-    # ✅ FIX: Look in multiple fields for credentials
+    # ✅ FIX: Prefer raw user input over paraphrased confirmation text.
     text = ""
-    if 'confirmation' in user_request:
-        text = str(user_request.get('confirmation', ''))
-    elif 'action' in user_request:
+    if 'original_input' in user_request and str(user_request.get('original_input', '')).strip():
+        text = str(user_request.get('original_input', ''))
+    elif 'action' in user_request and str(user_request.get('action', '')).strip():
         text = str(user_request.get('action', ''))
+    elif 'confirmation' in user_request:
+        text = str(user_request.get('confirmation', ''))
     else:
         text = str(user_request)
     
@@ -217,24 +291,22 @@ def extract_credentials_from_request(user_request: Dict) -> Dict[str, Optional[s
     
     # Pattern priorities (most specific first)
     password_patterns = [
+        # "password is X" must come first to avoid capturing "is" as password
+        r'password\s+is\s+([^\s,.!?]+)',
+        r'pass\s+is\s+([^\s,.!?]+)',
+
         # Direct password patterns
-        r'password[\s:]+([^\s,.!?]+)',      # "password mypass"
-        r'pwd[\s:]+([^\s,.!?]+)',           # "pwd mypass"
-        r'pass[\s:]+([^\s,.!?]+)',          # "pass mypass"
+        r'password[\s:=]+([^\s,.!?]+)',      # "password mypass"
+        r'pwd[\s:=]+([^\s,.!?]+)',           # "pwd mypass"
+        r'pass[\s:=]+([^\s,.!?]+)',          # "pass mypass"
         
         # With connector words
-        r'and[\s]+password[\s:]+([^\s,.!?]+)',      # "and password mypass"
-        r'with[\s]+password[\s:]+([^\s,.!?]+)',     # "with password mypass"
-        r'using[\s]+password[\s:]+([^\s,.!?]+)',    # "using password mypass"
+        r'and\s+password[\s:=]+([^\s,.!?]+)',      # "and password mypass"
+        r'with\s+password[\s:=]+([^\s,.!?]+)',     # "with password mypass"
+        r'using\s+password[\s:=]+([^\s,.!?]+)',    # "using password mypass"
         
         # Complex patterns for any login/signup
-        r'(?:login|sign in|sign up|register|create account).*?password[\s:]+([^\s,.!?]+)',
-        
-        # Password after email
-        r'@[^\s]+[\s]+([^\s,.!?]{4,})',  # Word after email (min 4 chars)
-        
-        # Generic "password is X" pattern
-        r'password[\s]+is[\s]+([^\s,.!?]+)',
+        r'(?:login|sign in|sign up|register|create account).*?password[\s:=]+([^\s,.!?]+)',
     ]
     
     for pattern in password_patterns:
@@ -290,7 +362,7 @@ class ActionTask(BaseModel):
     # Interaction: {"action": "fill", "text": "search query"}  # Selector comes from RAG
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
-    target_agent: Literal["action", "reasoning", "language"] = "action"
+    target_agent: Literal["action", "reasoning", "language", "email"] = "action"
     depends_on: Optional[List[str]] = None
     
     class Config:
@@ -399,6 +471,145 @@ def _decide_execution_clarification_action(task: ActionTask, event: Dict[str, An
         "decision": "fail_safely",
         "reason": "Unrecoverable execution state",
     }
+
+
+def _email_api_credentials_missing(result: TaskResult) -> bool:
+    """Detect missing Gmail API credentials from structured metadata or error text."""
+    metadata = result.metadata or {}
+    if isinstance(metadata, dict) and metadata.get("email_api_credentials_missing"):
+        return True
+
+    combined = " ".join(filter(None, [result.error, result.details, result.content])).lower()
+    if "no credentials for user" in combined or "no credentials found for user" in combined:
+        return True
+    return False
+
+
+def _build_email_web_fallback_task(task: ActionTask) -> Optional[ActionTask]:
+    """Create a web compose task when Gmail API credentials are missing for a send operation."""
+    if task.target_agent != "email":
+        return None
+
+    extra_params = task.extra_params or {}
+    operation = str(extra_params.get("operation") or "send").strip().lower()
+    if operation != "send":
+        return None
+
+    recipient = str(extra_params.get("to") or "").strip()
+    subject = str(extra_params.get("subject") or "").strip()
+    body = str(extra_params.get("body") or "").strip()
+
+    if not recipient:
+        return None
+
+    prompt_parts = [
+        "Open Gmail in the browser and compose a new email.",
+        f"Set the recipient to {recipient}.",
+    ]
+    if subject:
+        prompt_parts.append(f"Set the subject to: {subject}.")
+    if body:
+        prompt_parts.append(f"Use this exact message body:\n{body}")
+    prompt_parts.append("Send the email.")
+
+    fallback_extra = dict(extra_params)
+    fallback_extra.update(
+        {
+            "overall_goal": task.goal or task.ai_prompt,
+            "goal": task.goal or task.ai_prompt,
+            "fallback_source": "email_api_missing_credentials",
+            "email_to": recipient,
+            "email_subject": subject,
+            "email_body": body,
+        }
+    )
+
+    return ActionTask(
+        task_id=f"{task.task_id}_web_fallback",
+        goal=task.goal or task.ai_prompt,
+        ai_prompt=" ".join(prompt_parts),
+        device=task.device,
+        context="web",
+        target_agent="action",
+        extra_params=fallback_extra,
+        web_params={},
+        depends_on=None,
+    )
+
+
+async def _attempt_email_web_fallback(
+    task: ActionTask,
+    result: TaskResult,
+    session_id: str,
+    original_message_id: str,
+    user_language: str,
+    output_language: str,
+    user_profile: Optional[Dict[str, Any]],
+    user_id: Optional[str],
+) -> Optional[TaskResult]:
+    """Attempt web compose fallback when email API fails because credentials are missing."""
+    if task.target_agent != "email" or result.status != "failed":
+        return None
+
+    if not _email_api_credentials_missing(result):
+        return None
+
+    fallback_task = _build_email_web_fallback_task(task)
+    if not fallback_task:
+        return None
+
+    logger.warning(
+        f"🔁 Gmail API credentials missing for {task.task_id}; trying web compose fallback via {fallback_task.task_id}"
+    )
+
+    fallback_result = await execute_single_task(
+        fallback_task,
+        session_id,
+        original_message_id,
+        user_language,
+        output_language,
+        user_profile,
+        user_id,
+    )
+
+    merged_metadata = dict(result.metadata or {})
+    merged_metadata.update(
+        {
+            "fallback_mode": "email_api_to_web_compose",
+            "fallback_task_id": fallback_task.task_id,
+            "fallback_status": fallback_result.status,
+        }
+    )
+    if fallback_result.metadata:
+        merged_metadata["web_fallback_metadata"] = fallback_result.metadata
+
+    if fallback_result.status == "success":
+        logger.info(f"✅ Web compose fallback succeeded for {task.task_id}")
+        return TaskResult(
+            task_id=task.task_id,
+            status="success",
+            content=fallback_result.content or "Email sent using web fallback.",
+            details=fallback_result.details or "email:send_web_fallback",
+            metadata=merged_metadata,
+            error=None,
+        )
+
+    logger.error(
+        f"❌ Web compose fallback failed for {task.task_id}: {fallback_result.error}"
+    )
+    return TaskResult(
+        task_id=task.task_id,
+        status=fallback_result.status,
+        content=fallback_result.content,
+        error=fallback_result.error
+        or "Web compose fallback failed after Gmail API credentials were missing.",
+        details=fallback_result.details,
+        metadata=merged_metadata,
+        needs_clarification=fallback_result.needs_clarification,
+        clarification_question=fallback_result.clarification_question,
+        clarification_type=fallback_result.clarification_type,
+        recoverable=fallback_result.recoverable,
+    )
 
 # --- Queue Management (unchanged) ---
 class TaskQueue:
@@ -524,10 +735,50 @@ async def decompose_task_to_actions(
     current_page_url: str = None  # ✅ BROWSER STATE: current browser URL hala edit ll web
 ) -> Dict[str, Any]:
     """Decompose user request into ActionTask queue - URLs resolved by execution layer"""
+    request_text = _get_user_request_text(user_request)
+
+    # Direct email API short-circuit: avoid unnecessary Gmail UI/login automation.
+    direct_email_payload = _extract_email_send_payload(user_request)
+    if direct_email_payload:
+        logger.info(
+            f"📧 Direct Email API routing detected for recipient {direct_email_payload['to']}"
+        )
+        email_task = ActionTask(
+            task_id="task_1",
+            goal=f"Send an email to {direct_email_payload['to']}",
+            ai_prompt="Send an email via Gmail API",
+            device=device_type,
+            context="local",
+            target_agent="email",
+            extra_params={
+                "operation": "send",
+                "to": direct_email_payload["to"],
+                "subject": direct_email_payload["subject"],
+                "body": direct_email_payload["body"],
+            },
+            web_params={},
+            depends_on=None,
+        )
+        return {"tasks": [email_task]}
     
     # ✅ FIX 2: Extract credentials FIRST - FOR ANY LOGIN/SIGNUP TASK
-    login_keywords = ['login', 'sign in', 'sign up', 'register', 'create account', 'log in']
-    is_login_task = any(keyword in str(user_request).lower() for keyword in login_keywords)
+    login_keywords = ['login', 'sign in', 'sign up', 'register', 'create account', 'log in', 'authenticate']
+    full_text = request_text.lower()
+    is_email_send_intent = _looks_like_email_send_intent(request_text)
+    is_login_task = any(keyword in full_text for keyword in login_keywords)
+
+    # Credential-only follow-ups may omit explicit login keywords.
+    if not is_login_task and not is_email_send_intent:
+        has_password_phrase = any(kw in full_text for kw in ['password', 'pwd', 'pass', 'credential'])
+        has_explicit_email_credential = bool(
+            re.search(
+                r'(?:email|username|user)\s*(?:is|:|=)\s*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
+                full_text,
+                re.IGNORECASE,
+            )
+        )
+        if has_password_phrase or has_explicit_email_credential:
+            is_login_task = True
     
     credentials = None
     if is_login_task:
@@ -1007,7 +1258,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
     "ai_prompt": <string>,
     "device": <"desktop" | "mobile">,
     "context": <"local" | "web">,
-    "target_agent": <"action" | "reasoning" | "language">,
+    "target_agent": <"action" | "reasoning" | "language" | "email">,
     "extra_params": <object>,
     "web_params": <object>,
     "depends_on": <array of strings | null>
@@ -1285,6 +1536,47 @@ def create_coordinator_graph():
         original_message_id = state.get("original_message_id")
         device_type = raw_task.get("device_type", "desktop")
 
+        # Resume paused credentials-required tasks instead of decomposing a fresh plan.
+        saved_browser = _session_browser_state.get(session_id, {}) if session_id else {}
+        if saved_browser.get("pending_clarification_type") == "credentials_required":
+            provided = extract_credentials_from_request(raw_task)
+            if provided.get("email") or provided.get("password"):
+                paused_task_data = saved_browser.get("paused_task_data") or {}
+                if paused_task_data:
+                    merged_extra = dict(paused_task_data.get("extra_params") or {})
+                    if provided.get("email"):
+                        merged_extra["google_email"] = provided["email"]
+                    if provided.get("password"):
+                        merged_extra["google_password"] = provided["password"]
+
+                    resumed_task = ActionTask(
+                        task_id=paused_task_data.get("task_id", "task_resume_credentials"),
+                        goal=paused_task_data.get("goal") or "Continue pending authentication flow",
+                        ai_prompt=paused_task_data.get("ai_prompt") or "Continue Google login with provided credentials",
+                        device=paused_task_data.get("device") or device_type,
+                        context=paused_task_data.get("context") or "web",
+                        target_agent=paused_task_data.get("target_agent") or "action",
+                        extra_params=merged_extra,
+                        web_params=paused_task_data.get("web_params") or {},
+                        depends_on=None,
+                    )
+
+                    saved_browser.pop("pending_clarification_type", None)
+                    saved_browser.pop("paused_task_data", None)
+                    _session_browser_state[session_id] = saved_browser
+
+                    logger.info("🔁 Resuming paused credentials-required task without full re-decomposition")
+                    return {
+                        "input": state["input"],
+                        "tasks": [resumed_task],
+                        "status": "ready",
+                        "session_id": session_id,
+                        "original_message_id": original_message_id,
+                        "user_id": user_id,
+                        "preferences_context": "Resumed pending credentials-required task",
+                        "plan_error": "",
+                    }
+
         # Retrieve user preferences
         previous_execution_state = None
 
@@ -1403,6 +1695,7 @@ def create_coordinator_graph():
         tasks = state["tasks"]
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
+        user_id = state.get("user_id", "default_user")
         user_language = state.get("input", {}).get("user_language", "en")
         # output_language: language for task content (may differ from system language)
         output_language = state.get("input", {}).get("output_language", user_language)
@@ -1451,10 +1744,18 @@ def create_coordinator_graph():
                 # Stashed changes version - use both methods for redundancy
                 await checkpointer.aput(
                     config={"configurable": {"thread_id": session_id, "checkpoint_ns": ""}},
-                    checkpoint={"execution_state": execution_state},
-                    metadata={"type": "task_progress"},
+                    checkpoint={
+                        "v": 1,
+                        "id": str(uuid.uuid4()),
+                        "ts": datetime.now().isoformat(),
+                        "channel_values": {"execution_state": execution_state},
+                        "channel_versions": {},
+                        "versions_seen": {},
+                        "pending_sends": [],
+                    },
+                    metadata={"step": 0, "type": "task_progress"},
                     new_versions=[]
-                )    
+                )
                 await save_checkpoint_compat(
                     session_id,
                     {
@@ -1594,8 +1895,21 @@ def create_coordinator_graph():
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
             result = await execute_single_task(
                 current_task, session_id, original_message_id,
-                user_language, output_language, user_profile
+                user_language, output_language, user_profile, user_id
             )
+
+            fallback_result = await _attempt_email_web_fallback(
+                current_task,
+                result,
+                session_id,
+                original_message_id,
+                user_language,
+                output_language,
+                user_profile,
+                user_id,
+            )
+            if fallback_result is not None:
+                result = fallback_result
             
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)
@@ -1604,10 +1918,12 @@ def create_coordinator_graph():
                 url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
                 if url_match:
                     extracted_url = url_match.group(1).strip()
-                    _session_browser_state[session_id] = {
+                    _state = _session_browser_state.get(session_id, {})
+                    _state.update({
                         "current_page_url": extracted_url,
                         "last_web_task": current_task.ai_prompt
-                    }
+                    })
+                    _session_browser_state[session_id] = _state
                     logger.info(f"📍 Browser state saved: {extracted_url}")
             
             # ✅ CAPTURE RICHEST AVAILABLE OUTPUT FOR CROSS-AGENT DATA SHARING
@@ -1665,7 +1981,7 @@ def create_coordinator_graph():
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
                         resolve_result = await execute_single_task(
                             resolve_task, session_id, original_message_id,
-                            user_language, output_language, user_profile
+                            user_language, output_language, user_profile, user_id
                         )
                         results[resolve_task.task_id] = resolve_result
                         task_queue.log_execution(resolve_task, resolve_result)
@@ -1677,6 +1993,20 @@ def create_coordinator_graph():
                         event["decision_reason"] = "Self-resolution failed"
 
                 if event.get("decision") in {"ask_user", "fail_safely"}:
+                    if (
+                        session_id
+                        and event.get("decision") == "ask_user"
+                        and event.get("clarification_type") == "credentials_required"
+                    ):
+                        _state = _session_browser_state.get(session_id, {})
+                        _state.update(
+                            {
+                                "pending_clarification_type": "credentials_required",
+                                "paused_task_data": current_task.model_dump(),
+                                "paused_at": datetime.now().isoformat(),
+                            }
+                        )
+                        _session_browser_state[session_id] = _state
                     clarification_event = event
                     if event.get("decision") == "fail_safely":
                         task_queue.current_queue.clear()
@@ -2153,6 +2483,7 @@ async def execute_single_task(
     user_language: str = "en",
     output_language: str = "en",
     user_profile: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
     
@@ -2217,19 +2548,34 @@ async def execute_single_task(
     elif task.target_agent == "language":
         channel = Channels.COORDINATOR_TO_LANGUAGE
         receiver = AgentType.LANGUAGE
+    elif task.target_agent == "email":
+        channel = Channels.COORDINATOR_TO_EMAIL
+        receiver = AgentType.EMAIL
     else:
         channel = Channels.COORDINATOR_TO_REASONING
         receiver = AgentType.REASONING
     
     task_payload = task.model_dump()
+    extra_params = task_payload.get("extra_params") or {}
+    if not isinstance(extra_params, dict):
+        extra_params = {}
+    if user_id:
+        extra_params["user_id"] = user_id
+        task_payload["user_id"] = user_id
+    task_payload["extra_params"] = extra_params
+
+    if task.target_agent == "email":
+        for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query"]:
+            if key not in task_payload and key in extra_params:
+                task_payload[key] = extra_params[key]
+        if "operation" not in task_payload:
+            task_payload["operation"] = "send"
+
     if task.target_agent == "reasoning":
         task_payload["user_language"] = user_language
         # Pass output_language (may differ from user_language when user requests a different
         # language for the task output, e.g. Arabic user asking for an English summary)
         task_payload["output_language"] = output_language or user_language
-        extra_params = task_payload.get("extra_params") or {}
-        if not isinstance(extra_params, dict):
-            extra_params = {}
         extra_params["language"] = output_language or user_language
         # Carry user_profile so Reasoning Agent can personalize its output style
         if user_profile:
@@ -2259,7 +2605,8 @@ async def execute_single_task(
     
     # Wait for result
     try:
-        result_payload = await asyncio.wait_for(future, timeout=60)
+        task_timeout_seconds = int(os.getenv("COORDINATOR_TASK_TIMEOUT_SECONDS", "120"))
+        result_payload = await asyncio.wait_for(future, timeout=task_timeout_seconds)
         payload_status = result_payload.get("status", "failed")
         if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
             payload_status = "failed"
@@ -2285,7 +2632,7 @@ async def execute_single_task(
             recoverable=bool(result_payload.get("recoverable", False)),
         )
     except asyncio.TimeoutError:
-        logger.error(f"⏰ Task {task.task_id} timeout after 60 seconds")
+        logger.error(f"⏰ Task {task.task_id} timeout after {os.getenv('COORDINATOR_TASK_TIMEOUT_SECONDS', '120')} seconds")
         return TaskResult(
             task_id=task.task_id,
             status="failed",
@@ -2587,6 +2934,7 @@ async def start_coordinator_agent(broker_instance):
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_task_from_language)
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.EXECUTION_TO_COORDINATOR, handle_action_result)
+    broker_instance.subscribe(Channels.EMAIL_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.REASONING_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.INTERRUPT_CONTROL, handle_interrupt_command)
     broker_instance.subscribe(Channels.SESSION_CONTROL, handle_session_control)

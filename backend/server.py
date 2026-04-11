@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import sys
+    
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 # Configure logging FIRST before any other code
@@ -34,7 +36,7 @@ from agents.utils.broker import broker
 from agents.language_agent import start_language_agent
 from agents.coordinator_agent.coordinator_agent import start_coordinator_agent
 from agents.reasoning_agent import start_reasoning_agent
-# from agents.execution_agent.Coordinator import start_execution_agent
+from agents.email_agent import start_email_agent
 from agents.execution_agent.RAG.code_execution import initialize_execution_agent_for_server
 from agents.execution_agent.strategies.task_memory import TaskMemory
 from agents.utils.protocol import (
@@ -154,6 +156,10 @@ async def lifespan(app: FastAPI):
         
         logger.info("🚀 Starting Reasoning Agent...")
         asyncio.create_task(start_reasoning_agent())
+        await asyncio.sleep(0.1)
+        
+        logger.info("🚀 Starting Email Agent...")
+        asyncio.create_task(start_email_agent(broker))
         await asyncio.sleep(0.1)
         
         logger.info("🚀 Starting Execution Agent...")
@@ -2073,18 +2079,268 @@ async def delete_chat(session_id: str, user_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# EMAIL API ENDPOINTS
+# ============================================================================
+
+@app.post("/api/email/oauth/authorize")
+async def email_oauth_authorize(user_id: str):
+    """
+    Initiate Gmail OAuth flow
+    Returns authorization URL for user to grant access
+    """
+    try:
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        auth_url, state = await agent.initiate_oauth_flow(user_id)
+        
+        if not auth_url:
+            raise HTTPException(status_code=500, detail="Failed to initiate OAuth flow")
+        
+        logger.info(f"✅ OAuth flow initiated for user {user_id}")
+        
+        return {
+            "status": "success",
+            "auth_url": auth_url,
+            "state": state,
+            "message": "Please visit the authorization URL to grant Gmail access"
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ OAuth authorization failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/email/oauth/callback")
+async def email_oauth_callback(user_id: str, code: str):
+    """
+    Handle Gmail OAuth callback
+    Exchange authorization code for access token
+    """
+    try:
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        success = await agent.handle_oauth_callback(user_id, code)
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to process OAuth callback")
+        
+        logger.info(f"✅ OAuth callback processed for user {user_id}")
+        
+        return {
+            "status": "success",
+            "message": "Gmail access granted successfully",
+            "user_id": user_id
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/email/send")
+async def send_email(request: Request):
+    """
+    Send email via Gmail API
+    
+    Requires: user_id, to, subject, body
+    Optional: attachments (list of {path, name})
+    """
+    try:
+        data = await request.json()
+        user_id = data.get("user_id")
+        to = data.get("to")
+        subject = data.get("subject")
+        body = data.get("body")
+        attachments = data.get("attachments")
+        session_id = data.get("session_id", "default")
+        
+        if not all([user_id, to, subject, body]):
+            raise HTTPException(status_code=400, detail="Missing required fields: user_id, to, subject, body")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        result = await agent.send_email(user_id, to, subject, body, attachments)
+        
+        if result.status != "success":
+            raise HTTPException(status_code=500, detail=result.error or "Failed to send email")
+        
+        logger.info(f"✅ Email sent to {to} for user {user_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Email sent to {to}",
+            "task_id": result.task_id,
+            "session_id": session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Email send failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/email/read")
+async def read_emails(user_id: str, session_id: str = "default", max_results: int = 10, query: str = "is:unread"):
+    """
+    Read unread emails from Gmail
+    
+    Query examples:
+    - "is:unread" (default)
+    - "from:someone@example.com"
+    - "subject:important"
+    - "is:starred"
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Missing user_id")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        result = await agent.read_unread_emails(user_id, max_results=max_results, query=query)
+        
+        if result.status != "success":
+            raise HTTPException(status_code=500, detail=result.error or "Failed to read emails")
+        
+        logger.info(f"✅ Retrieved {result.message_count} emails for user {user_id}")
+        
+        return {
+            "status": "success",
+            "emails": result.result or [],
+            "count": result.message_count,
+            "task_id": result.task_id,
+            "session_id": session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Email read failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/email/extract-code")
+async def extract_otp_code(user_id: str, session_id: str = "default", max_results: int = 5):
+    """
+    Extract OTP codes from recent unread emails
+    Useful for automation of 2FA protected services
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Missing user_id")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        result = await agent.extract_otp_codes(user_id, max_results=max_results)
+        
+        if result.status != "success":
+            raise HTTPException(status_code=500, detail=result.error or "Failed to extract OTP codes")
+        
+        logger.info(f"✅ Extracted {result.message_count} OTP codes for user {user_id}")
+        
+        return {
+            "status": "success",
+            "codes": result.result or [],
+            "count": result.message_count,
+            "task_id": result.task_id,
+            "session_id": session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ OTP extraction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/email/extract-links")
+async def extract_magic_links(user_id: str, session_id: str = "default", max_results: int = 5):
+    """
+    Extract magic links (verification, password reset, etc.) from emails
+    Useful for automation of authentication flows
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Missing user_id")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        result = await agent.extract_magic_links(user_id, max_results=max_results)
+        
+        if result.status != "success":
+            raise HTTPException(status_code=500, detail=result.error or "Failed to extract links")
+        
+        logger.info(f"✅ Extracted {result.message_count} magic links for user {user_id}")
+        
+        return {
+            "status": "success",
+            "links": result.result or [],
+            "count": result.message_count,
+            "task_id": result.task_id,
+            "session_id": session_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Link extraction failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/email/oauth/disconnect")
+async def disconnect_email(user_id: str):
+    """
+    Disconnect/revoke Gmail access for user
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Missing user_id")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        await agent.revoke_credentials(user_id)
+        
+        logger.info(f"✅ Gmail access revoked for user {user_id}")
+        
+        return {
+            "status": "success",
+            "message": "Gmail access revoked successfully",
+            "user_id": user_id
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Disconnect failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
     
 if __name__ == "__main__":
     import uvicorn
     
     port = int(os.getenv("PORT", 8000))
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
+
+    reload_enabled = os.getenv("UVICORN_RELOAD", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if sys.platform == "win32" and reload_enabled:
+        logger.warning("⚠️ UVICORN_RELOAD=true can break Playwright on Windows; forcing reload=False")
+        reload_enabled = False
     
     uvicorn.run(
-        "server:app",
+        app,
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=reload_enabled,
         log_level="info",
         access_log=False  # ✅ Disable uvicorn's built-in HTTP access logging
     ) 

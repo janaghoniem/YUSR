@@ -1518,7 +1518,11 @@ function App() {
       )}
 
       {authState === "onboard" && (
-        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+        <OnboardingPage 
+          userId={userId} 
+          onComplete={handleOnboardingComplete} 
+          onBack={() => setAuthState("login")}
+        />
       )}
 
       {authState === "app" && (

@@ -175,8 +175,11 @@ class ScreenReader {
           if (e.error !== 'interrupted' && e.error !== 'canceled') {
             console.warn(`ScreenReader error on sentence ${index}:`, e.error);
           }
+          // IMPORTANT: Even if interrupted, if we are the last utterance OR getting interrupted entirely,
+          // we must ensure the promise sequence resolves.
           if (index === sentences.length - 1) {
             this.isSpeaking = false;
+            // Note: If deliberate stop was called, we rely on the NEW speech calling its own onComplete.
             resolve();
           }
         };

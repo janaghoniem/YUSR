@@ -21,31 +21,41 @@ const LoginPage = ({ onLogin, onSignUp }) => {
 
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
-  
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const silenceFrameRef = useRef(null);
-  const noSpeechTimeoutRef = useRef(null);
-  const audioContextRef = useRef(null);
+  const recognitionRef = useRef(null);
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop();
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (e) {}
     }
     setIsListening(false);
-    if (silenceFrameRef.current) cancelAnimationFrame(silenceFrameRef.current);
-    if (noSpeechTimeoutRef.current) clearTimeout(noSpeechTimeoutRef.current);
-    if (audioContextRef.current) {
-      try { audioContextRef.current.close(); } catch (e) {}
-      audioContextRef.current = null;
-    }
   };
 
   const handleTranscript = (text) => {
     if (!text) return;
     const lower = text.toLowerCase();
+
+    // If currently in face login view, handle specific commands
+    if (showFaceLogin) {
+      if (lower.includes("start face scan") || lower.includes("scan") || lower.includes("start scan")) {
+        window.dispatchEvent(new CustomEvent('face-capture-start-scan'));
+        setTranscript("");
+      } else if (lower.includes("use this photo") || lower.includes("use photo") || lower.includes("use") || lower.includes("confirm")) {
+        window.dispatchEvent(new CustomEvent('face-capture-use-photo'));
+        setTranscript("");
+      } else if (lower.includes("retake") || lower.includes("retake photo") || lower.includes("try again")) {
+        window.dispatchEvent(new CustomEvent('face-capture-retake-photo'));
+        setTranscript("");
+      } else if (lower.includes("back") || lower.includes("back to login") || lower.includes("cancel")) {
+        intentionalStop.current = false;
+        setShowFaceLogin(false);
+        setShowManualLogin(false);
+        setTranscript("");
+      }
+      return;
+    }
+
     if (lower.includes("face")) {
-      intentionalStop.current = true;
+      intentionalStop.current = false;
       stopRecording();
       setShowFaceLogin(true);
       setTranscript("");
@@ -62,98 +72,62 @@ const LoginPage = ({ onLogin, onSignUp }) => {
     }
   };
 
-  const processAudio = async (blob) => {
-    const reader = new FileReader();
-    reader.readAsDataURL(blob);
-    reader.onloadend = async () => {
-      const base64 = reader.result.split(",")[1];
-      try {
-        const res = await fetch("http://localhost:8000/transcribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ audio_data: base64, session_id: "login", user_id: "login" }),
-        });
-        const data = await res.json();
-        if (res.ok && data.transcript) {
-          setTranscript(data.transcript);
-          handleTranscript(data.transcript);
-        }
-      } catch (err) {
-        console.error("Transcription error:", err);
-      } finally {
-        if (!intentionalStop.current) startRecording();
-      }
-    };
-  };
-
   const startRecording = async () => {
     if (intentionalStop.current) return;
+    
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        stream.getTracks().forEach((t) => t.stop());
-        if (!intentionalStop.current) processAudio(blob);
-      };
-
-      recorder.start();
       setIsListening(true);
       setSttError("");
+      
+      // Explicitly request microphone access first to wake up Electron's permissions
+      await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const audioCtx = new AudioCtx();
-      audioContextRef.current = audioCtx;
-      const sourceNode = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      sourceNode.connect(analyser);
-      const bufferLength = analyser.fftSize;
-      const dataArray = new Uint8Array(bufferLength);
-      let silentStart = null;
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        setSttError("STT unsupported.");
+        setIsListening(false);
+        return;
+      }
 
-      const checkSilence = () => {
-        analyser.getByteTimeDomainData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < bufferLength; i++) {
-          sum += Math.abs(dataArray[i] - 128);
-        }
-        const avg = sum / bufferLength;
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+      recognitionRef.current = recognition;
 
-        if (avg < 3) {
-          if (!silentStart) silentStart = Date.now();
-          else if (Date.now() - silentStart > 3000) {
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-              mediaRecorderRef.current.stop();
-            }
-          }
-        } else {
-          silentStart = null;
-        }
+      recognition.onstart = () => {
+        setIsListening(true);
+        setSttError("");
+      };
 
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          silenceFrameRef.current = requestAnimationFrame(checkSilence);
+      recognition.onresult = (event) => {
+        if (intentionalStop.current) return;
+        const currentTranscript = event.results[0][0].transcript;
+        setTranscript(currentTranscript);
+        handleTranscript(currentTranscript);
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          console.error("Local SpeechRecognition error:", event.error);
+          setSttError(`Mic Error: ${event.error}`);
         }
       };
 
-      silenceFrameRef.current = requestAnimationFrame(checkSilence);
-
-      noSpeechTimeoutRef.current = setTimeout(() => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          mediaRecorderRef.current.stop();
+      recognition.onend = () => {
+        if (!intentionalStop.current && !isSpeaking) {
+          try {
+            recognition.start();
+          } catch (e) {}
+        } else {
+          setIsListening(false);
         }
-      }, 10000);
+      };
 
+      recognition.start();
     } catch (err) {
-      console.error("Mic access denied:", err);
-      setSttError("Microphone access denied.");
+      console.error("Local STT Error:", err);
+      setSttError("Mic access denied");
       setIsListening(false);
     }
   };
@@ -269,7 +243,6 @@ const LoginPage = ({ onLogin, onSignUp }) => {
 
         {/* Soft gradient Pink background alongside cinematic */}
         <Aurora />
-        <AudioIndicator isSpeaking={isSpeaking} isListening={isListening} transcript={transcript} error={sttError} />
 
         {/* Background Cinematic iframe */}
         <iframe
@@ -285,12 +258,17 @@ const LoginPage = ({ onLogin, onSignUp }) => {
           title="Cinematic Background"
         />
 
+        <div style={{ position: "relative", zIndex: 1000 }}>
+          <AudioIndicator isSpeaking={isSpeaking} isListening={isListening} transcript={transcript} error={sttError} />
+        </div>
+
         <div style={{ position: "relative", zIndex: 10, width: "100%", height: "100%", display: "flex", justifyContent: "center", alignItems: "center" }}>
           <SpotlightCard className="onboarding-container spotlight-override" spotlightColor="rgba(255, 255, 255, 0.1)">
             <button 
               className="onboarding-btn ghost" 
               onClick={() => { setShowFaceLogin(false); setShowManualLogin(false); }}
-              style={{ alignSelf: "flex-start", marginBottom: "1rem", padding: "8px 0" }}
+              style={{ alignSelf: "flex-start", marginBottom: "0.5rem", padding: "8px 12px", width: "auto", flexWrap: "wrap", whiteSpace: "normal" }}
+              aria-label="Go back to manual login"
             >
               <ShinyText text="← Back to Login" disabled={false} speed={3} className="" />
             </button>
@@ -299,6 +277,16 @@ const LoginPage = ({ onLogin, onSignUp }) => {
               onCancel={() => { setShowFaceLogin(false); setShowManualLogin(false); }}
               mode="login"
               username={showManualLogin ? username : undefined}
+              onSpeakStart={() => { 
+                setIsSpeaking(true); 
+                intentionalStop.current = true; 
+                stopRecording(); 
+              }}
+              onSpeakEnd={() => { 
+                setIsSpeaking(false); 
+                intentionalStop.current = false; 
+                startRecording(); 
+              }}
             />
           </SpotlightCard>
         </div>
@@ -322,7 +310,6 @@ const LoginPage = ({ onLogin, onSignUp }) => {
 
       {/* Soft gradient Pink background alongside cinematic */}
       <Aurora />
-      <AudioIndicator isSpeaking={isSpeaking} isListening={isListening} transcript={transcript} error={sttError} />
 
       {/* Background Cinematic iframe */}
       <iframe
@@ -337,6 +324,10 @@ const LoginPage = ({ onLogin, onSignUp }) => {
         }}
         title="Cinematic Background"
       />
+
+      <div style={{ position: "relative", zIndex: 1000 }}>
+        <AudioIndicator isSpeaking={isSpeaking} isListening={isListening} transcript={transcript} error={sttError} />
+      </div>
       
       <div style={{ position: "relative", zIndex: 10, width: "100%", height: "100%", display: "flex", justifyContent: "center", alignItems: "center" }}>
         <SpotlightCard className="onboarding-container spotlight-override" spotlightColor="rgba(255, 255, 255, 0.1)">

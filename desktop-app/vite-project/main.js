@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, screen } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, screen, session } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -111,6 +111,21 @@ ipcMain.handle("widget:exit", () => {
 /* ================================================ */
 
 app.whenReady().then(() => {
+  // Allow microphone and camera explicitly for local SpeechRecognition and Face Login
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (permission === 'media') {
+      return true;
+    }
+    return false;
+  });
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
+
   Menu.setApplicationMenu(null);
   createWindow();
 

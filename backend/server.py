@@ -499,9 +499,9 @@ async def process_user_input(request: Request):
                     kw in _answer_lower_http for kw in ["delete", "open", "create", "list", "send", "copy", "move", "show"]
                 ))
             )
-            _msg_type_http = MessageType.CLARIFICATION_RESPONSE if _is_short_confirmation_http else MessageType.TASK_REQUEST
+            _msg_type_http = MessageType.CONFIRMATION_RESPONSE if _is_short_confirmation_http else MessageType.CLARIFICATION_RESPONSE
             if not _is_short_confirmation_http:
-                logger.info(f"↩️ HTTP clarification looks like a new task — routing as TASK_REQUEST: '{user_input[:60]}'")
+                logger.info(f"↩️ HTTP clarification looks like a new task — routing as CLARIFICATION_RESPONSE: '{user_input[:60]}'")
             message = AgentMessage(
                 message_type=_msg_type_http,
                 sender=AgentType.LANGUAGE,
@@ -524,13 +524,13 @@ async def process_user_input(request: Request):
         logger.info(f"📝 Registered pending response. Total pending: {len(pending_responses)}")
         logger.info(f"📝 Pending IDs: {list(pending_responses.keys())}")
         
-        # NEW: Send initial thinking update in the user's preferred language
+        # First thinking step uses the language detected from actual input text
         await ThinkingStepManager.update_step(
             session_id, "processing_input", message.message_id, language=user_language
         )
         
         logger.info(f"📤 Publishing message to {Channels.LANGUAGE_INPUT}")
-        await broker.publish(Channels.LANGUAGE_INPUT, message)
+        asyncio.create_task(broker.publish(Channels.LANGUAGE_INPUT, message))
         
         logger.info(f"⏰ Waiting up to 60s for response...")
         try:
@@ -708,9 +708,34 @@ async def handle_language_output(message):
         logger.info(f"🔍 Looking for pending response with ID: {target_id}")
         
         if target_id and target_id in pending_responses:
-            logger.info(f"✅ FOUND! Resolving pending request: {target_id}")
-            pending_responses[target_id].set_result(response_content)
-            logger.info(f"✅ Response resolved successfully")
+            if not pending_responses[target_id].done():
+                logger.info(f"✅ FOUND! Resolving pending request: {target_id}")
+                pending_responses[target_id].set_result(response_content)
+                logger.info(f"✅ Response resolved successfully")
+            else:
+                logger.warning(f"⚠️ Pending request already resolved: {target_id}")
+        else:
+            logger.error(f"❌ NO PENDING RESPONSE FOUND for: {target_id}")
+
+    elif message.message_type == MessageType.CONFIRMATION_REQUEST:
+        response_content = {
+            "status": "clarification_needed",
+            "question": message.payload.get("question", "Please confirm."),
+            "response_id": message.message_id
+        }
+        
+        logger.info(f"❓ Confirmation needed: {response_content['question']}")
+        
+        target_id = message.response_to
+        logger.info(f"🔍 Looking for pending response with ID: {target_id}")
+        
+        if target_id and target_id in pending_responses:
+            if not pending_responses[target_id].done():
+                logger.info(f"✅ FOUND! Resolving pending request: {target_id}")
+                pending_responses[target_id].set_result(response_content)
+                logger.info(f"✅ Response resolved successfully")
+            else:
+                logger.warning(f"⚠️ Pending request already resolved: {target_id}")
         else:
             logger.error(f"❌ NO PENDING RESPONSE FOUND for: {target_id}")
     
@@ -804,8 +829,11 @@ async def handle_coordinator_output(message):
         
         target_id = message.response_to
         if target_id and target_id in pending_responses:
-            logger.info(f"✅ Resolving pending request: {target_id}")
-            pending_responses[target_id].set_result(response)
+            if not pending_responses[target_id].done():
+                logger.info(f"✅ Resolving pending request: {target_id}")
+                pending_responses[target_id].set_result(response)
+            else:
+                logger.warning(f"⚠️ Pending request already resolved: {target_id}")
         else:
             logger.warning(f"⚠️ No pending response for {target_id}, trying fallback...")
 
@@ -1040,7 +1068,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await ThinkingStepManager.update_step(
                     session_id, "processing_input", message.message_id, language=user_language
                 )
-                await broker.publish(Channels.LANGUAGE_INPUT, message)
+                asyncio.create_task(broker.publish(Channels.LANGUAGE_INPUT, message))
                 
                 # Wait for response asynchronously (don't block WebSocket read loop)
                 async def wait_and_send(msg_id, fut):
@@ -1055,6 +1083,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 structured = response.get("structured_response") or {}
                                 ws_response = {
                                     "type": "clarification",
+                                    "question": response.get("question", ""),
+                                    "response_id": response.get("response_id", ""),
+                                    "user_language": response.get("user_language"),
+                                    "text": response.get("text", ""),
+                                    "spoken_text": response.get("text", ""),
+                                    "structured_response": structured,
+                                    "full_content": structured.get("full_content", ""),
+                                    "offer_read_aloud": structured.get("offer_read_aloud", False),
+                                    "offer_actions": structured.get("offer_actions", []),
+                                }
+                            elif response.get("status") == "confirmation_needed":
+                                structured = response.get("structured_response") or {}
+                                ws_response = {
+                                    "type": "confirmation_needed",
                                     "question": response.get("question", ""),
                                     "response_id": response.get("response_id", ""),
                                     "user_language": response.get("user_language"),
@@ -1155,7 +1197,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     ))
                 )
 
-                _msg_type = MessageType.CLARIFICATION_RESPONSE if _is_short_confirmation else MessageType.TASK_REQUEST
+                _msg_type = MessageType.CONFIRMATION_RESPONSE if _is_short_confirmation else MessageType.TASK_REQUEST
 
                 if not _is_short_confirmation:
                     logger.info(
@@ -1178,7 +1220,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
                 future = asyncio.Future()
                 pending_responses[message.message_id] = future
-                await broker.publish(Channels.LANGUAGE_INPUT, message)
+                asyncio.create_task(broker.publish(Channels.LANGUAGE_INPUT, message))
                 
                 async def wait_clarification(msg_id, fut):
                     try:

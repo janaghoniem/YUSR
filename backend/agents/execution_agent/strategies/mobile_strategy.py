@@ -1268,6 +1268,23 @@ class MobileReActStrategy:
         self.tier_stats["tier2"] += 1
         self._t2_completed_steps = []
 
+        params: Dict[str, str] = {
+            k: str(v) for k, v in task.extra_params.items()
+            if k not in _INTERNAL_KEYS and v is not None
+        }
+        
+        # Unpack JSON input_content if present
+        if "input_content" in task.extra_params and isinstance(task.extra_params["input_content"], str):
+            _ic = task.extra_params["input_content"].strip()
+            if _ic.startswith("{"):
+                try:
+                    parsed_content = json.loads(_ic)
+                    if isinstance(parsed_content, dict):
+                        for k, v in parsed_content.items():
+                            params[k] = str(v)
+                except Exception as e:
+                    logger.debug(f"[T2] Failed to parse input_content as JSON: {e}")
+
         for i, recipe in enumerate(t2_result.recipes):
             logger.info(f"[T2] Step {i+1}: {recipe.action_type} | '{recipe.step_instruction[:55]}'")
             logger.debug(f"[CACHE] T2 selectors: {recipe.selectors}")
@@ -1313,11 +1330,6 @@ class MobileReActStrategy:
                 self.task_memory.mark_failure(recipe.record_id)
                 t2_result.hint_text = ""
                 return None
-
-            params: Dict[str, str] = {
-                k: str(v) for k, v in task.extra_params.items()
-                if k not in _INTERNAL_KEYS and v is not None
-            }
 
             element_id = None
             if recipe.action_type in ("click", "type"):

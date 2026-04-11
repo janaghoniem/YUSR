@@ -76,6 +76,10 @@ def _build_personalization_instruction(user_profile: Dict[str, Any], target_lang
     if not lines:
         return ""
 
+    user_name = user_profile.get("username", "") or user_profile.get("name", "")
+    if user_name:
+        lines.append(f"The user's name is {user_name}. Always act on their behalf when generating content (e.g. sign off emails using their name).")
+
     block = "\n".join(lines)
     return f"\nPERSONALIZATION (adapt output accordingly):\n{block}\n"
 

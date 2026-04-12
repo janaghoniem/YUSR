@@ -912,14 +912,24 @@ class CoordinatorRAGBridge:
                         return fallback_result
                     # If fallback fails or returns None, continue to normal failure handling below
 
-                # NEW: If task validation failed and we can't fallback, return failure immediately
+                # If task validation failed, retry with different code generation approach
                 if not task_validation.passed:
-                    logger.error(f"❌ Task validation failed (non-recoverable): {task_validation.failures}")
-                    return TaskResult(
-                        task_id=task.task_id,
-                        status="failed",
-                        error=f"Task validation failed: {'; '.join(task_validation.failures)}"
-                    )
+                    logger.warning(f"⚠️ Task validation failed (attempt {attempt}/{max_retries}): {task_validation.failures}")
+
+                    # Prepare for retry with error context
+                    error_context = f"Validation failed: {'; '.join(task_validation.failures)}"
+                    start_context_index += self.rag.config.top_k
+
+                    if attempt >= max_retries:
+                        logger.error(f"❌ Max retries exhausted ({max_retries} attempts)")
+                        return TaskResult(
+                            task_id=task.task_id,
+                            status="failed",
+                            error=f"Task validation failed after {max_retries} attempts: {'; '.join(task_validation.failures)}"
+                        )
+
+                    logger.info(f"🔄 Retrying with alternative approach...")
+                    continue
 
                 # Step 3: Check execution result
                 if exec_result.validation_passed and exec_result.security_passed:

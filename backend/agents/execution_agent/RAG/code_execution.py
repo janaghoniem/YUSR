@@ -1236,7 +1236,7 @@ async def initialize_execution_agent_for_server(broker_instance):
                 # LocalSandbox  # Make sure this is imported
             )
             
-            sandbox_config = SandboxConfig(timeout_seconds=30)
+            sandbox_config = SandboxConfig(timeout_seconds=60)
             # Try to enable cache, but continue without it if it fails
             enable_cache = False
             try:

@@ -54,7 +54,7 @@ class SandboxConfig:
     # Resource limits
     cpu_limit: float = 1.0  # CPU cores
     memory_limit: str = "512m"  # Memory limit
-    timeout_seconds: int = 30  # Execution timeout
+    timeout_seconds: int = 60  # Execution timeout
     
     # Network settings
     network_mode: str = "none"  # Isolated network
@@ -537,17 +537,42 @@ class LocalSandbox:
         self.config = config
     
     def execute_local(self, code: str, timeout: int = None) -> ExecutionResult:
-        """Execute code in local subprocess"""
+        """Execute code in local subprocess with proper Python path setup"""
         if timeout is None:
             timeout = self.config.timeout_seconds
-        
+
         start_time = time.time()
-        
+
+        # CRITICAL: Inject sys.path setup so imports work in sandbox
+        # Calculate AURA backend path more robustly
+        import os
+        # Current file: d:\AURA\backend\agents\execution_agent\RAG\execution.py
+        # We want: d:\AURA\backend
+        current_file = os.path.abspath(__file__)
+        rag_dir = os.path.dirname(current_file)  # ...RAG
+        agent_dir = os.path.dirname(rag_dir)     # ...execution_agent
+        exec_dir = os.path.dirname(agent_dir)    # ...agents
+        backend_dir = os.path.dirname(exec_dir)  # backend
+
+        # Escape backslashes for Python string
+        backend_dir_escaped = backend_dir.replace('\\', '\\\\')
+
+        # Inject sys.path at the very beginning
+        path_setup = f"""import sys
+import os
+_backend_path = r'{backend_dir}'
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
+"""
+
+        # Prepend path setup to user code
+        code_with_path = path_setup + "\n" + code
+
         # Create temporary file
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
-            f.write(code)
+            f.write(code_with_path)
             temp_file = f.name
-        
+
         try:
             # Execute in subprocess
             result = subprocess.run(
@@ -556,15 +581,15 @@ class LocalSandbox:
                 text=True,
                 timeout=timeout
             )
-            
+
             execution_time = time.time() - start_time
-            
+
             # Determine status
             if result.returncode == 0:
                 status = ExecutionStatus.SUCCESS
             else:
                 status = ExecutionStatus.FAILED
-            
+
             return ExecutionResult(
                 status=status,
                 exit_code=result.returncode,

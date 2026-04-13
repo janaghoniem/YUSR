@@ -598,6 +598,88 @@ Key python-pptx patterns:
 AVOID: subprocess, pyautogui, PowerPoint UI, mouse/keyboard events
 """
     ),
+    "file": ModuleGuidance(
+        module_name="File",
+        library_name="file_utils (custom file search)",
+        library_import="try:\n    from agents.execution_agent.RAG.file_utils import open_file\nexcept ImportError:\n    from file_utils import open_file",
+        keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file", "create file", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"],
+        guidance="""
+Use the file_utils module for fast, reliable file operations. Choose ONE operation type:
+
+SETUP:
+try:
+    from agents.execution_agent.RAG.file_utils import find_file, find_all_files, open_file, get_file_path, file_exists
+except ImportError:
+    from file_utils import find_file, find_all_files, open_file, get_file_path, file_exists
+import os
+
+============ OPERATION TYPES ============
+
+[1] OPEN FILE DIRECTLY — task says "open", "launch", "view" + filename:
+    CRITICAL: The open_file() function outputs [FILE]: <path> automatically
+    Just check the return value and print EXECUTION_SUCCESS
+
+    success = open_file("flutter_quiz_answers.docx")
+    if success:
+        print("EXECUTION_SUCCESS")
+    else:
+        print("EXECUTION_FAILED: File not found or cannot be opened")
+
+[2] GET FILE PATH (for downstream tasks) — task says "find", "locate", "where is":
+    path = get_file_path("report.pdf")
+    if path:
+        print(f"[FILE]: {path}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[3] SEARCH MULTIPLE FILES — task says "search", "find all", "list":
+    files = find_all_files("*.txt")
+    if files:
+        for f in files:
+            print(f"[FOUND]: {f}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("No files found")
+
+[4] READ FILE CONTENTS — task says "read", "show contents", "display":
+    path = get_file_path("config.txt")
+    if path and os.path.isfile(path):
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        print(content)  # OUTPUT DATA FIRST
+        print(f"[FILE]: {path}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[5] DELETE FILE — task says "delete", "remove", "erase":
+    path = get_file_path("old_backup.zip")
+    if path and os.path.isfile(path):
+        os.remove(path)
+        print(f"[DELETED]: {path}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[6] CREATE FILE — task says "create", "new", "make":
+    save_dir = os.path.expanduser('~\\\\Documents')
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "new_file.txt")
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("content")
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+
+============ KEY POINTS ============
+✅ ALWAYS use file_utils functions - they handle errors gracefully
+✅ ALWAYS check return values (True/False or path/None)
+✅ NEVER assume file exists - check first with file_exists() or handle False return
+✅ OUTPUT DATA BEFORE status messages (critical for pipelines)
+✅ Use [FILE]: marker for downstream tasks
+✅ Only print EXECUTION_SUCCESS if operation actually succeeded
+"""
+    ),
 }
 
 
@@ -766,6 +848,11 @@ if __name__ == "__main__":
         "Generate a PowerPoint presentation with 5 slides",
         "Write a Python script using pyautogui",
         "Open file explorer and navigate to Documents",
+        "Open the file named API ENDPOINTS.txt",
+        "Find and open my resume.pdf",
+        "Search for all Excel files on Desktop",
+        "Read the contents of config.txt",
+        "Delete the old backup.zip file",
     ]
 
     for i, task in enumerate(test_tasks, 1):

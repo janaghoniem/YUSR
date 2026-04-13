@@ -174,85 +174,202 @@ async def get_preferences(user_id: str = "test_user", limit: int = 100):
             "error": str(e)
         }
      
+
+# async def clear_user_preferences(user_id: str):
+#     """Clear ALL long-term memory (preferences) for a user"""
+#     try:
+#         logger.warning(f"🗑️ CLEARING ALL PREFERENCES for user {user_id}")
+        
+#         client = MongoClient(MONGODB_URI)
+#         db = client["yusr_db"]
+        
+#         # ✅ FIX: Correct field name for Mem0 + use Mem0 API for proper deletion
+#         try:
+#             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+#             pref_mgr = get_preference_manager(user_id)
+            
+#             # Get all preferences first
+#             all_prefs = pref_mgr.get_all_preferences()
+            
+#             # Extract preference list
+#             if isinstance(all_prefs, dict):
+#                 prefs_list = all_prefs.get("results", all_prefs.get("memories", []))
+#             else:
+#                 prefs_list = all_prefs if isinstance(all_prefs, list) else []
+            
+#             # Delete each preference by ID using Mem0 API
+#             delete_count = 0
+#             for pref in prefs_list:
+#                 if pref is None:
+#                     continue
+                    
+#                 if isinstance(pref, dict):
+#                     mem_id = pref.get("id") or pref.get("memory_id")
+#                     if mem_id:
+#                         try:
+#                             pref_mgr.delete_preference(mem_id)
+#                             delete_count += 1
+#                         except Exception as del_error:
+#                             logger.warning(f"⚠️ Failed to delete {mem_id}: {del_error}")
+            
+#             logger.warning(f"✅ Deleted {delete_count} preferences via Mem0 API")
+            
+#             # Also try MongoDB direct delete as fallback
+#             pref_result = db["mem0_preferences"].delete_many({
+#                 "$or": [
+#                     {"user_id": user_id},
+#                     {"metadata.user_id": user_id}
+#                 ]
+#             })
+            
+#             logger.warning(f"✅ Deleted {pref_result.deleted_count} documents from MongoDB")
+            
+#             return {
+#                 "status": "success",
+#                 "preferences_deleted": delete_count,
+#                 "mongodb_deleted": pref_result.deleted_count,
+#                 "message": f"Deleted {delete_count} preferences"
+#             }
+            
+#         except Exception as mem0_error:
+#             logger.error(f"❌ Mem0 API delete failed: {mem0_error}")
+            
+#             # Fallback to direct MongoDB delete
+#             pref_result = db["mem0_preferences"].delete_many({
+#                 "$or": [
+#                     {"user_id": user_id},
+#                     {"metadata.user_id": user_id}
+#                 ]
+#             })
+            
+#             return {
+#                 "status": "partial_success",
+#                 "preferences_deleted": pref_result.deleted_count,
+#                 "message": f"Deleted {pref_result.deleted_count} via MongoDB (Mem0 API failed)"
+#             }
+        
+#     except Exception as e:
+#         logger.error(f"❌ Clear preferences failed: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/clear-preferences")
 async def clear_user_preferences(user_id: str):
-    """Clear ALL long-term memory (preferences) for a user"""
+    """
+    Clear learned behavioral preferences for a user.
+
+    KEEPS (permanent identity — set at onboarding, must survive reset):
+      personal_info, language_preference, ui_preference
+
+    DELETES (learned over time — what the user actually wants to reset):
+      app_usage, contact, workflow, learned_pattern,
+      conversation_history, general, and any uncategorised docs
+    """
+    # Categories that belong to permanent user identity — never touch these
+    PROTECTED_CATEGORIES = {"personal_info", "language_preference", "ui_preference"}
+
     try:
-        logger.warning(f"🗑️ CLEARING ALL PREFERENCES for user {user_id}")
-        
-        client = MongoClient(MONGODB_URI)
-        db = client["yusr_db"]
-        
-        # ✅ FIX: Correct field name for Mem0 + use Mem0 API for proper deletion
+        logger.warning(f"🗑️ Clearing learned preferences for user {user_id} (keeping identity data)")
+
+        mem0_deleted = 0
+        raw_deleted = 0
+        errors = []
+
+        # ── Path 1: Mem0-managed documents ───────────────────────────────────
+        # These were written via memory.add() and have a proper Mem0 ID.
+        # get_all_preferences() only returns these — zero-token docs are invisible to it.
         try:
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
             pref_mgr = get_preference_manager(user_id)
-            
-            # Get all preferences first
-            all_prefs = pref_mgr.get_all_preferences()
-            
-            # Extract preference list
-            if isinstance(all_prefs, dict):
-                prefs_list = all_prefs.get("results", all_prefs.get("memories", []))
-            else:
-                prefs_list = all_prefs if isinstance(all_prefs, list) else []
-            
-            # Delete each preference by ID using Mem0 API
-            delete_count = 0
-            for pref in prefs_list:
-                if pref is None:
+            all_prefs = pref_mgr.get_all_preferences()  # returns List[Dict]
+
+            for pref in all_prefs:
+                if not isinstance(pref, dict):
                     continue
-                    
-                if isinstance(pref, dict):
-                    mem_id = pref.get("id") or pref.get("memory_id")
-                    if mem_id:
-                        try:
-                            pref_mgr.delete_preference(mem_id)
-                            delete_count += 1
-                        except Exception as del_error:
-                            logger.warning(f"⚠️ Failed to delete {mem_id}: {del_error}")
-            
-            logger.warning(f"✅ Deleted {delete_count} preferences via Mem0 API")
-            
-            # Also try MongoDB direct delete as fallback
-            pref_result = db["mem0_preferences"].delete_many({
-                "$or": [
-                    {"user_id": user_id},
-                    {"metadata.user_id": user_id}
-                ]
-            })
-            
-            logger.warning(f"✅ Deleted {pref_result.deleted_count} documents from MongoDB")
-            
-            return {
-                "status": "success",
-                "preferences_deleted": delete_count,
-                "mongodb_deleted": pref_result.deleted_count,
-                "message": f"Deleted {delete_count} preferences"
-            }
-            
-        except Exception as mem0_error:
-            logger.error(f"❌ Mem0 API delete failed: {mem0_error}")
-            
-            # Fallback to direct MongoDB delete
-            pref_result = db["mem0_preferences"].delete_many({
-                "$or": [
-                    {"user_id": user_id},
-                    {"metadata.user_id": user_id}
-                ]
-            })
-            
-            return {
-                "status": "partial_success",
-                "preferences_deleted": pref_result.deleted_count,
-                "message": f"Deleted {pref_result.deleted_count} via MongoDB (Mem0 API failed)"
-            }
-        
+                category = pref.get("metadata", {}).get("category", "general")
+                if category in PROTECTED_CATEGORIES:
+                    logger.info(f"🔒 Keeping protected memory: [{category}] {pref.get('memory', '')[:50]}")
+                    continue
+                mem_id = pref.get("id") or pref.get("memory_id")
+                if mem_id:
+                    try:
+                        pref_mgr.delete_preference(mem_id)
+                        mem0_deleted += 1
+                        logger.info(f"🗑️ Deleted via Mem0: [{category}] {mem_id}")
+                    except Exception as del_err:
+                        errors.append(f"Mem0 delete failed for {mem_id}: {del_err}")
+                        logger.warning(f"⚠️ {errors[-1]}")
+
+            logger.warning(f"✅ Mem0 path: deleted {mem0_deleted} preferences")
+
+        except Exception as mem0_err:
+            errors.append(f"Mem0 path error: {mem0_err}")
+            logger.error(f"❌ Mem0 path failed: {mem0_err}")
+
+        # ── Path 2: Zero-token raw MongoDB inserts ────────────────────────────
+        # add_preference_zero_token() bypasses Mem0 entirely and stores docs with
+        # schema: { embedding: [...], payload: { user_id, data, memory, metadata } }
+        # Mem0's get_all() cannot see these. We must query MongoDB directly using
+        # the correct nested path "payload.user_id".
+        try:
+            client = MongoClient(MONGODB_URI)
+            collection = client["yusr_db"]["mem0_preferences"]
+
+            # Find all zero-token docs for this user (payload.user_id is the correct path)
+            raw_docs = list(collection.find(
+                {"payload.user_id": user_id},
+                {"_id": 1, "payload.metadata.category": 1, "payload.data": 1}
+            ))
+
+            ids_to_delete = []
+            for doc in raw_docs:
+                category = (
+                    doc.get("payload", {})
+                       .get("metadata", {})
+                       .get("category", "general")
+                )
+                if category in PROTECTED_CATEGORIES:
+                    logger.info(f"🔒 Keeping protected raw doc: [{category}]")
+                    continue
+                ids_to_delete.append(doc["_id"])
+
+            if ids_to_delete:
+                result = collection.delete_many({"_id": {"$in": ids_to_delete}})
+                raw_deleted = result.deleted_count
+                logger.warning(f"✅ Raw MongoDB path: deleted {raw_deleted} zero-token documents")
+            else:
+                logger.info("ℹ️ No zero-token documents found to delete")
+
+            client.close()
+
+        except Exception as raw_err:
+            errors.append(f"Raw MongoDB path error: {raw_err}")
+            logger.error(f"❌ Raw MongoDB path failed: {raw_err}")
+
+        total_deleted = mem0_deleted + raw_deleted
+        logger.warning(
+            f"✅ Clear complete for {user_id}: "
+            f"{mem0_deleted} Mem0 + {raw_deleted} raw = {total_deleted} total deleted. "
+            f"Protected categories preserved: {PROTECTED_CATEGORIES}"
+        )
+
+        return {
+            "status": "success",
+            "preferences_deleted": total_deleted,
+            "mem0_deleted": mem0_deleted,
+            "raw_deleted": raw_deleted,
+            "protected_categories": list(PROTECTED_CATEGORIES),
+            "errors": errors if errors else None,
+            "message": (
+                f"Cleared {total_deleted} learned preferences. "
+                f"Personal info, language, and UI preferences were preserved."
+            )
+        }
+
     except Exception as e:
-        logger.error(f"❌ Clear preferences failed: {e}")
+        logger.error(f"❌ Clear preferences failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
+    
 @router.put("/preferences/{preference_id}")
 async def update_preference(
     preference_id: str,

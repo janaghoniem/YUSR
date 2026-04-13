@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:video_player/video_player.dart';
-import '../services/session_store.dart';
+// import '../services/session_store.dart';
 import '../screens/android_login_screen.dart';
 import '../screens/android_onboarding_flow.dart';
 import '../main.dart';
@@ -40,58 +40,52 @@ class _StartupScreenState extends State<StartupScreen> {
     super.dispose();
   }
 
-  Future<void> _continue() async {
-    final isOnboarded = await SessionStore.isOnboarded();
-    if (!mounted) return;
+  void _goToLogin() {
+    final nav = Navigator.of(context);
+    nav.pushReplacement(PageRouteBuilder(
+      pageBuilder: (_, __, ___) => AndroidLoginScreen(
+        onLoginSuccess: (userId, username, sessionId, language) {
+          nav.pushReplacement(PageRouteBuilder(
+            pageBuilder: (_, __, ___) => _AuthedHomeWrapper(
+              userId: userId,
+              username: username,
+              sessionId: sessionId,
+              language: language,
+            ),
+            transitionsBuilder: (_, a, __, child) =>
+                FadeTransition(opacity: a, child: child),
+            transitionDuration: const Duration(milliseconds: 500),
+          ));
+        },
+      ),
+      transitionsBuilder: (_, a, __, child) =>
+          FadeTransition(opacity: a, child: child),
+      transitionDuration: const Duration(milliseconds: 500),
+    ));
+  }
 
-    if (isOnboarded) {
-      // Returning user → login screen
-      // Capture navigator before any async gap
-      final nav = Navigator.of(context);
-      nav.pushReplacement(PageRouteBuilder(
-        pageBuilder: (_, __, ___) => AndroidLoginScreen(
-          onLoginSuccess: (userId, username, sessionId, language) {
-            nav.pushReplacement(PageRouteBuilder(
-              pageBuilder: (_, __, ___) => _AuthedHomeWrapper(
-                userId: userId,
-                username: username,
-                sessionId: sessionId,
-                language: language,
-              ),
-              transitionsBuilder: (_, a, __, child) =>
-                  FadeTransition(opacity: a, child: child),
-              transitionDuration: const Duration(milliseconds: 500),
-            ));
-          },
-        ),
-        transitionsBuilder: (_, a, __, child) =>
-            FadeTransition(opacity: a, child: child),
-        transitionDuration: const Duration(milliseconds: 500),
-      ));
-    } else {
-      // New user → onboarding flow directly
-      final nav = Navigator.of(context);
-      nav.pushReplacement(PageRouteBuilder(
-        pageBuilder: (_, __, ___) => AndroidOnboardingFlow(
-          onComplete: (userId, username, sessionId, language) {
-            nav.pushReplacement(PageRouteBuilder(
-              pageBuilder: (_, __, ___) => _AuthedHomeWrapper(
-                userId: userId,
-                username: username,
-                sessionId: sessionId,
-                language: language,
-              ),
-              transitionsBuilder: (_, a, __, child) =>
-                  FadeTransition(opacity: a, child: child),
-              transitionDuration: const Duration(milliseconds: 500),
-            ));
-          },
-        ),
-        transitionsBuilder: (_, a, __, child) =>
-            FadeTransition(opacity: a, child: child),
-        transitionDuration: const Duration(milliseconds: 500),
-      ));
-    }
+  void _goToOnboarding() {
+    final nav = Navigator.of(context);
+    nav.pushReplacement(PageRouteBuilder(
+      pageBuilder: (_, __, ___) => AndroidOnboardingFlow(
+        onComplete: (userId, username, sessionId, language) {
+          nav.pushReplacement(PageRouteBuilder(
+            pageBuilder: (_, __, ___) => _AuthedHomeWrapper(
+              userId: userId,
+              username: username,
+              sessionId: sessionId,
+              language: language,
+            ),
+            transitionsBuilder: (_, a, __, child) =>
+                FadeTransition(opacity: a, child: child),
+            transitionDuration: const Duration(milliseconds: 500),
+          ));
+        },
+      ),
+      transitionsBuilder: (_, a, __, child) =>
+          FadeTransition(opacity: a, child: child),
+      transitionDuration: const Duration(milliseconds: 500),
+    ));
   }
 
   void _showTerms() {
@@ -250,8 +244,13 @@ class _StartupScreenState extends State<StartupScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       GestureDetector(
-                        onTap: _continue,
-                        child: const _GlassButton(label: 'Get Started'),
+                        onTap: _goToLogin,
+                        child: const _GlassButton(label: 'Sign In'),
+                      ),
+                      const SizedBox(height: 14),
+                      GestureDetector(
+                        onTap: _goToOnboarding,
+                        child: const _OutlineButton(label: 'Create Account'),
                       ),
                       const SizedBox(height: 16),
                       Padding(
@@ -332,6 +331,33 @@ class _GlassButton extends StatelessWidget {
           fontWeight: FontWeight.w800,
           letterSpacing: 1.5,
           color: Color.fromARGB(204, 0, 0, 0),
+        ),
+      ),
+    );
+  }
+}
+
+class _OutlineButton extends StatelessWidget {
+  final String label;
+  const _OutlineButton({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 110, vertical: 18),
+      decoration: BoxDecoration(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: Colors.white.withOpacity(0.45), width: 1.2),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontFamily: 'PlusJakartaSans',
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.5,
+          color: Colors.white.withOpacity(0.85),
         ),
       ),
     );

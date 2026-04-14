@@ -74,7 +74,7 @@ function createWindow() {
     transparent: false,
     alwaysOnTop: true,
     show:      false,
-    icon: path.join(__dirname, "public/aura3.png"),
+    icon: path.join(__dirname, "public/aura_icon_colored.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       // nodeIntegration MUST stay false for security — preload handles IPC

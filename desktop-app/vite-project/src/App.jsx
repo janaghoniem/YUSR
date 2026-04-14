@@ -1610,7 +1610,7 @@ function App() {
 
   
 /* ---------- RENDER ---------- */
-  const isExecuting = orbState === "processing" || orbState === "speaking" || isThinking;
+  const isExecuting = orbState === "processing" || isThinking;
   const appClassName = [
     "app-root",
     executionMode === "transparent" && isExecuting ? "transparent-mode" : "",

@@ -7,6 +7,7 @@ const API_BASE_URL = "";
 const SettingsModal = ({
   onClose,
   onSave,
+  onLogout,
   initialName = "User",
   initialVoice = "Gacrux",
 }) => {
@@ -228,54 +229,75 @@ const SettingsModal = ({
           <div className="settings-content">
             {/* ── PROFILE ── */}
             {activeSection === "profile" && (
-              <section className="settings-section" aria-labelledby="profile-heading">
+              <section className="settings-section settings-profile-section" aria-labelledby="profile-heading">
                 <h2 className="section-title" id="profile-heading">Profile</h2>
-                <div className="settings-group">
-                  <label className="settings-label" htmlFor="settings-username">
-                    Display name
-                    <input
-                      id="settings-username"
-                      type="text"
-                      className="settings-input"
-                      autoFocus
-                      autoComplete="name"
-                      value={profileData.username}
-                      onChange={(e) =>
-                        setProfileData({ ...profileData, username: e.target.value })
-                      }
-                    />
-                  </label>
+                <p className="settings-profile-subtitle">
+                  Update how AURA addresses you and which voice/language defaults to use.
+                </p>
 
-                  <label className="settings-label" htmlFor="settings-language">
-                    Language
-                    <select
-                      id="settings-language"
-                      className="settings-select"
-                      value={profileData.language}
-                      onChange={(e) =>
-                        setProfileData({ ...profileData, language: e.target.value })
-                      }
-                    >
-                      <option value="en">English</option>
-                      <option value="ar">العربية</option>
-                    </select>
-                  </label>
+                <div className="settings-profile-card">
+                  <div className="settings-group settings-group-profile">
+                    <label className="settings-label" htmlFor="settings-username">
+                      <span className="settings-field-label">Display name</span>
+                      <input
+                        id="settings-username"
+                        type="text"
+                        className="settings-input"
+                        autoFocus
+                        autoComplete="name"
+                        value={profileData.username}
+                        onChange={(e) =>
+                          setProfileData({ ...profileData, username: e.target.value })
+                        }
+                      />
+                    </label>
 
-                  <label className="settings-label" htmlFor="settings-voice">
-                    Voice
-                    <select
-                      id="settings-voice"
-                      className="settings-select"
-                      value={profileData.voice}
-                      onChange={(e) =>
-                        setProfileData({ ...profileData, voice: e.target.value })
-                      }
-                    >
-                      <option value="Gacrux">Gacrux (default)</option>
-                      <option value="orpheus-english">Orpheus English</option>
-                      <option value="orpheus-arabic">Orpheus Arabic</option>
-                    </select>
-                  </label>
+                    <label className="settings-label" htmlFor="settings-email">
+                      <span className="settings-field-label">Email</span>
+                      <input
+                        id="settings-email"
+                        type="email"
+                        className="settings-input"
+                        autoComplete="email"
+                        value={profileData.email}
+                        onChange={(e) =>
+                          setProfileData({ ...profileData, email: e.target.value })
+                        }
+                        placeholder="name@example.com"
+                      />
+                    </label>
+
+                    <label className="settings-label" htmlFor="settings-language">
+                      <span className="settings-field-label">Language</span>
+                      <select
+                        id="settings-language"
+                        className="settings-select"
+                        value={profileData.language}
+                        onChange={(e) =>
+                          setProfileData({ ...profileData, language: e.target.value })
+                        }
+                      >
+                        <option value="en">English</option>
+                        <option value="ar">العربية</option>
+                      </select>
+                    </label>
+
+                    <label className="settings-label" htmlFor="settings-voice">
+                      <span className="settings-field-label">Voice</span>
+                      <select
+                        id="settings-voice"
+                        className="settings-select"
+                        value={profileData.voice}
+                        onChange={(e) =>
+                          setProfileData({ ...profileData, voice: e.target.value })
+                        }
+                      >
+                        <option value="Gacrux">Gacrux (default)</option>
+                        <option value="orpheus-english">Orpheus English</option>
+                        <option value="orpheus-arabic">Orpheus Arabic</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
               </section>
             )}
@@ -487,6 +509,11 @@ const SettingsModal = ({
               </div>
             )}
             <div className="settings-actions">
+              {onLogout && (
+                <button className="settings-btn-logout" onClick={onLogout}>
+                  Log out
+                </button>
+              )}
               <button className="settings-btn-save" onClick={handleSave} disabled={profileLoading}>
                 {profileLoading ? "Saving..." : "Save Changes"}
               </button>

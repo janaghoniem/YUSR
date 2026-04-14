@@ -1,12 +1,30 @@
-import React, { useState } from "react";
-import VoiceInput from "../shared/VoiceInput";
+// StepUserIntro.jsx — Fixed: only one text input (VoiceInput), no duplicate textarea
 
-const StepUserIntro = ({ onNext, data, setData }) => {
+import React, { useState, useEffect } from "react";
+import VoiceInput from "../shared/VoiceInput";
+import BlurText from "./BlurText";
+import ShinyText from "./ShinyText";
+import screenReader from "../../utils/ScreenReader";
+
+const StepUserIntro = ({ onNext, data, setData, lang = "en" }) => {
   const [error, setError] = useState("");
+  const isAr = lang === "ar";
+
+  const textEn = "Tell me about yourself. What should I know about you? Your job, interests, how you like to work?";
+  const textAr = "قولي عن نفسك. إيه اللي المفروض أعرفه عنك؟ شغلتك، اهتماماتك، بتحب تشتغل إزاي؟";
+
+  useEffect(() => {
+    screenReader.stop();
+    screenReader.speak(isAr ? textAr : textEn);
+    return () => screenReader.stop();
+  }, [isAr]);
 
   const handleNext = () => {
-    if (!data.introduction.trim() || data.introduction.trim().length < 10) {
-      setError("Please tell me a bit more about yourself (at least 10 characters).");
+    const val = (data.introduction || "").trim();
+    if (!val || val.length < 10) {
+      const errEn = "Please tell me a bit more about yourself (at least 10 characters).";
+      const errAr = "من فضلك قولي أكتر عن نفسك (على الأقل ١٠ حروف).";
+      setError(isAr ? errAr : errEn);
       return;
     }
     setError("");
@@ -15,33 +33,39 @@ const StepUserIntro = ({ onNext, data, setData }) => {
 
   return (
     <div className="onboarding-step">
-      <h2 className="onboarding-title">Tell me about yourself</h2>
+      <h2 className="onboarding-title">
+        <BlurText text={isAr ? "قولي عن نفسك" : "Tell me about yourself"} delay={50} />
+      </h2>
       <p className="onboarding-subtitle">
-        What should I know about you? Your job, interests, how you like to work?
+        {isAr
+          ? "إيه اللي المفروض أعرفه عنك؟ شغلتك، اهتماماتك، بتحب تشتغل إزاي؟"
+          : "What should I know about you? Your job, interests, how you like to work?"}
       </p>
 
       <VoiceInput
-        label="Your introduction"
+        label={isAr ? "تعريفك" : "Your introduction"}
         value={data.introduction}
         onChange={(val) => setData({ ...data, introduction: val })}
-        placeholder="e.g. I'm a designer who loves automation and Arabic music..."
+        placeholder={
+          isAr
+            ? "مثلاً: أنا مصمم بحب الأتوماتيك والموسيقى..."
+            : "e.g. I'm a designer who loves automation and Arabic music..."
+        }
         type="textarea"
+        rows="4"
+        lang={lang}
       />
 
-      {/* Override to textarea for this step */}
-      <textarea
-        className="onboarding-textarea"
-        value={data.introduction}
-        onChange={(e) => setData({ ...data, introduction: e.target.value })}
-        placeholder="e.g. I'm a designer who loves automation and Arabic music..."
-        rows={4}
-      />
-      <p className="voice-hint">💡 You can also speak your introduction using the mic above</p>
+      <p className="voice-hint">
+        {isAr
+          ? "💡 ممكن تقول تعريفك بالميكروفون"
+          : "💡 You can also speak your introduction using the mic above"}
+      </p>
 
-      {error && <p className="onboarding-error">{error}</p>}
+      {error && <p className="onboarding-error" role="alert">{error}</p>}
 
       <button className="onboarding-btn primary" onClick={handleNext}>
-        Continue →
+        <ShinyText text={isAr ? "كمل →" : "Continue →"} speed={3} />
       </button>
     </div>
   );

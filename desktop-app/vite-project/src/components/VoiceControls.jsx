@@ -1,6 +1,6 @@
 // VoiceControls.jsx — Claude/ChatGPT-style tall input · sleek voice mode
 import React, { useState, useRef, useEffect } from "react";
-import { Mic, Settings, X, Send, Pause, Square, Play, Paperclip } from "lucide-react";
+import { Mic, Settings, X, Send, Pause, Square, Play } from "lucide-react";
 import BorderGlow from "./BorderGlow";
 
 const PLACEHOLDERS = [

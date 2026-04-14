@@ -1,7 +1,6 @@
 // components/FaceCapture.jsx
 import React, { useRef, useState, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
-import { ArrowLeft } from 'lucide-react';
 import ShinyText from './onboarding/ShinyText';
 import screenReader from '../utils/ScreenReader';
 
@@ -16,11 +15,17 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
   // Helper to coordinate speech with the parent's STT recorder
   const speakWithParentCoordination = (text) => {
     if (onSpeakStart) onSpeakStart();
-    screenReader.speak(text, {
-      onComplete: () => {
-        if (onSpeakEnd) onSpeakEnd();
-      }
-    });
+
+    let ended = false;
+    const finalize = () => {
+      if (ended) return;
+      ended = true;
+      if (onSpeakEnd) onSpeakEnd();
+    };
+
+    return screenReader.speak(text, {
+      onComplete: finalize,
+    }).finally(finalize);
   };
 
   // Read instructions out loud on component load
@@ -90,30 +95,40 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
     return null;
   }, []);
 
-  const startCapture = () => {
-    speakWithParentCoordination("Starting scan. Three. Two. One.");
-    setCapturing(true);
-    setError("");
-    let count = 3;
+  const runCountdown = (start = 3) => new Promise((resolve) => {
+    let count = start;
     setCountdown(count);
-    
+
     const interval = setInterval(() => {
-      count--;
+      count -= 1;
       setCountdown(count);
-      
-      if (count === 0) {
+
+      if (count <= 0) {
         clearInterval(interval);
-        const imageData = captureImage();
-        if (imageData) {
-          setCapturing(false); // CRITICAL FIX: Unlock state so 'use this photo' event works
-          speakWithParentCoordination("Image captured successfully. Would you like to use this photo or retake it?");
-        } else {
-          setError("Failed to capture image. Please try again.");
-          speakWithParentCoordination("Failed to capture image. Please try again.");
-          setCapturing(false);
-        }
+        resolve();
       }
     }, 1000);
+  });
+
+  const startCapture = async () => {
+    if (capturing) return;
+
+    setCapturing(true);
+    setError("");
+
+    // Ensure the spoken countdown prompt completes before visual countdown begins.
+    await speakWithParentCoordination("Starting scan in three, two, one.");
+    await runCountdown(3);
+
+    const imageData = captureImage();
+    if (imageData) {
+      setCapturing(false); // CRITICAL FIX: Unlock state so 'use this photo' event works
+      speakWithParentCoordination("Image captured successfully. Would you like to use this photo or retake it?");
+    } else {
+      setError("Failed to capture image. Please try again.");
+      speakWithParentCoordination("Failed to capture image. Please try again.");
+      setCapturing(false);
+    }
   };
 
   const retryCapture = () => {
@@ -201,7 +216,7 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
           : "Look at the camera to verify your identity."}
       </p>
 
-      {/* Back button (matching OnboardingPage styling, prominent edge positioning) */}
+      {/* Back button (matching OnboardingPage styling, prominent edge positioning)
       <button
         onClick={onCancel}
         className="onboarding-back-btn tooltip-trigger"
@@ -234,7 +249,7 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
         }}
       >
         <ArrowLeft size={20} />
-      </button>
+      </button> */}
       
       <div className={`camera-wrapper ${capturing ? "capturing" : ""}`}>
         {!preview ? (
@@ -251,8 +266,13 @@ const FaceCapture = ({ onCapture, onCancel, mode = "signup", username, onSpeakSt
               mirrored={true}
             />
             {capturing && (
-              <div className="countdown-overlay">
-                <div>{countdown}</div>
+              <div
+                className="countdown-overlay"
+                aria-live="assertive"
+                aria-label={`Taking photo in ${countdown}`}
+                role="timer"
+              >
+                <div className="countdown-number" aria-hidden="true">{countdown}</div>
               </div>
             )}
           </>

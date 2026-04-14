@@ -112,6 +112,10 @@ flutter:
     - assets/Background.mp4
     - assets/web/
     - assets/fonts/PlusJakartaSans/
+    - assets/aura_logo.png
+    - assets/aura_icon_colored.png
+    - assets/aura_icon_white.png
+    - assets/aura_icon_haze.png
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

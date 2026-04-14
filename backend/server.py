@@ -2044,7 +2044,7 @@ async def register_face(request: Request):
         
         # Process the face image with quality check
         encoding, message = face_auth.process_face_image(face_image)
-        if not encoding:
+        if not encoding: 
             raise HTTPException(status_code=400, detail=message)
         
         # Check if this user_id is already associated with a different username

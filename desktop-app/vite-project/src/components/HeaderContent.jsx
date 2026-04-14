@@ -43,7 +43,7 @@ const getTimeGreeting = (user) => {
   return `Good evening${namePart} 🌙`;
 };
 
-const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "New Chat" }) => {
+const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "New Chat", onContentReady }) => {
   const [currentDate, setCurrentDate] = useState("");
 
   useEffect(() => {
@@ -54,6 +54,11 @@ const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "
 
   const greeting = useMemo(() => getTimeGreeting(propUserName), [propUserName]);
   const headline = useMemo(() => getContextualHeadline(), []);
+
+  useEffect(() => {
+    if (!onContentReady || !currentDate) return;
+    onContentReady({ greeting, headline, currentDate });
+  }, [onContentReady, greeting, headline, currentDate]);
 
   return (
     <header className="center-content" role="banner" style={{ animation: "fadeUp var(--dur-slow) var(--ease-out)" }}>

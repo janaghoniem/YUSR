@@ -1,6 +1,6 @@
 // SideBar.jsx
 import React from "react";
-import { Settings, Menu, X, SquarePen, MessageSquare } from "lucide-react";
+import { Settings, Menu, X, SquarePen, MessageSquare, Eye, Trash2 } from "lucide-react";
 
 const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, onViewChat, onDeleteChat, currentSessionId }) => {
   return (
@@ -10,6 +10,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
         role="navigation"
         aria-label="Main navigation"
         aria-expanded={!collapsed}
+        id="sidebar-nav"
       >
         <div className="sidebar-top">
           <div className="logo-area">
@@ -22,7 +23,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
             onClick={onToggle}
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             aria-expanded={!collapsed}
-            aria-controls="sidebar-content"
+            aria-controls="sidebar-nav"
           >
             {collapsed
               ? <Menu size={19} aria-hidden="true" />
@@ -83,6 +84,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                       {/* Eye icon to view history of any chat */}
                       <button
                         className="chat-view-btn"
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onViewChat && onViewChat(sid, title);
@@ -90,11 +92,12 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                         title="View chat history"
                         aria-label="View chat history"
                       >
-                        👁
+                        <Eye size={14} aria-hidden="true" />
                       </button>
                       {/* Delete chat button */}
                       <button
-                        className="chat-view-btn"
+                        className="chat-view-btn chat-delete-btn"
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           if (window.confirm(`Delete chat "${title}"?`)) {
@@ -103,9 +106,8 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                         }}
                         title="Delete this chat"
                         aria-label="Delete this chat"
-                        style={{ color: "#ff4d6d" }}
                       >
-                        🗑
+                        <Trash2 size={14} aria-hidden="true" />
                       </button>
                     </li>
                   );

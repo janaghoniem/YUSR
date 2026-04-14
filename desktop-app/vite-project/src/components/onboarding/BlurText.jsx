@@ -1,23 +1,47 @@
-import { useRef, useEffect, useState } from 'react';
-import { motion, useSpring, useTransform } from 'framer-motion';
+// BlurText.jsx — ReactBits-style blur-in text animation
+// Each word animates from blur+opacity=0 to sharp+opacity=1 with a stagger.
+// Drop-in replacement: <BlurText text="Hello world" delay={80} />
 
-const BlurText = ({ text, delay = 200, className = '', animateBy = 'words' }) => {
-  const elements = animateBy === 'words' ? text.split(' ') : text.split('');
-  
+import React, { useMemo } from "react";
+
+const BlurText = ({
+  text = "",
+  delay = 80,          // ms stagger between words
+  duration = 500,      // ms per word transition
+  className = "",
+  as: Tag = "span",
+}) => {
+  const words = useMemo(() => text.split(" "), [text]);
+
   return (
-    <span className={className}>
-      {elements.map((el, i) => (
-        <motion.span
+    <Tag
+      className={className}
+      aria-label={text}
+      style={{ display: "inline", lineHeight: "inherit" }}
+    >
+      {words.map((word, i) => (
+        <span
           key={i}
-          initial={{ filter: 'blur(10px)', opacity: 0, y: 10 }}
-          animate={{ filter: 'blur(0px)', opacity: 1, y: 0 }}
-          transition={{ delay: i * (delay / 1000), duration: 0.6, ease: 'easeOut' }}
-          style={{ display: 'inline-block', marginRight: animateBy === 'words' ? '0.3em' : '0' }}
+          aria-hidden="true"
+          style={{
+            display: "inline-block",
+            marginRight: "0.25em",
+            opacity: 0,
+            filter: "blur(8px)",
+            animation: `blurTextIn ${duration}ms ease forwards`,
+            animationDelay: `${i * delay}ms`,
+          }}
         >
-          {el === " " ? "\u00A0" : el}
-        </motion.span>
+          {word}
+        </span>
       ))}
-    </span>
+      <style>{`
+        @keyframes blurTextIn {
+          0%   { opacity: 0; filter: blur(8px);  transform: translateY(4px); }
+          100% { opacity: 1; filter: blur(0px); transform: translateY(0); }
+        }
+      `}</style>
+    </Tag>
   );
 };
 

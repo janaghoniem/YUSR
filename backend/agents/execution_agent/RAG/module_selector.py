@@ -600,64 +600,106 @@ AVOID: subprocess, pyautogui, PowerPoint UI, mouse/keyboard events
     ),
     "file": ModuleGuidance(
         module_name="File",
-        library_name="file_utils (custom file search)",
-        library_import="try:\n    from agents.execution_agent.RAG.file_utils import open_file\nexcept ImportError:\n    from file_utils import open_file",
+        library_name="file_agent (smart file search with fuzzy matching)",
+        library_import="try:\n    from agents.execution_agent.RAG.file_agent import find_file, open_file\nexcept ImportError:\n    from file_agent import find_file, open_file",
         keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file", "create file", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"],
         guidance="""
-Use the file_utils module for fast, reliable file operations. Choose ONE operation type:
+Use the file_agent module for fast, intelligent file operations with fuzzy matching.
 
 SETUP:
 try:
-    from agents.execution_agent.RAG.file_utils import find_file, find_all_files, open_file, get_file_path, file_exists
+    from agents.execution_agent.RAG.file_agent import find_file, open_file
 except ImportError:
-    from file_utils import find_file, find_all_files, open_file, get_file_path, file_exists
+    from file_agent import find_file, open_file
 import os
+
+============ KEY FEATURES ============
+✅ Fuzzy matching - "flutter quiz" matches "flutter_quiz_answers.pdf"
+✅ Caching - first search indexes files, subsequent searches <0.5s
+✅ Smart fallback - uses system search if cached index doesn't match
+✅ Structured responses - JSON with status, path, confidence, suggestions
+
+============ RETURN FORMAT ============
+All find_file() calls return a dict:
+
+Success (single match):
+    {"status": "found", "path": "C:\\..\\file.pdf", "confidence": 0.92}
+
+Multiple candidates (task is ambiguous):
+    {"status": "multiple", "paths": [
+        {"path": "C:\\..\\report_2024.pdf", "confidence": 0.88},
+        {"path": "C:\\..\\report_draft.pdf", "confidence": 0.81}
+    ], "count": 2}
+
+Not found:
+    {"status": "not_found", "suggestions": ["Did you mean: report_backup.pdf?"]}
 
 ============ OPERATION TYPES ============
 
 [1] OPEN FILE DIRECTLY — task says "open", "launch", "view" + filename:
-    CRITICAL: The open_file() function outputs [FILE]: <path> automatically
-    Just check the return value and print EXECUTION_SUCCESS
-
-    success = open_file("flutter_quiz_answers.docx")
-    if success:
-        print("EXECUTION_SUCCESS")
+    result = find_file("flutter_quiz_answers.docx")
+    if result["status"] == "found":
+        success = open_file("flutter_quiz_answers.docx")
+        if success:
+            print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Multiple matches - use first or ask for clarification
+        print("File search returned multiple results, using first match")
+        success = open_file(result["paths"][0]["path"])
+        if success:
+            print("EXECUTION_SUCCESS")
     else:
-        print("EXECUTION_FAILED: File not found or cannot be opened")
+        print("EXECUTION_FAILED: File not found")
 
 [2] GET FILE PATH (for downstream tasks) — task says "find", "locate", "where is":
-    path = get_file_path("report.pdf")
-    if path:
-        print(f"[FILE]: {path}")
+    result = find_file("report.pdf")
+    if result["status"] == "found":
+        print(f"[FILE]: {result['path']}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Return first match to downstream task
+        print(f"[FILE]: {result['paths'][0]['path']}")
         print("EXECUTION_SUCCESS")
     else:
         print("File not found")
 
 [3] SEARCH MULTIPLE FILES — task says "search", "find all", "list":
-    files = find_all_files("*.txt")
-    if files:
-        for f in files:
-            print(f"[FOUND]: {f}")
+    result = find_file("*.txt")  # or search for pattern
+    if result["status"] == "found":
+        print(f"[FOUND]: {result['path']}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        for match in result["paths"]:
+            print(f"[FOUND]: {match['path']}")
         print("EXECUTION_SUCCESS")
     else:
         print("No files found")
 
 [4] READ FILE CONTENTS — task says "read", "show contents", "display":
-    path = get_file_path("config.txt")
-    if path and os.path.isfile(path):
+    result = find_file("config.txt")
+    if result["status"] == "found":
+        path = result["path"]
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
         print(content)  # OUTPUT DATA FIRST
+        print(f"[FILE]: {path}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Read first match
+        path = result["paths"][0]["path"]
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        print(content)
         print(f"[FILE]: {path}")
         print("EXECUTION_SUCCESS")
     else:
         print("File not found")
 
 [5] DELETE FILE — task says "delete", "remove", "erase":
-    path = get_file_path("old_backup.zip")
-    if path and os.path.isfile(path):
-        os.remove(path)
-        print(f"[DELETED]: {path}")
+    result = find_file("old_backup.zip")
+    if result["status"] == "found":
+        os.remove(result["path"])
+        print(f"[DELETED]: {result['path']}")
         print("EXECUTION_SUCCESS")
     else:
         print("File not found")
@@ -672,12 +714,13 @@ import os
     print("EXECUTION_SUCCESS")
 
 ============ KEY POINTS ============
-✅ ALWAYS use file_utils functions - they handle errors gracefully
-✅ ALWAYS check return values (True/False or path/None)
-✅ NEVER assume file exists - check first with file_exists() or handle False return
+✅ ALWAYS check result["status"] before accessing path/paths
+✅ Fuzzy matching means you can use partial queries: "flutter quiz" not just "flutter_quiz_answers.docx"
+✅ If "multiple" status, use first match or ask for clarification
+✅ open_file() outputs [FILE]: <path> automatically
 ✅ OUTPUT DATA BEFORE status messages (critical for pipelines)
 ✅ Use [FILE]: marker for downstream tasks
-✅ Only print EXECUTION_SUCCESS if operation actually succeeded
+✅ Cache automatically refreshes after 24 hours, manual refresh via find_file(query, "full")
 """
     ),
 }

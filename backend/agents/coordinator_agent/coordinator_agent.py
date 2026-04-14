@@ -1534,8 +1534,9 @@ def create_coordinator_graph():
             # the .py file, because the system codepage (cp1252) can't handle Arabic/Unicode.
             if current_task.depends_on:
                 dep_id = current_task.depends_on[0].strip()
-                if dep_id in task_outputs and "input_content" not in current_task.extra_params:
+                if dep_id in task_outputs:
                     raw_dep_output = task_outputs[dep_id]
+                    # Always inject: override LLM-generated placeholders like "content_from_task_X"
                     # Strip any remaining markdown fences (defensive — reasoning agent
                     # should already return clean text, but guard here as well)
                     if isinstance(raw_dep_output, str):

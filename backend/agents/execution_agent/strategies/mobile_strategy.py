@@ -240,6 +240,9 @@ class MobileReActStrategy:
         self._time_picker_pm_attempts: int                      = 0   # FIX 6
         self._add_alarm_clicked: bool                           = False
         self._add_alarm_screen_sig: str                         = ""
+        self._search_just_submitted: bool                       = False
+        self._search_needs_confirm: bool                        = False
+        self._email_just_sent: bool                             = False
         self._t2_completed_steps:  List[Dict]                   = []
         self._last_t2_hint_record_id: Optional[str]             = None
         self.token_usage:          Dict[str, int]               = {"prompt": 0, "completion": 0, "total": 0}
@@ -868,8 +871,27 @@ class MobileReActStrategy:
                 logger.info("✅ GOAL ACHIEVED")
                 elapsed = asyncio.get_event_loop().time() - start_time
                 self._store_learned_steps(task.ai_prompt, overall_goal, app, actions_executed)
-                return self._build_result(task.task_id, "success", step+1,
+                
+                # Screen content extraction for search/lookup tasks
+                extracted_content = None
+                goal_lower = task.ai_prompt.lower()
+                is_extraction_task = any(kw in goal_lower for kw in (
+                    "search", "find", "look up", "get results", "show", "list",
+                    "what are", "read", "extract", "parse"
+                ))
+                if is_extraction_task and self.current_ui_tree:
+                    extracted_content = self._extract_screen_content(self.current_ui_tree)
+                    if extracted_content:
+                        logger.info(f"[EXTRACT] Screen content extracted: {len(extracted_content)} chars")
+                
+                result = self._build_result(task.task_id, "success", step+1,
                     actions_executed, elapsed, completion_reason=action_json.get("reason","Task completed"))
+                
+                # Attach extracted content to result metadata so coordinator can forward it
+                if extracted_content:
+                    result.completion_reason = f"Task completed\n\nSCREEN_CONTENT:\n{extracted_content}"
+                
+                return result
 
             # Blacklist guard
             if action_json.get("action_type") == "click":
@@ -947,6 +969,25 @@ class MobileReActStrategy:
                     app = refreshed_app
                 new_ui.app_name = app
 
+                if (
+                    action_json.get("action_type") == "click"
+                    and self._is_alarm_list_screen(new_ui)
+                    and prev_ui_tree is not None
+                    and not self._is_alarm_list_screen(prev_ui_tree)
+                    and "alarm" in (task.ai_prompt + overall_goal).lower()
+                ):
+                    logger.info("✅ Alarm saved — transitioned to alarm list")
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    self._store_learned_steps(task.ai_prompt, overall_goal, app, actions_executed)
+                    return self._build_result(
+                        task.task_id,
+                        "success",
+                        step + 1,
+                        actions_executed,
+                        elapsed,
+                        completion_reason="Alarm set and saved",
+                    )
+
                 new_state = self._detect_device_state(new_ui)
                 if new_state != self.device_state:
                     logger.info(f"🔄 State: {self.device_state} → {new_state}")
@@ -981,34 +1022,33 @@ class MobileReActStrategy:
                     self.stuck_counter += 1
 
                 # EMAIL SENT DETECTION: compose screen -> inbox transition after click
-                if action_json.get("action_type") == "click":
-                    is_send_task = any(kw in task.ai_prompt.lower() for kw in (
-                        "send", "click send", "click the send"
-                    ))
-                    in_gmail = "gm" in (new_ui.app_package or "").lower()
-
-                    if is_send_task and in_gmail and prev_ui_tree is not None:
-                        prev_had_send = any(
-                            (e.content_description or "") == "Send"
-                            for e in prev_ui_tree.elements
+                in_gmail = "gm" in (new_ui.app_package or "").lower()
+                if action_json.get("action_type") == "click" and in_gmail and prev_ui_tree is not None:
+                    prev_was_compose = self._is_gmail_compose_screen(prev_ui_tree)
+                    now_inbox = (
+                        any(
+                            (e.content_description or "").strip() == "Compose"
+                            and getattr(e, "clickable", False)
+                            and (getattr(e, "type", "") or "").lower() in ("imagebutton", "button")
+                            for e in new_ui.elements
                         )
-                        now_inbox = (
-                            any("compose" in (e.content_description or "").lower() for e in new_ui.elements)
-                            and not any((e.text or "").lower() in ("to", "subject") for e in new_ui.elements)
-                            and len(new_ui.elements) > 30
+                        and not any((e.text or "").lower() in ("to", "subject") for e in new_ui.elements)
+                        and not any((e.hint_text or "").lower() in ("to", "recipients") for e in new_ui.elements)
+                        and len(new_ui.elements) > 30
+                    )
+                    if prev_was_compose and now_inbox and not self._email_just_sent:
+                        self._email_just_sent = True
+                        logger.info("✅ Email sent — compose→inbox transition detected")
+                        elapsed = asyncio.get_event_loop().time() - start_time
+                        self._store_learned_steps(task.ai_prompt, overall_goal, app, actions_executed)
+                        return self._build_result(
+                            task.task_id,
+                            "success",
+                            step + 1,
+                            actions_executed,
+                            elapsed,
+                            completion_reason="Email sent",
                         )
-                        if prev_had_send and now_inbox:
-                            logger.info("✅ Email sent — confirmed by Send button + inbox return")
-                            elapsed = asyncio.get_event_loop().time() - start_time
-                            self._store_learned_steps(task.ai_prompt, overall_goal, app, actions_executed)
-                            return self._build_result(
-                                task.task_id,
-                                "success",
-                                step + 1,
-                                actions_executed,
-                                elapsed,
-                                completion_reason="Email sent",
-                            )
 
                 goal_is_play = any(kw in task.ai_prompt.lower() for kw in (
                     "play", "open", "watch", "view", "read", "listen"
@@ -1378,6 +1418,19 @@ class MobileReActStrategy:
             elif recipe.action_type == "back":
                 action_json = {"action_type": "global_action", "global_action": "BACK",
                                "thought": f"[T2] {recipe.step_instruction}"}
+            elif recipe.action_type == "global_action":
+                # Nav tasks stored as global_action should not be EXECUTE-band executed
+                # (they have no selectors to resolve on-screen). Downgrade to hint.
+                if t2_result.band == "execute":
+                    logger.warning("[T2] Nav recipe (global_action) in EXECUTE band — downgrading to hint")
+                    t2_result.hint_text = self.task_memory._build_hint(t2_result.recipes, task.ai_prompt)
+                    return None  # hand off to T1/T3
+                # In hint context, just track completion and continue
+                self._t2_completed_steps.append({
+                    "step_instruction": recipe.step_instruction,
+                    "action_type": recipe.action_type,
+                })
+                continue
             else:
                 continue
 
@@ -1424,6 +1477,53 @@ class MobileReActStrategy:
     ) -> Optional[Dict[str, Any]]:
         if not ui_tree or not ui_tree.elements:
             return None
+
+        # Search suggestion clicker — highest priority
+        suggestion_click = self._find_and_click_first_suggestion(ui_tree)
+        if suggestion_click:
+            return suggestion_click
+
+        # AM/PM correction in time picker
+        if self._is_in_time_picker(ui_tree):
+            extra = task.extra_params or {}
+            goal_text = f"{task.ai_prompt} {extra.get('overall_goal', '')} {extra.get('goal', '')}".lower()
+            wants_am = "am" in goal_text
+            wants_pm = "pm" in goal_text
+            if not wants_am and not wants_pm:
+                hm = re.search(r"\b([1-9]|1[01])\s*:", goal_text)
+                if hm:
+                    wants_am = True
+
+            if wants_am or wants_pm:
+                target = "AM" if wants_am else "PM"
+                wrong = "PM" if wants_am else "AM"
+                wrong_selected = next(
+                    (
+                        e for e in ui_tree.elements
+                        if e.type == "button"
+                        and (e.text or "").upper() == wrong
+                        and getattr(e, "selected", False)
+                    ),
+                    None,
+                )
+                if wrong_selected:
+                    correct_btn = next(
+                        (
+                            e for e in ui_tree.elements
+                            if e.type == "button" and (e.text or "").upper() == target
+                        ),
+                        None,
+                    )
+                    if correct_btn:
+                        logger.info(
+                            f"[T1] Time picker: correcting {wrong} → {target} "
+                            f"(element {correct_btn.element_id})"
+                        )
+                        return {
+                            "thought": f"Correct AM/PM to {target}",
+                            "action_type": "click",
+                            "element_id": correct_btn.element_id,
+                        }
 
         if "aura" in (ui_tree.app_package or "").lower():
             logger.info("[T1] AURA detected → HOME")
@@ -1768,6 +1868,78 @@ Action: {{"action_type": "complete"}}"""
                 return True
         return False
 
+    def _find_and_click_first_suggestion(self, ui_tree: SemanticUITree) -> Optional[Dict[str, Any]]:
+        """After IME fires, suggestion dropdown may appear. Click the first real suggestion."""
+        if not self._search_needs_confirm:
+            return None
+
+        h = max(ui_tree.screen_height, 1)
+
+        has_search_bar = any(
+            (
+                any(
+                    kw in (e.resource_id or "").lower()
+                    for kw in ("url_bar", "omnibox", "search_box", "url_field", "search_bar", "query")
+                )
+                or any(
+                    kw in (e.hint_text or "").lower()
+                    for kw in ("search", "query", "address", "url")
+                )
+            )
+            for e in ui_tree.elements
+            if (e.focusable or e.clickable)
+        )
+        if not has_search_bar:
+            self._search_needs_confirm = False
+            return None
+
+        candidates = []
+        for e in ui_tree.elements:
+            if not e.clickable:
+                continue
+            label = (e.text or e.content_description or "").strip()
+            if not label or len(label) < 2:
+                continue
+            if not e.bounds:
+                continue
+            cy = (e.bounds.get("top", 0) + e.bounds.get("bottom", 0)) // 2
+            cy_pct = cy * 100 // h
+            if cy_pct < 25:
+                continue
+            label_lower = label.lower()
+            if any(
+                bad in label_lower
+                for bad in (
+                    "show predictions",
+                    "autocomplete",
+                    "suggestions",
+                    "microphone",
+                    "voice search",
+                    "clear",
+                    "search settings",
+                    "google",
+                )
+            ):
+                continue
+            candidates.append((cy_pct, e))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0])
+        first = candidates[0][1]
+        label = (first.text or first.content_description or "")[:50]
+        logger.info(
+            f"[T1] Suggestion clicker: clicking '{label}' "
+            f"id={first.element_id} @{candidates[0][0]}%"
+        )
+        self._search_needs_confirm = False
+        return {
+            "thought": f"Clicking first search suggestion: {label}",
+            "action_type": "click",
+            "element_id": first.element_id,
+        }
+
     def _normalize_step_for_storage(self, step_instruction: str) -> str:
         normalized = re.sub(r"'[^']{3,}'", "<value>", step_instruction)
         normalized = re.sub(r'"[^"]{3,}"', "<value>", normalized)
@@ -1802,6 +1974,14 @@ Action: {{"action_type": "complete"}}"""
                     pass
             parts.append(f"{k.upper()}: {v!r}")
         return ("\n".join(parts) + "\n⚠️ USE THESE EXACT VALUES.") if parts else ""
+
+    def _is_gmail_compose_screen(self, ui_tree: SemanticUITree) -> bool:
+        if ui_tree is None:
+            return False
+        has_to = any((e.text or "").lower() == "to" for e in ui_tree.elements)
+        has_subject = any((e.text or "").lower() == "subject" for e in ui_tree.elements)
+        has_send = any((e.content_description or "") == "Send" for e in ui_tree.elements)
+        return has_send and (has_to or has_subject)
 
     # ══════════════════════════════════════════════════════════════════════
     #  APP VERIFICATION
@@ -1948,6 +2128,32 @@ Action: {{"action_type": "complete"}}"""
                 + (" (nav task — no selectors)" if is_nav_task else "")
             )
 
+    def _extract_screen_content(self, ui_tree: SemanticUITree, max_chars: int = 1500) -> str:
+        """
+        Extract readable text content from current screen.
+        Used when the task goal requires returning data to the coordinator.
+        Filters out boilerplate (nav bars, icons) and keeps content elements.
+        """
+        lines = []
+        seen = set()
+        for e in ui_tree.elements:
+            text = (e.text or "").strip()
+            desc = (e.content_description or "").strip()
+            label = text or desc
+            if not label or len(label) < 3:
+                continue
+            # Skip navigation boilerplate
+            if label.lower() in {"back", "more", "menu", "home", "search", "close", 
+                                 "share", "bookmark", "tab", "new tab", "reload"}:
+                continue
+            if label in seen:
+                continue
+            seen.add(label)
+            lines.append(label)
+            if sum(len(l) for l in lines) > max_chars:
+                break
+        return "\n".join(lines)
+
     # ══════════════════════════════════════════════════════════════════════
     #  SCREEN DETECTION
     # ══════════════════════════════════════════════════════════════════════
@@ -1966,8 +2172,17 @@ Action: {{"action_type": "complete"}}"""
         return has_ampm and has_ok and has_time
 
     def _is_alarm_list_screen(self, ui_tree: SemanticUITree) -> bool:
-        return (any(e.type == "switch" for e in ui_tree.elements) and
-                any("add alarm" in (e.content_description or "").lower() for e in ui_tree.elements))
+        if ui_tree is None:
+            return False
+        in_clock = "clock" in (ui_tree.app_name or "").lower()
+        if not in_clock:
+            return False
+        has_switch = any(e.type == "switch" for e in ui_tree.elements)
+        has_add = any(
+            "add alarm" in (e.content_description or e.text or "").lower()
+            for e in ui_tree.elements
+        )
+        return has_switch and has_add
 
     def _detect_device_state(self, ui_tree: SemanticUITree) -> str:
         app_name    = (ui_tree.app_name or "").lower()
@@ -2128,6 +2343,12 @@ Action: {{"action_type": "complete"}}"""
         if (self.current_ui_tree and self._is_in_time_picker(self.current_ui_tree)):
             return {"click": 0.3, "type": 0.3, "global_action": 1.0}.get(action_type or "", 0.3)
 
+        # Extended wait after search submission so suggestions/results can load
+        if action_type == "type" and self._search_just_submitted:
+            self._search_just_submitted = False
+            self._search_needs_confirm = True  # T1 will handle clicking first suggestion
+            return 2.5
+
         return {
             "click": 3.5, "global_action": 3.0,
             "type": 0.8, "scroll": 1.5, "swipe": 2.0, "wait": 0.1,
@@ -2160,6 +2381,9 @@ Action: {{"action_type": "complete"}}"""
         self.previous_ui_trees        = []
         self._time_picker_pm_attempts = 0
         self._last_t2_hint_record_id  = None
+        self._search_just_submitted   = False
+        self._search_needs_confirm    = False
+        self._email_just_sent         = False
         self.token_usage = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls          = 0
         self.total_ui_elements_seen   = 0
@@ -2380,11 +2604,22 @@ Action: {{"action_type": "complete"}}"""
 
                 if is_search_field:
                     await asyncio.sleep(0.3)
+                    submitted = False
                     try:
                         await asyncio.to_thread(device.send_action, "search")
                         logger.info("[UIA2] Search field: sent IME action 'search' after typing")
+                        submitted = True
                     except Exception as e:
                         logger.debug(f"[UIA2] IME search action failed: {e}")
+                        try:
+                            await asyncio.to_thread(device.press, "enter")
+                            logger.info("[UIA2] Search field: IME failed; pressed Enter fallback")
+                            submitted = True
+                        except Exception as enter_e:
+                            logger.debug(f"[UIA2] Enter fallback failed: {enter_e}")
+
+                    if submitted:
+                        self._search_just_submitted = True
 
                 return ActionResult(
                     action_id=action.action_id,

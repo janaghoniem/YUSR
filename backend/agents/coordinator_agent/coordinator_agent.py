@@ -505,6 +505,12 @@ _session_browser_state: Dict[str, Dict] = {}
 # Cleared when a new chat session starts
 _icrl_buffers: Dict[str, ICRLBuffer] = {}
 
+# ── ICRL TEST FLAG — set to True temporarily to force round 0 to fail ────────
+# This injects a bad task into the round-0 decomposition so maybe_retry_plan
+# always has something to retry. Set back to False in production.
+_ICRL_FORCE_FAIL_ROUND0 = False
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _get_icrl_buffer(session_id: str, task_id: str, goal: str) -> ICRLBuffer:
     """Get or create an ICRL buffer for a specific task within a session."""
     key = f"{session_id}:{task_id}"
@@ -1359,10 +1365,28 @@ async def decompose_task_to_actions_with_icrl(
     """
     if icrl_round == 0 or icrl_buffer is None or icrl_buffer.attempt_count == 0:
         # First attempt — no ICRL history yet, call normally
-        return await decompose_task_to_actions(
+        result = await decompose_task_to_actions(
             user_request, preferences_context, device_type,
             conversation_history, session_id, http_request_id, current_page_url
         )
+        # ── TEST ONLY: inject a guaranteed-fail task to force ICRL retry ──
+        if _ICRL_FORCE_FAIL_ROUND0 and result.get("tasks"):
+            from agents.coordinator_agent.coordinator_agent import ActionTask
+            import uuid as _uuid
+            fail_task = ActionTask(
+                task_id=f"icrl_test_fail_{_uuid.uuid4().hex[:6]}",
+                goal=result["tasks"][0].goal if result["tasks"] else "test",
+                ai_prompt="__ICRL_FORCED_FAILURE_DO_NOT_EXECUTE__",
+                device="desktop",
+                context="local",
+                target_agent="action",
+                extra_params={"_icrl_test": True},
+                depends_on=None,
+            )
+            result["tasks"].append(fail_task)
+            logger.warning("⚠️ ICRL TEST MODE: Injected forced-fail task into round-0 plan")
+        # ─────────────────────────────────────────────────────────────────
+        return result
 
     # Build the base prompt (we need to intercept it before the LLM call)
     # We reconstruct the prompt the same way decompose_task_to_actions does,
@@ -1390,10 +1414,11 @@ async def decompose_task_to_actions_with_icrl(
     icrl_enriched_request["_icrl_round"] = icrl_round
     icrl_enriched_request["_icrl_best_reward"] = round(icrl_buffer.best_reward, 3)
 
-    return await decompose_task_to_actions(
+    result = await decompose_task_to_actions(
         icrl_enriched_request, preferences_context, device_type,
         conversation_history, session_id, http_request_id, current_page_url
     )
+    return result
 
 def create_coordinator_graph():
     """Create the coordinator orchestration graph"""
@@ -2461,6 +2486,7 @@ Extract now:"""
     # ── ICRL: Plan-level retry node ───────────────────────────────────────────
     MAX_ICRL_PLAN_RETRIES = 2  # Max times to re-decompose a failing plan
     ICRL_RETRY_SUCCESS_THRESHOLD = 0.6  # Minimum success ratio to skip retry
+    # ICRL_RETRY_SUCCESS_THRESHOLD = 1.1
 
     async def maybe_retry_plan(state: Dict) -> Dict:
         """
@@ -2487,7 +2513,14 @@ Extract now:"""
             if not session_id or not results:
                 return {**current_state, "_icrl_plan_round": icrl_round}
 
-            success_count = sum(1 for r in results.values() if r.status == "success")
+            # Results may be TaskResult objects OR plain dicts depending on
+            # whether LangGraph checkpointing serialized them. Handle both.
+            def _get_status(r) -> str:
+                if isinstance(r, dict):
+                    return r.get("status", "unknown")
+                return getattr(r, "status", "unknown")
+
+            success_count = sum(1 for r in results.values() if _get_status(r) == "success")
             total_count = len(results)
             plan_reward = success_count / max(total_count, 1)
 
@@ -2534,18 +2567,24 @@ Extract now:"""
                     classify_failure_type(ft.model_dump(), ft_result.model_dump())
                 )
 
-            # If every failure is a pure execution error, skip re-decomposition
-            DECOMP_RETRYABLE_TYPES = {"decomposition", "dependency", "unknown"}
+               
+            # If every failure is a pure execution error, re-decomposing may still help
+            # (e.g. wrong task order, wrong app, wrong step sequence).
+            # Only skip retry if ALL failures are dependency-chain failures caused by
+            # a single upstream task — in that case a different decomposition won't help
+            # until the upstream task itself is fixed.
+            # "execution" failures ARE retryable because the decomposition may have
+            # chosen the wrong approach (wrong app, wrong sequence, missing confirmation step).
+            ALWAYS_SKIP_RETRY_TYPES = set()  # currently nothing is truly un-retryable at plan level
             has_retryable_failure = bool(
-                failure_types_this_round & DECOMP_RETRYABLE_TYPES
+                failure_types_this_round - ALWAYS_SKIP_RETRY_TYPES
             )
             if not has_retryable_failure and failure_types_this_round:
                 logger.info(
-                    f"🔄 ICRL: Skipping plan retry — all failures are execution-level "
-                    f"({failure_types_this_round}), re-decomposing would not help"
+                    f"🔄 ICRL: Skipping plan retry — no retryable failures "
+                    f"({failure_types_this_round})"
                 )
                 return {**current_state, "_icrl_plan_round": icrl_round}
-
             # ── Plan failed — attempt retry ───────────────────────────────────
             new_icrl_round = icrl_round + 1
             logger.info(

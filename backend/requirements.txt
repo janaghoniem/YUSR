@@ -97,3 +97,7 @@ pillow
 playwright
 docker
 chromadb
+uiautomator2
+adbutils
+apkutils
+adb

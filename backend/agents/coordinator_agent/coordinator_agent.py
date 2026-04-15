@@ -909,15 +909,25 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
 
 - task_id: task_2
   goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Navigate to Gmail 
+  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before opening any app or sending it. Wait for their response.
+  device: mobile
+  context: local
+  target_agent: language
+  extra_params:
+    input_from: "task_1"
+  depends_on: ["task_1"]
+
+- task_id: task_3
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Navigate to Gmail
   device: mobile
   context: local
   target_agent: action
   extra_params:
     app_name: gmail
-  depends_on: null
+  depends_on: ["task_2"]
 
-- task_id: task_3
+- task_id: task_4
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Compose new email to sara@gmail.com
   device: mobile
@@ -925,34 +935,24 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
   target_agent: action
   extra_params:
     recipient: sara@gmail.com
-  depends_on: ["task_2"]
+  depends_on: ["task_3"]
 
-- task_id: task_4
+- task_id: task_5
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_1", "task_3"]
+  depends_on: ["task_1", "task_4"]
 
-- task_id: task_5
+- task_id: task_6
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the email body with the BODY value from the composed email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_4"]
-
-- task_id: task_6
-  goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before sending it. Wait for their response.
-  device: mobile
-  context: local
-  target_agent: language
-  extra_params:
-    input_from: "task_1"
   depends_on: ["task_1", "task_5"]
 
 - task_id: task_7
@@ -965,11 +965,9 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
   depends_on: ["task_6"]
 
 EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
-task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
-the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
-so the action layer can parse SUBJECT and BODY individually. 
-task_6 explicitly takes input_from: "task_1" so the language agent can read the generated content to the user before task_7 sends it.
-The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
+task_2 explicitly takes input_from: "task_1" so the language agent reads the generated content to the user for confirmation BEFORE any action tasks start.
+task_3 navigates Gmail and depends on task_2. task_4 fills the To field directly (known from the user request). 
+tasks 5-6 receive the JSON as input_content from task_1 so the action layer can parse SUBJECT and BODY individually. They also depend sequentially on task_4/5.
 
 ## Example 4: Mobile Configuration Task
 
@@ -1618,7 +1616,8 @@ def create_coordinator_graph():
         output_language = state.get("input", {}).get("output_language", user_language)
         # user_profile: personalization data forwarded from Language Agent
         user_profile = state.get("input", {}).get("user_profile") or {}
-        
+        user_id = state.get("input", {}).get("user_id", "default_user")
+
         task_queue.reset()
         task_queue.add_to_current(tasks)
         
@@ -1805,7 +1804,8 @@ def create_coordinator_graph():
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
             result = await execute_single_task(
                 current_task, session_id, original_message_id,
-                user_language, output_language, user_profile
+                user_language, output_language, user_profile,
+                user_id
             )
             
             results[current_task.task_id] = result
@@ -1876,7 +1876,8 @@ def create_coordinator_graph():
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
                         resolve_result = await execute_single_task(
                             resolve_task, session_id, original_message_id,
-                            user_language, output_language, user_profile
+                            user_language, output_language, user_profile,
+                            user_id
                         )
                         results[resolve_task.task_id] = resolve_result
                         task_queue.log_execution(resolve_task, resolve_result)
@@ -2814,6 +2815,7 @@ async def execute_single_task(
     user_language: str = "en",
     output_language: str = "en",
     user_profile: Optional[Dict[str, Any]] = None,
+    user_id: str = "default_user"
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
     
@@ -2883,6 +2885,8 @@ async def execute_single_task(
         receiver = AgentType.REASONING
     
     task_payload = task.model_dump()
+    task_payload["user_id"] = user_id
+    
     if task.target_agent == "reasoning":
         task_payload["user_language"] = user_language
         # Pass output_language (may differ from user_language when user requests a different
@@ -2899,9 +2903,12 @@ async def execute_single_task(
         # Also set at top level for direct access
         task_payload["user_profile"] = user_profile or {}
 
+    # Use CONFIRMATION_REQUEST for Language Agent to ask user, else EXECUTION_REQUEST
+    msg_type = MessageType.CONFIRMATION_REQUEST if receiver == AgentType.LANGUAGE else MessageType.EXECUTION_REQUEST
+
     # Create message
     task_msg = AgentMessage(
-        message_type=MessageType.EXECUTION_REQUEST,
+        message_type=msg_type,
         sender=AgentType.COORDINATOR,
         receiver=receiver,
         session_id=session_id,
@@ -3064,6 +3071,8 @@ async def start_coordinator_agent(broker_instance):
         # ─────────────────────────────────────────────────────────────────────
 
         state_input = {
+            # Pass the user_id through to the state context
+            "user_id": user_id,
             "input": _raw_payload,
             "session_id": session_id,
             "original_message_id": http_request_id,

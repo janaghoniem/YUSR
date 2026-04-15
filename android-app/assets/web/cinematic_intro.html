@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>AURA</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@200;300;400;500;600&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: 'Plus Jakarta Sans', -apple-system, 'SF Pro Display', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  canvas { display: block; position: fixed; inset: 0; }
+
+  /* Fallback canvas for non-WebGL environments */
+  #fallback-canvas {
+    display: none;
+    position: fixed;
+    inset: 0;
+  }
+
+  #ui {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-end;
+    padding-bottom: env(safe-area-inset-bottom, 52px);
+    padding-bottom: max(52px, env(safe-area-inset-bottom));
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  #caption {
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.30em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.18);
+    opacity: 0;
+    transition: opacity 0.6s cubic-bezier(0.25,0,0,1);
+    margin-bottom: 20px;
+    height: 14px;
+  }
+
+  #label {
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.28);
+    opacity: 0;
+    transition: opacity 0.9s cubic-bezier(0.25,0,0,1);
+  }
+  #label.visible { opacity: 1; }
+
+  #title {
+    margin-top: 14px;
+    font-size: clamp(28px, 8vw, 46px);
+    font-weight: 200;
+    letter-spacing: 0.38em;
+    color: rgba(255,255,255,0.92);
+    opacity: 0;
+    transition: opacity 1.2s cubic-bezier(0.25,0,0,1) 0.25s;
+  }
+  #title.visible { opacity: 1; }
+
+  #dot {
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.4);
+    margin-top: 28px;
+    opacity: 0;
+    transition: opacity 0.8s ease 1s;
+  }
+  #dot.visible { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div id="caption"></div>
+  <div id="label">Intelligent Assistant</div>
+  <div id="title">AURA</div>
+  <div id="dot"></div>
+</div>
+
+<!-- Fallback canvas for non-WebGL (CSS particle animation) -->
+<canvas id="fallback-canvas"></canvas>
+
+<script>
+// ─── WebGL support check ──────────────────────────────────────────────────────
+function hasWebGL() {
+  try {
+    const c = document.createElement('canvas');
+    return !!(window.WebGLRenderingContext &&
+      (c.getContext('webgl') || c.getContext('experimental-webgl')));
+  } catch(e) { return false; }
+}
+
+// ─── CSS/Canvas Fallback for non-WebGL (Android emulator) ────────────────────
+function startFallback() {
+  const canvas = document.getElementById('fallback-canvas');
+  canvas.style.display = 'block';
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const PCOUNT = 800;
+  const particles = [];
+  const W = () => canvas.width;
+  const H = () => canvas.height;
+  const cx = () => W() / 2;
+  const cy = () => H() / 2;
+
+  // Build particle system — orbiting rings
+  for (let i = 0; i < PCOUNT; i++) {
+    const ringIdx = Math.floor(Math.random() * 5);
+    const radii = [0.08, 0.18, 0.28, 0.38, 0.46];
+    const r = radii[ringIdx] * Math.min(W(), H()) * (0.9 + Math.random() * 0.2);
+    const angle = Math.random() * Math.PI * 2;
+    const speed = (0.003 + Math.random() * 0.006) * (Math.random() > 0.5 ? 1 : -1);
+    const size = 0.6 + Math.random() * 2.0;
+    const alpha = 0.3 + Math.random() * 0.6;
+    const phase = Math.random() * Math.PI * 2;
+    particles.push({ angle, r, speed, size, alpha, phase, ringIdx });
+  }
+
+  let t = 0;
+  function draw() {
+    requestAnimationFrame(draw);
+    t += 0.016;
+
+    ctx.clearRect(0, 0, W(), H());
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W(), H());
+
+    const brightness = Math.min(1, t * 0.4);
+
+    for (const p of particles) {
+      p.angle += p.speed;
+      const wobble = 1 + 0.04 * Math.sin(t * 2.3 + p.phase);
+      const x = cx() + Math.cos(p.angle) * p.r * wobble;
+      const y = cy() + Math.sin(p.angle) * p.r * wobble * 0.55;
+      const z = Math.sin(p.angle) * 0.3 + 0.7;
+      const finalAlpha = p.alpha * z * brightness;
+
+      // Pink/white color like the Aura theme
+      const isPink = p.ringIdx % 2 === 0;
+      if (isPink) {
+        ctx.fillStyle = `rgba(255, 61, 154, ${finalAlpha})`;
+      } else {
+        ctx.fillStyle = `rgba(255, 255, 255, ${finalAlpha * 0.8})`;
+      }
+
+      const size = p.size * z;
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Central glow
+    const glowRadius = 60 * brightness;
+    const grad = ctx.createRadialGradient(cx(), cy(), 0, cx(), cy(), glowRadius);
+    grad.addColorStop(0, `rgba(255, 61, 154, ${0.15 * brightness})`);
+    grad.addColorStop(1, 'rgba(255, 61, 154, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx(), cy(), glowRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  draw();
+}
+
+// ─── Load Three.js only if WebGL is available ─────────────────────────────────
+if (hasWebGL()) {
+  const script = document.createElement('script');
+  script.type = 'module';
+  script.textContent = `
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.158/build/three.module.js";
+
+const COUNT = window.innerWidth < 600 ? 10000 : 18000;
+const W = window.innerWidth, H = window.innerHeight;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.setClearColor(0x000000, 0);
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, W/H, 0.01, 200);
+camera.position.set(0, 0, 6.5);
+
+function hash1(n) { return ((Math.sin(n) * 43758.5453) % 1 + 1) % 1; }
+
+function addOutliers(pts, filled, count, spreadScale) {
+  while (filled < count) {
+    const r = spreadScale * (1 + Math.random() * 0.5);
+    const a = Math.random() * Math.PI * 2;
+    pts[filled*3]   = Math.cos(a) * r;
+    pts[filled*3+1] = Math.sin(a) * r;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.55;
+    filled++;
+  }
+}
+
+function chaosField(count) {
+  const pts = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const r = Math.pow(Math.random(), 0.45) * 3.4;
+    const a = Math.random() * Math.PI * 2;
+    pts[i*3]   = Math.cos(a) * r;
+    pts[i*3+1] = Math.sin(a) * r;
+    pts[i*3+2] = (Math.random()-0.5) * 2.0;
+  }
+  return pts;
+}
+
+function voicePulse(count, scale) {
+  scale = scale || 2.3;
+  const pts  = new Float32Array(count * 3);
+  const rings = [
+    { r: 0.38, w: 0.055, weight: 0.55 },
+    { r: 0.68, w: 0.045, weight: 0.30 },
+    { r: 1.00, w: 0.035, weight: 0.15 },
+  ];
+  let filled = 0;
+  const inner = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    const rnd = Math.random();
+    let ring = rings[0];
+    let acc = 0;
+    for (const rg of rings) { acc += rg.weight; if (rnd < acc) { ring = rg; break; } }
+    const angle    = Math.random() * Math.PI * 2;
+    const radNoise = (Math.random()-0.5) * ring.w * 2;
+    const r        = (ring.r + radNoise) * scale;
+    const mod = 1 + 0.06 * Math.sin(6 * angle) + 0.03 * Math.cos(11 * angle);
+    pts[filled*3]   = Math.cos(angle) * r * mod;
+    pts[filled*3+1] = Math.sin(angle) * r * mod;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.07;
+    filled++;
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+function neuralWeb(count, scale) {
+  scale = scale || 2.2;
+  const pts  = new Float32Array(count * 3);
+  const HUBS = 9;
+  const hx = [], hy = [];
+  for (let h = 0; h < HUBS; h++) {
+    const a = (h / HUBS) * Math.PI * 2 + hash1(h * 7.3) * 0.4;
+    const r = scale * (0.55 + hash1(h * 13.7) * 0.45);
+    hx.push(Math.cos(a) * r);
+    hy.push(Math.sin(a) * r);
+  }
+  const perHub  = Math.floor(count * 0.18 / HUBS);
+  let filled = 0;
+  for (let h = 0; h < HUBS && filled < count * 0.18; h++) {
+    for (let p = 0; p < perHub && filled < count; p++) {
+      const off = 0.07;
+      pts[filled*3]   = hx[h] + (Math.random()-0.5)*off;
+      pts[filled*3+1] = hy[h] + (Math.random()-0.5)*off;
+      pts[filled*3+2] = (Math.random()-0.5)*0.06;
+      filled++;
+    }
+  }
+  const edges = [];
+  for (let a = 0; a < HUBS; a++) {
+    for (let b = a+1; b < HUBS; b++) {
+      if (hash1(a * 17 + b * 31) < 0.55) edges.push([a, b]);
+    }
+  }
+  const perEdge = Math.floor((count * 0.75) / Math.max(edges.length, 1));
+  for (const [a, b] of edges) {
+    for (let p = 0; p < perEdge && filled < count; p++) {
+      const t     = Math.random();
+      const noise = (Math.random()-0.5) * 0.04;
+      pts[filled*3]   = hx[a] + (hx[b]-hx[a]) * t + noise;
+      pts[filled*3+1] = hy[a] + (hy[b]-hy[a]) * t + noise;
+      pts[filled*3+2] = (Math.random()-0.5) * 0.05;
+      filled++;
+    }
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+function coordinatorRings(count, scale) {
+  scale = scale || 2.3;
+  const pts   = new Float32Array(count * 3);
+  const radii = [0.13, 0.38, 0.65, 0.88, 1.00];
+  const weights = [0.08, 0.16, 0.22, 0.26, 0.28];
+  let filled = 0;
+  const inner = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    const rnd = Math.random();
+    let ri = 0, acc = 0;
+    for (let k = 0; k < weights.length; k++) { acc += weights[k]; if (rnd < acc) { ri = k; break; } }
+    const angle  = Math.random() * Math.PI * 2;
+    const rNoise = (Math.random()-0.5) * 0.022;
+    const r      = (radii[ri] + rNoise) * scale;
+    if (ri === 4) {
+      const seg    = Math.floor(angle / (Math.PI * 2) * 6);
+      const gapFrac = hash1(seg * 19.3);
+      if (gapFrac < 0.22) { continue; }
+    }
+    pts[filled*3]   = Math.cos(angle) * r;
+    pts[filled*3+1] = Math.sin(angle) * r;
+    pts[filled*3+2] = (Math.random()-0.5) * 0.05;
+    filled++;
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+function executionFlow(count, scale) {
+  scale = scale || 2.35;
+  const pts   = new Float32Array(count * 3);
+  const STREAMS = 14;
+  const inner   = Math.floor(count * 0.93);
+  for (let i = 0; i < inner; i++) {
+    const s     = Math.floor(Math.random() * STREAMS);
+    const baseA = (s / STREAMS) * Math.PI * 2;
+    const t = Math.pow(Math.random(), 0.7);
+    const r = scale * (1.0 - t * 0.92);
+    const curl  = 0.38 * t;
+    const angle = baseA + curl + (Math.random()-0.5)*0.07;
+    pts[i*3]   = Math.cos(angle) * r;
+    pts[i*3+1] = Math.sin(angle) * r;
+    pts[i*3+2] = (Math.random()-0.5) * 0.06 * (1-t);
+  }
+  addOutliers(pts, inner, count, scale);
+  return pts;
+}
+
+function auraConvergence(count, scale) {
+  scale = scale || 2.25;
+  const pts  = new Float32Array(count * 3);
+  let filled = 0;
+  const inner   = Math.floor(count * 0.93);
+  const attempts = inner * 90;
+  for (let a = 0; a < attempts && filled < inner; a++) {
+    const x = (Math.random()-0.5) * 2;
+    const y = (Math.random()-0.5) * 2;
+    const v = Math.sin(3*Math.PI*x)*Math.cos(2*Math.PI*y)
+            - Math.cos(3*Math.PI*x)*Math.sin(2*Math.PI*y);
+    const r   = Math.sqrt(x*x+y*y);
+    const env = Math.exp(-r*r*0.55) * (0.3 + 0.7*Math.abs(Math.sin(r*3.8)));
+    const thr = 0.09 + Math.random() * 0.05;
+    if (Math.abs(v) < thr && Math.random() < env + 0.15) {
+      pts[filled*3]   = x * scale;
+      pts[filled*3+1] = y * scale;
+      pts[filled*3+2] = (Math.random()-0.5) * 0.08;
+      filled++;
+    }
+  }
+  addOutliers(pts, filled, count, scale);
+  return pts;
+}
+
+const shapes = {
+  chaos:       chaosField(COUNT),
+  voice:       voicePulse(COUNT),
+  neural:      neuralWeb(COUNT),
+  coordinator: coordinatorRings(COUNT),
+  execution:   executionFlow(COUNT),
+  aura:        auraConvergence(COUNT),
+};
+
+const geo = new THREE.BufferGeometry();
+const basePos = new Float32Array(COUNT * 3);
+const seeds   = new Float32Array(COUNT);
+for (let i = 0; i < COUNT; i++) {
+  basePos[i*3]   = shapes.chaos[i*3];
+  basePos[i*3+1] = shapes.chaos[i*3+1];
+  basePos[i*3+2] = shapes.chaos[i*3+2];
+  seeds[i] = Math.random();
+}
+
+geo.setAttribute('position', new THREE.BufferAttribute(basePos.slice(), 3));
+geo.setAttribute('aSeed',    new THREE.BufferAttribute(seeds,   1));
+geo.setAttribute('aTargetA', new THREE.BufferAttribute(new Float32Array(COUNT*3), 3));
+geo.setAttribute('aTargetB', new THREE.BufferAttribute(new Float32Array(COUNT*3), 3));
+
+const mat = new THREE.ShaderMaterial({
+  transparent: true,
+  depthWrite:  false,
+  depthTest:   false,
+  blending:    THREE.AdditiveBlending,
+  uniforms: {
+    uTime:       { value: 0 },
+    uProgress:   { value: 0 },
+    uChaos:      { value: 1 },
+    uBrightness: { value: 0 },
+  },
+  vertexShader: \`
+    uniform float uTime;
+    uniform float uProgress;
+    uniform float uChaos;
+    attribute float aSeed;
+    attribute vec3  aTargetA;
+    attribute vec3  aTargetB;
+    varying float vAlpha;
+    varying float vSeed;
+    varying float vDist;
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    vec3 hash3(float n){
+      return vec3(hash(n), hash(n+1.1), hash(n+2.3));
+    }
+    void main(){
+      vec3 pos = mix(aTargetA, aTargetB, uProgress);
+      float freq1 = 2.0 + aSeed * 3.0;
+      float freq2 = 1.5 + aSeed * 2.5;
+      float phase = aSeed * 6.2831;
+      float wave = sin(pos.x * freq1 + uTime * 1.8 + phase)
+                 * cos(pos.y * freq2 - uTime * 1.4);
+      pos.z += wave * 0.07 * uChaos;
+      float outlierFactor = step(0.92, aSeed);
+      vec3 scatter = hash3(aSeed * 91.7 + uTime * 0.05) - 0.5;
+      pos += scatter * outlierFactor * uChaos * 0.6;
+      vec3 drift = vec3(
+        sin(uTime * 3.1 + aSeed * 73.1),
+        cos(uTime * 2.7 + aSeed * 51.3),
+        sin(uTime * 4.3 + aSeed * 29.7)
+      ) * (0.003 + 0.012 * uChaos);
+      pos += drift;
+      vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+      float depth = 1.0 / (-mv.z + 0.001);
+      float sizeMod = mix(1.0, 0.4, outlierFactor);
+      float baseSize = 8.0 * depth * sizeMod;
+      float jitter = 0.6 + aSeed * 0.9;
+      gl_PointSize = max(0.5, baseSize * jitter);
+      gl_Position = projectionMatrix * mv;
+      vDist  = length(pos.xy);
+      vAlpha = mix(0.7, 0.95, hash(aSeed * 7.3));
+      vSeed  = aSeed;
+    }
+  \`,
+  fragmentShader: \`
+    uniform float uTime;
+    uniform float uBrightness;
+    varying float vAlpha;
+    varying float vSeed;
+    varying float vDist;
+    float hash(float n){ return fract(sin(n)*43758.5453); }
+    void main(){
+      vec2 uv = gl_PointCoord - 0.5;
+      float d = length(uv);
+      if(d > 0.5) discard;
+      float core = exp(-d * d * 14.0);
+      float grain = step(0.38, fract(hash(vSeed * 391.1 + d * 61.3) * 17.0));
+      float warmth = 0.96 + 0.04 * hash(vSeed * 13.7);
+      vec3 base = vec3(warmth, warmth, warmth * 0.97);
+      float alpha = vAlpha * mix(core, core*0.65+grain*0.35, 0.4);
+      alpha *= (0.4 + uBrightness * 0.6);
+      float ring = smoothstep(0.5, 0.38, d) * smoothstep(0.22, 0.35, d) * 0.35;
+      alpha += ring * uBrightness;
+      gl_FragColor = vec4(base, alpha);
+    }
+  \`
+});
+
+const points = new THREE.Points(geo, mat);
+scene.add(points);
+
+const timeline = [
+  { from: 'chaos',       to: 'voice',       dur: 4.2, hold: 1.6, caption: 'Language'    },
+  { from: 'voice',       to: 'neural',      dur: 4.0, hold: 1.4, caption: 'Reasoning'   },
+  { from: 'neural',      to: 'coordinator', dur: 4.0, hold: 1.4, caption: 'Coordinator' },
+  { from: 'coordinator', to: 'execution',   dur: 4.0, hold: 1.4, caption: 'Execution'   },
+  { from: 'execution',   to: 'aura',        dur: 4.5, hold: 2.2, caption: 'AURA'        },
+  { from: 'aura',        to: 'chaos',       dur: 3.8, hold: 0.8, caption: ''            },
+];
+
+let stage    = 0;
+let phase    = 'warmup';
+let phaseT   = 0;
+let captionShown = false;
+
+const labelEl   = document.getElementById('label');
+const titleEl   = document.getElementById('title');
+const dotEl     = document.getElementById('dot');
+const captionEl = document.getElementById('caption');
+
+let captionTimer = null;
+function showCaption(text) {
+  clearTimeout(captionTimer);
+  if (!text) { captionEl.style.opacity = '0'; return; }
+  captionEl.textContent = text;
+  captionEl.style.opacity = '1';
+  captionTimer = setTimeout(() => { captionEl.style.opacity = '0'; }, 2400);
+}
+function hideCaption() {
+  clearTimeout(captionTimer);
+  captionEl.style.opacity = '0';
+}
+
+setTimeout(() => {
+  labelEl.classList.add('visible');
+  titleEl.classList.add('visible');
+  dotEl.classList.add('visible');
+}, 700);
+
+function loadStage(i) {
+  const s = timeline[i];
+  geo.attributes.aTargetA.array.set(shapes[s.from]);
+  geo.attributes.aTargetB.array.set(shapes[s.to]);
+  geo.attributes.aTargetA.needsUpdate = true;
+  geo.attributes.aTargetB.needsUpdate = true;
+}
+
+function easeApple(t) {
+  if (t < 0.5) return 8*t*t*t*t;
+  const f = t - 1;
+  return 1 - 8*f*f*f*f;
+}
+
+const clock = new THREE.Clock();
+
+// --- EXPORT CONFIG ---
+const FPS = 60;
+const TOTAL_FRAMES = 600; // 10 seconds at 60fps
+let currentFrame = 0;
+let simulatedTime = 0;
+let isRecordingPNG = false;
+
+window.startPNGRecording = function() {
+  isRecordingPNG = true;
+  currentFrame = 0;
+  simulatedTime = clock.getElapsedTime(); // start from current time
+  console.log("Starting export of " + TOTAL_FRAMES + " frames...");
+  recordNextFrame();
+};
+
+function recordNextFrame() {
+  if (currentFrame >= TOTAL_FRAMES) {
+    isRecordingPNG = false;
+    console.log("PNG Export complete.");
+    animate(); // resume normal playback
+    return;
+  }
+  
+  simulatedTime += 1 / FPS;
+  renderFrame(simulatedTime);
+
+  const dataURL = renderer.domElement.toDataURL('image/png');
+  const link = document.createElement('a');
+  link.download = 'frame_' + String(currentFrame).padStart(4, '0') + '.png';
+  link.href = dataURL;
+  link.click();
+
+  currentFrame++;
+  requestAnimationFrame(recordNextFrame);
+}
+
+let mediaRecorder;
+let recordedChunks = [];
+window.startWebMRecording = function() {
+  const stream = renderer.domElement.captureStream(FPS);
+  mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+  
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordedChunks.push(e.data);
+  };
+  
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'animation_transparent.webm';
+    link.click();
+    URL.revokeObjectURL(url);
+    recordedChunks = [];
+  };
+
+  mediaRecorder.start();
+  console.log("WebM recording started...");
+
+  setTimeout(() => {
+    mediaRecorder.stop();
+    console.log("WebM recording stopped.");
+  }, (TOTAL_FRAMES / FPS) * 1000);
+};
+
+function renderFrame(t) {
+  mat.uniforms.uTime.value = t;
+  camera.position.x = Math.sin(t * 0.07) * 0.10;
+  camera.position.y = Math.cos(t * 0.05) * 0.07;
+  camera.lookAt(0, 0, 0);
+
+  if (phase === 'warmup') {
+    geo.attributes.aTargetA.array.set(shapes.chaos);
+    geo.attributes.aTargetB.array.set(shapes.chaos);
+    geo.attributes.aTargetA.needsUpdate = true;
+    geo.attributes.aTargetB.needsUpdate = true;
+    mat.uniforms.uProgress.value   = 0;
+    mat.uniforms.uChaos.value      = 1.0;
+    mat.uniforms.uBrightness.value = Math.min(1, t * 0.5);
+    if (t > 1.4) {
+      mat.uniforms.uProgress.value = 0;
+      loadStage(0);
+      stage    = 0;
+      phase    = 'morph';
+      phaseT   = t;
+      captionShown = false;
+      hideCaption();
+    }
+    renderer.render(scene, camera);
+    return;
+  }
+
+  const s = timeline[stage];
+
+  if (phase === 'morph') {
+    const elapsed  = t - phaseT;
+    const raw      = Math.min(elapsed / s.dur, 1.0);
+    const progress = easeApple(raw);
+    mat.uniforms.uProgress.value   = progress;
+    mat.uniforms.uChaos.value      = 1.0 - progress * 0.88;
+    mat.uniforms.uBrightness.value = 0.55 + 0.45 * Math.sin(progress * Math.PI);
+    if (!captionShown && raw > 0.85) {
+      showCaption(s.caption);
+      captionShown = true;
+    }
+    if (raw >= 1.0) {
+      mat.uniforms.uProgress.value = 1.0;
+      renderer.render(scene, camera);
+      phase  = 'hold';
+      phaseT = t;
+      renderer.render(scene, camera);
+      return;
+    }
+    renderer.render(scene, camera);
+    return;
+  }
+
+  if (phase === 'hold') {
+    const elapsed = t - phaseT;
+    mat.uniforms.uProgress.value   = 1.0;
+    mat.uniforms.uChaos.value      = 0.12;
+    mat.uniforms.uBrightness.value = 0.85 + 0.10 * Math.sin(elapsed * 1.2);
+    if (elapsed >= s.hold) {
+      mat.uniforms.uProgress.value = 0;
+      stage = (stage + 1) % timeline.length;
+      loadStage(stage);
+      phase  = 'morph';
+      phaseT = t;
+      captionShown = false;
+      hideCaption();
+    }
+    renderer.render(scene, camera);
+    return;
+  }
+}
+
+function animate() {
+  if (!isRecordingPNG) {
+    requestAnimationFrame(animate);
+    const t = clock.getElapsedTime();
+    renderFrame(t);
+  }
+}
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+animate();
+`;
+  document.head.appendChild(script);
+} else {
+  // Start CSS/Canvas fallback for non-WebGL environments
+  startFallback();
+
+  // Still show the UI labels
+  setTimeout(() => {
+    document.getElementById('label').classList.add('visible');
+    document.getElementById('title').classList.add('visible');
+    document.getElementById('dot').classList.add('visible');
+  }, 700);
+}
+</script>
+</body>
+</html>

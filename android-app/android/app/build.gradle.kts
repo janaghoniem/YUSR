@@ -10,7 +10,7 @@ android {
     compileSdk = flutter.compileSdkVersion
     
     // FIXED: Explicitly set to the version required by your plugins
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         // Updated to 17 for better compatibility with NDK 27/AGP 8+

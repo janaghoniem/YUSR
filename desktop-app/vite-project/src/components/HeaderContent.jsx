@@ -1,65 +1,94 @@
-// HeaderContent.jsx - FIXED: Recalculates greeting when userName changes
-import React, { useMemo } from "react";
+// HeaderContent.jsx — Centered, futuristic, Syne font with gradient headline
+import React, { useMemo, useState, useEffect } from "react";
 
-const GREETINGS = {
-  default: [
-    "👋 Hello {user}",
-    "✨ Welcome back, {user}",
-    "🌙 Good to see you again",
-    "🚀 Ready when you are",
-    "🧠 Your assistant is standing by",
-  ],
-  focus: [
-    "🎯 Focus mode activated",
-    "⚡ Let's get something done, {user}",
-    "🧭 Your journey continues",
-  ],
-  friendly: [
-    "☕ What's on your mind today, {user}?",
-    "💫 Another great session awaits",
-    "🌌 Let's explore together",
-  ],
-  minimal: ["🌟 Hello", "📌 Ready to assist"],
-};
-
-const HEADLINES = [
-  "What would you like done today?",
-  "Let's continue where you left off",
-  "Your next task awaits",
-  "Ready to explore new possibilities?",
-  "Time to get something done",
-  "Your assistant is ready",
+const MORNING_HEADLINES = [
+  "What would you like to achieve today?",
+  "Let's get a head start.",
+  "Ready to tackle the day?",
+  "How can I assist your morning?",
 ];
+
+const AFTERNOON_HEADLINES = [
+  "How is your day going?",
+  "Let's keep the momentum going.",
+  "Need help with anything this afternoon?",
+  "Ready for your next task?",
+];
+
+const EVENING_HEADLINES = [
+  "Winding down?",
+  "Let's wrap up for the day.",
+  "Reflecting on today?",
+  "Your assistant is ready for the evening.",
+];
+
+const getContextualHeadline = () => {
+  const hour = new Date().getHours();
+  let headlines;
+  if (hour >= 5 && hour < 12) headlines = MORNING_HEADLINES;
+  else if (hour >= 12 && hour < 18) headlines = AFTERNOON_HEADLINES;
+  else headlines = EVENING_HEADLINES;
+  
+  return headlines[Math.floor(Math.random() * headlines.length)];
+};
 
 const getTimeGreeting = (user) => {
   const hour = new Date().getHours();
-
-  if (hour >= 5 && hour < 9) return `🌅 Rise and shine, ${user}!`;
-  if (hour >= 9 && hour < 12) return `☀️ Good morning, ${user}!`;
-  if (hour >= 12 && hour < 15) return `🍽️ Lunchtime, ${user}?`;
-  if (hour >= 15 && hour < 18) return `🌇 Good afternoon, ${user}!`;
-  if (hour >= 18 && hour < 21) return `🌆 Evening vibes, ${user}!`;
-  if (hour >= 21 && hour < 24) return `🌙 Hello night owl, ${user}! Working so late?`;
-  return `💤 Burning the midnight oil, ${user}?`;
+  // Don't append default user name to make it more natural
+  const hasUser = user && user.trim().toLowerCase() !== "user";
+  const namePart = hasUser ? `, ${user}` : "";
+  
+  if (hour >= 5  && hour < 12) return `Good morning${namePart} 🌅`;
+  if (hour >= 12 && hour < 18) return `Good afternoon${namePart} ☀️`;
+  return `Good evening${namePart} 🌙`;
 };
 
-const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "New Chat" }) => {
-  console.log("[HeaderContent] Received userName prop:", propUserName);
-  
-  // FIXED: Use useMemo with propUserName as dependency so it recalculates when userName changes
-  const greeting = useMemo(() => getTimeGreeting(propUserName), [propUserName]);
+const HeaderContent = ({ userName: propUserName, mode = "default", chatTitle = "New Chat", onContentReady }) => {
+  const [currentDate, setCurrentDate] = useState("");
 
-  const headline = useMemo(() => {
-    return HEADLINES[Math.floor(Math.random() * HEADLINES.length)];
+  useEffect(() => {
+    // Add current date nicely formatted
+    const options = { weekday: 'long', month: 'short', day: 'numeric' };
+    setCurrentDate(new Date().toLocaleDateString(undefined, options));
   }, []);
 
+  const greeting = useMemo(() => getTimeGreeting(propUserName), [propUserName]);
+  const headline = useMemo(() => getContextualHeadline(), []);
+
+  useEffect(() => {
+    if (!onContentReady || !currentDate) return;
+    onContentReady({ greeting, headline, currentDate });
+  }, [onContentReady, greeting, headline, currentDate]);
+
   return (
-    <header className="center-content" role="banner" aria-label="Main banner">
-      <p className="greeting" aria-live="polite">{greeting}</p>
-      <h1 id="main-headline" className="headline" aria-live="polite" aria-atomic="true">{headline}</h1>
+    <header className="center-content" role="banner" style={{ animation: "fadeUp var(--dur-slow) var(--ease-out)" }}>
+      <p className="greeting" aria-live="polite" aria-atomic="true" style={{ fontSize: "22px", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "8px", fontWeight: "500" }}>
+        {greeting}
+        {currentDate && <span style={{ opacity: 0.5, fontSize: "16px" }}>• {currentDate}</span>}
+      </p>
+      <h1 
+        className="headline" 
+        id="main-headline" 
+        aria-live="polite" 
+        aria-atomic="true"
+        style={{
+          background: "linear-gradient(135deg, var(--text-primary) 0%, var(--pink-300) 100%)",
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent",
+          marginBottom: "12px",
+          marginTop: "4px"
+        }}
+      >
+        {headline}
+      </h1>
       {chatTitle && chatTitle !== "New Chat" && (
-        <p className="chat-title" style={{ fontSize: "0.9em", opacity: 0.7, marginTop: "8px" }}>
-          📌 {chatTitle}
+        <p
+          className="chat-session-label"
+          aria-label={`Current conversation: ${chatTitle}`}
+          style={{ fontSize: "15px" }}
+        >
+          <span aria-hidden="true" style={{ color: "var(--pink-400)", fontSize: "10px" }}>●</span>
+          {chatTitle}
         </p>
       )}
     </header>

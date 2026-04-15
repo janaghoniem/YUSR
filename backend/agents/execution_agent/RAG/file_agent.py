@@ -62,13 +62,6 @@ SKIP_DIRS = {
     # Windows system
     "Windows", "System32", "SysWOW64", "Program Files", "Program Files (x86)",
     "AppData", "ProgramData", "$Recycle.Bin", "Recovery",
-    # Python / Conda / libraries (NOT user files)
-    "site-packages", "dist-packages", ".egg-info", "miniconda3", "anaconda3",
-    "conda", "Library", "Scripts", "Include", "Lib",
-    # macOS & Linux system
-    "usr", "bin", "lib", "var", "etc", "opt", "srv",
-    # Development artifacts
-    ".next", ".nuxt", ".cache", "coverage", ".pytest_cache",
 }
 
 FILLER_WORDS = {"the", "a", "my", "your", "and", "or", "is", "are", "of", "for", "in"}
@@ -77,10 +70,10 @@ FILLER_WORDS = {"the", "a", "my", "your", "and", "or", "is", "are", "of", "for",
 def _cache_path() -> str:
     """Cache path under %LOCALAPPDATA%\\yusr\\."""
     base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(base, "AURA", "file_index_cache.json")
+    return os.path.join(base, "yusr", "file_index_cache.json")
 
 CACHE_PATH    = _cache_path()
-CACHE_VERSION = 4          # Force rebuild to exclude library dirs
+CACHE_VERSION = 3          # Bump when index schema changes
 CACHE_TTL_H   = 24
 MAX_DEPTH     = 5          # Max folder recursion depth — keeps scan fast
 INDEX_TIMEOUT = 15         # Seconds before we give up on a single scan root
@@ -182,6 +175,37 @@ def _system_search_fallback(query: str, roots: List[str]) -> Optional[str]:
                     return found
     except Exception as e:
         logger.debug(f"System search error: {e}")
+    return None
+
+
+def _full_drive_search(query: str) -> Optional[str]:
+    """
+    Nuclear fallback — runs `where /r` from every drive root (C:\\, D:\\, …).
+    Slow (5-30s per drive) but finds anything on the machine.
+    Only called when the index AND common-folder search both fail.
+    Each drive gets its own 60s timeout so one huge drive can't block others.
+    """
+    import string
+    drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+    logger.info(f"[FullDriveSearch] Scanning {len(drives)} drive(s) for '{query}'…")
+
+    for drive in drives:
+        try:
+            logger.debug(f"  where /r {drive} {query}")
+            res = subprocess.run(
+                ["where", "/r", drive, query],
+                capture_output=True, text=True, timeout=60
+            )
+            if res.stdout.strip():
+                found = res.stdout.strip().splitlines()[0]
+                if os.path.isfile(found):
+                    logger.info(f"  ✅ Found on full-drive search: {found}")
+                    return found
+        except subprocess.TimeoutExpired:
+            logger.warning(f"  ⚠ Timeout scanning drive {drive}, skipping")
+        except Exception as e:
+            logger.debug(f"  ✗ Error on {drive}: {e}")
+
     return None
 
 
@@ -437,6 +461,27 @@ class FileSearch:
             self._matcher = None
         self._ensure_index()
 
+    def _add_to_index(self, path: str) -> None:
+        """
+        Add a newly discovered file (from full-drive search) to the live index
+        and persist the updated cache so the next search finds it instantly.
+        """
+        filename = os.path.basename(path)
+        entry = {
+            "name": filename,
+            "normalized_name": Normalizer.normalize(filename),
+            "path": path,
+            "size": os.path.getsize(path),
+            "modified_time": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
+        }
+        with self._lock:
+            if any(e["path"] == path for e in self._index):
+                return  # already present
+            self._index.append(entry)
+            self._matcher = FuzzyMatcher(self._index)   # rebuild matcher
+        self._indexer.save_cache(self._index)            # persist so next run is fast
+        logger.debug(f"[Index] Added new entry: {path}")
+
     def find(self, query: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Search for a file.
@@ -482,12 +527,26 @@ class FileSearch:
         if found:
             return {"status": "found", "path": found, "confidence": 0.80}
 
-        # Try without extension as a last resort
+        # Try without extension as a last resort (still common-folder scope)
         if "." in query:
             base = query.rsplit(".", 1)[0] + "*"
             found = _system_search_fallback(base, roots)
             if found:
                 return {"status": "found", "path": found, "confidence": 0.70}
+
+        # Stage 3 — full drive search (slow, whole machine, true last resort)
+        logger.info(f"[Find] Common folders exhausted, escalating to full-drive search for '{query}'")
+        found = _full_drive_search(query)
+        if found:
+            self._add_to_index(found)
+            return {"status": "found", "path": found, "confidence": 0.75}
+
+        if "." in query:
+            base = query.rsplit(".", 1)[0] + "*"
+            found = _full_drive_search(base)
+            if found:
+                self._add_to_index(found)
+                return {"status": "found", "path": found, "confidence": 0.65}
 
         return result  # not_found with suggestions
 

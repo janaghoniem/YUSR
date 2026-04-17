@@ -444,18 +444,18 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
             "error": result.error,
         }
 
-    if any(k in combined for k in ["permission", "allow", "deny access", "popup", "dialog", "modal"]):
-        return {
-            "task_id": task.task_id,
-            "task_prompt": task.ai_prompt,
-            "clarification_type": "permission_or_popup",
-            "question": "An unexpected popup appeared. Should I allow it, close it, or stop?",
-            "recoverable": True,
-            "metadata": result.metadata or {},
-            "error": result.error,
-        }
+    # if any(k in combined for k in ["permission", "allow", "deny access", "popup", "dialog", "modal"]):
+    #     return {
+    #         "task_id": task.task_id,
+    #         "task_prompt": task.ai_prompt,
+    #         "clarification_type": "permission_or_popup",
+    #         "question": "An unexpected popup appeared. Should I allow it, close it, or stop?",
+    #         "recoverable": True,
+    #         "metadata": result.metadata or {},
+    #         "error": result.error,
+    #     }
 
-    return None
+    # return None
 
 
 def _decide_execution_clarification_action(task: ActionTask, event: Dict[str, Any]) -> Dict[str, Any]:

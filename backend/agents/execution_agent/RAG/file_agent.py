@@ -851,17 +851,17 @@ def open_file(filename: str) -> bool:
     return _open_file(path)
 
 
-def preload_index() -> None:
-    """
-    Pre-load and warm up the file index BEFORE any file searches.
-    Call this during agent startup/initialization to avoid timeout on first find_file() call.
+# def preload_index() -> None:
+#     """
+#     Pre-load and warm up the file index BEFORE any file searches.
+#     Call this during agent startup/initialization to avoid timeout on first find_file() call.
 
-    If cache exists and is valid, loads instantly (~100ms).
-    If cache missing/expired, builds from scratch (~5-15s depending on drive).
-    """
-    logger.info("📂 Preloading file index...")
-    _get_engine()._ensure_index()
-    logger.info("✅ File index preloaded and ready")
+#     If cache exists and is valid, loads instantly (~100ms).
+#     If cache missing/expired, builds from scratch (~5-15s depending on drive).
+#     """
+#     logger.info("📂 Preloading file index...")
+#     _get_engine()._ensure_index()
+#     logger.info("✅ File index preloaded and ready")
 
 
 def refresh_index() -> None:

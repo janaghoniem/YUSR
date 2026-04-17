@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 # Model & LangChain Imports
 from langchain_groq import ChatGroq
-from mistralai import Mistral
+import requests
 
 # Project Utilities
 from agents.utils.protocol import Channels, AgentMessage, MessageType, AgentType
@@ -95,7 +95,7 @@ class ReasoningAgent:
             temperature=0.2,
             groq_api_key=GROQ_API_KEY
         ) if GROQ_API_KEY else None
-        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
+        self.mistral_api_key = MISTRAL_API_KEY  # Store API key for REST calls
 
         self.base_system_prompt = """You are the REASONING AGENT – the cognitive brain of the AURA multi-agent system.
 
@@ -260,21 +260,36 @@ Your goal is correctness, clarity, and usefulness to the system."""
         else:
             logger.warning("⚠️ GROQ_API_KEY missing for reasoning agent; trying Mistral fallback")
 
-        if not self.mistral_client:
+        if not self.mistral_api_key:
             logger.error("❌ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
             return ""
 
         try:
+            # Use REST API directly instead of client library
+            url = "https://api.mistral.ai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.mistral_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": MISTRAL_REASONING_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+            }
+            
             response = await asyncio.to_thread(
-                self.mistral_client.chat.complete,
-                model=MISTRAL_REASONING_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+                lambda: requests.post(url, json=payload, headers=headers, timeout=30)
             )
-            text = self._extract_mistral_text(response)
-            if text:
-                logger.info(f"✅ Reasoning fallback succeeded with Mistral ({MISTRAL_REASONING_MODEL})")
-            return text
+            
+            if response.status_code == 200:
+                result = response.json()
+                text = result['choices'][0]['message']['content']
+                if text:
+                    logger.info(f"✅ Reasoning fallback succeeded with Mistral ({MISTRAL_REASONING_MODEL})")
+                return text
+            else:
+                logger.error(f"❌ Mistral API error: {response.status_code} - {response.text}")
+                return ""
         except Exception as mistral_err:
             logger.error(f"❌ Mistral reasoning fallback failed: {mistral_err}")
             return ""

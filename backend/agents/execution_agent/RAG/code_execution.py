@@ -151,14 +151,14 @@ class CoordinatorRAGBridge:
 
         # 🔥 PRE-LOAD FILE INDEX to avoid timeout on first find_file() call
         # This is critical - builds cache on first agent run (~5-15s), instant on subsequent runs
-        try:
-            logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
-            from agents.execution_agent.RAG.file_agent import preload_index
-            preload_index()
-            logger.info("✅ [INIT] File index ready")
-        except Exception as e:
-            logger.warning(f"⚠️ [INIT] Could not pre-load file index: {e}")
-            logger.info("   (Index will be loaded on first find_file() call)")
+        # try:
+        #     logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
+        #     from agents.execution_agent.RAG.file_agent import preload_index
+        #     preload_index()
+        #     logger.info("✅ [INIT] File index ready")
+        # except Exception as e:
+        #     logger.warning(f"⚠️ [INIT] Could not pre-load file index: {e}")
+        #     logger.info("   (Index will be loaded on first find_file() call)")
 
 
     #added by shahd for omniparser

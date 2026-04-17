@@ -172,6 +172,12 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
   bool _creatingAccount = false;
   String? _creationError;
 
+  // Password fallback (optional if face is registered)
+  final TextEditingController _passwordCtrl = TextEditingController();
+  final TextEditingController _passwordConfirmCtrl = TextEditingController();
+  bool _showPassword = false;
+  bool _showPasswordConfirm = false;
+
   String _userId = '';
 
   // REQ 4: accessibility
@@ -265,6 +271,8 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
   @override
   void dispose() {
     _usernameCtrl.dispose();
+    _passwordCtrl.dispose();
+    _passwordConfirmCtrl.dispose();
     _videoCtrl?.dispose();
     _waveCtrl.dispose();
     _fallbackTts.stop();
@@ -592,47 +600,65 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
     );
   }
 
-  // ── Step 3: Face Registration ─────────────────────────────────────────────
+  // ── Step 3: Face + optional password ─────────────────────────────────────
 
   Widget _buildFaceStep() {
-    // REQ 8: speak on appear
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _speak(
-        'Almost done! Register your face to log in securely without a password.',
+        'Almost done! Register your face, set a password, or both. At least one is required.',
       );
     });
+
+    final passwordsMatch =
+        _passwordCtrl.text.isEmpty ||
+        _passwordCtrl.text == _passwordConfirmCtrl.text;
+    final passwordLongEnough =
+        _passwordCtrl.text.isEmpty || _passwordCtrl.text.length >= 6;
+    final hasAuth = _faceBase64 != null || _passwordCtrl.text.length >= 6;
 
     return _buildVideoScaffold(
       onBack: _handleBackFromFlow,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 20),
-            BlurRevealText(
-              text: 'Register your face',
-              style: _f(
-                AuraTheme.textPrimary,
-                size: 28,
-                weight: FontWeight.w600,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 20),
+              BlurRevealText(
+                text: 'Secure your account',
+                style: _f(
+                  AuraTheme.textPrimary,
+                  size: 28,
+                  weight: FontWeight.w600,
+                ),
+                revealProgress: 1.0,
+                duration: const Duration(milliseconds: 900),
               ),
-              revealProgress: 1.0,
-              duration: const Duration(milliseconds: 900),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              "You'll use your face to log in — no password needed.",
-              style: _f(AuraTheme.textSecondary, size: 13),
-            ),
-            const Spacer(),
-            if (_faceBase64 != null)
-              Center(
-                child: Column(
+              const SizedBox(height: 8),
+              Text(
+                'Register your face, set a password, or both. You need at least one.',
+                style: _f(AuraTheme.textSecondary, size: 13),
+              ),
+              const SizedBox(height: 32),
+
+              // ── Face section ───────────────────────────────────────────
+              Text(
+                'Face ID',
+                style: _f(
+                  AuraTheme.textSecondary,
+                  size: 12,
+                  weight: FontWeight.w600,
+                  spacing: 0.6,
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (_faceBase64 != null)
+                Row(
                   children: [
                     Container(
-                      width: 84,
-                      height: 84,
+                      width: 48,
+                      height: 48,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: AuraTheme.success.withOpacity(0.12),
@@ -641,93 +667,165 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
                       child: const Icon(
                         Icons.check_rounded,
                         color: AuraTheme.success,
-                        size: 42,
+                        size: 24,
                       ),
                     ),
-                    const SizedBox(height: 14),
-                    Text(
-                      'Face captured!',
-                      style: _f(
-                        AuraTheme.success,
-                        size: 15,
-                        weight: FontWeight.w600,
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Text(
+                        'Face registered ✓',
+                        style: _f(
+                          AuraTheme.success,
+                          size: 14,
+                          weight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 10),
                     GestureDetector(
                       onTap: () async {
                         final img = await Navigator.of(context).push<String?>(
                           MaterialPageRoute(
-                            builder:
-                                (_) => const FaceScanScreen(
-                                  title: 'Re-scan',
-                                  subtitle: 'Retake your face scan',
-                                ),
+                            builder: (_) => const FaceScanScreen(
+                              title: 'Re-scan',
+                              subtitle: 'Retake your face scan',
+                            ),
                           ),
                         );
                         if (img != null && mounted)
                           setState(() => _faceBase64 = img);
                       },
                       child: Text(
-                        'Retake →',
+                        'Retake',
                         style: _f(AuraTheme.textMuted, size: 12),
                       ),
                     ),
                   ],
-                ),
-              )
-            else
-              Center(
-                child: GestureDetector(
+                )
+              else
+                AuraButton(
+                  label: 'Register Face',
+                  icon: Icons.face_retouching_natural_rounded,
+                  isPrimary: false,
                   onTap: () async {
                     final img = await Navigator.of(context).push<String?>(
                       MaterialPageRoute(
-                        builder:
-                            (_) => const FaceScanScreen(
-                              title: 'Register Face',
-                              subtitle: 'Look directly at the camera',
-                            ),
+                        builder: (_) => const FaceScanScreen(
+                          title: 'Register Face',
+                          subtitle: 'Look directly at the camera',
+                        ),
                       ),
                     );
                     if (img != null && mounted) {
                       setState(() => _faceBase64 = img);
-                      await _speak(
-                        'Face captured successfully! Tap Create Account to finish.',
-                      );
+                      await _speak('Face captured! You can also add a password below.');
                     }
                   },
-                  child: _PulseFaceButton(),
+                ),
+
+              const SizedBox(height: 28),
+
+              // ── Password section ───────────────────────────────────────
+              Text(
+                'PASSWORD (OPTIONAL)',
+                style: _f(
+                  AuraTheme.textSecondary,
+                  size: 12,
+                  weight: FontWeight.w600,
+                  spacing: 0.6,
                 ),
               ),
-            const Spacer(),
-            if (_creationError != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Text(
-                  _creationError!,
-                  style: _f(AuraTheme.error, size: 12),
-                  textAlign: TextAlign.center,
-                ),
+              const SizedBox(height: 12),
+              _GlassTextField(
+                controller: _passwordCtrl,
+                hint: 'Password (min 6 characters)',
+                isPassword: true,
+                obscureText: !_showPassword,
+                onToggleObscure: () =>
+                    setState(() => _showPassword = !_showPassword),
+                isValid: _passwordCtrl.text.length >= 6,
+                hasError: !passwordLongEnough,
+                onChanged: (_) => setState(() {}),
               ),
-            AuraButton(
-              label: 'Create Account →',
-              onTap:
-                  (_faceBase64 != null && !_creatingAccount)
-                      ? _createAccount
-                      : null,
-              loading: _creatingAccount,
-            ),
-            const SizedBox(height: 16),
-          ],
+              if (!passwordLongEnough)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 4),
+                  child: Text(
+                    'At least 6 characters required',
+                    style: _f(AuraTheme.error, size: 12),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              _GlassTextField(
+                controller: _passwordConfirmCtrl,
+                hint: 'Confirm password',
+                isPassword: true,
+                obscureText: !_showPasswordConfirm,
+                onToggleObscure: () =>
+                    setState(() => _showPasswordConfirm = !_showPasswordConfirm),
+                isValid: _passwordCtrl.text.isNotEmpty && passwordsMatch,
+                hasError: _passwordConfirmCtrl.text.isNotEmpty && !passwordsMatch,
+                onChanged: (_) => setState(() {}),
+              ),
+              if (_passwordConfirmCtrl.text.isNotEmpty && !passwordsMatch)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 4),
+                  child: Text(
+                    'Passwords do not match',
+                    style: _f(AuraTheme.error, size: 12),
+                  ),
+                ),
+
+              const SizedBox(height: 32),
+
+              if (_creationError != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AuraTheme.error.withOpacity(0.10),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AuraTheme.error.withOpacity(0.35),
+                      ),
+                    ),
+                    child: Text(
+                      _creationError!,
+                      style: _f(AuraTheme.error, size: 12),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+
+              if (!hasAuth)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Text(
+                    'Please register your face or set a password to continue.',
+                    style: _f(AuraTheme.error, size: 12),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+
+              AuraButton(
+                label: 'Create Account →',
+                onTap: (hasAuth && passwordsMatch && passwordLongEnough && !_creatingAccount)
+                    ? _createAccount
+                    : null,
+                loading: _creatingAccount,
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  // ── Account creation ───────────────────────────────────────────────────────
+// ── Account creation ───────────────────────────────────────────────────────
 
   Future<void> _createAccount() async {
-    if (_faceBase64 == null) return;
     setState(() {
       _creatingAccount = true;
       _creationError = null;
@@ -737,19 +835,24 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
 
     try {
       final username = _usernameCtrl.text.trim();
+      final password = _passwordCtrl.text.trim();
       final introduction = _answers.values
           .where((v) => v.isNotEmpty)
           .join('. ');
 
-      await AuthService.registerFace(
-        userId: _userId,
-        username: username,
-        faceImageBase64: _faceBase64!,
-      );
+      // Register face only if one was captured
+      if (_faceBase64 != null) {
+        await AuthService.registerFace(
+          userId: _userId,
+          username: username,
+          faceImageBase64: _faceBase64!,
+        );
+      }
 
       await AuthService.createAccount(
         userId: _userId,
         username: username,
+        password: password,
         introduction: introduction,
         preferences: {
           'language': _language == 'ar' ? 'العربية' : 'English',
@@ -1731,6 +1834,9 @@ class _GlassTextField extends StatelessWidget {
   final bool isArabic;
   final bool isValid;
   final bool hasError;
+  final bool isPassword;
+  final bool obscureText;
+  final VoidCallback? onToggleObscure;
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
   final Widget? suffix;
@@ -1741,6 +1847,9 @@ class _GlassTextField extends StatelessWidget {
     this.isArabic = false,
     this.isValid = false,
     this.hasError = false,
+    this.isPassword = false,
+    this.obscureText = false,
+    this.onToggleObscure,
     this.onChanged,
     this.onSubmitted,
     this.suffix,
@@ -1767,6 +1876,7 @@ class _GlassTextField extends StatelessWidget {
           ),
           child: TextField(
             controller: controller,
+            obscureText: isPassword ? obscureText : false,
             style: const TextStyle(
               fontFamily: 'PlusJakartaSans',
               color: Colors.white,
@@ -1787,7 +1897,18 @@ class _GlassTextField extends StatelessWidget {
                 vertical: 14,
               ),
               border: InputBorder.none,
-              suffixIcon: suffix,
+              suffixIcon: isPassword
+                  ? GestureDetector(
+                      onTap: onToggleObscure,
+                      child: Icon(
+                        obscureText
+                            ? Icons.visibility_off_rounded
+                            : Icons.visibility_rounded,
+                        color: Colors.white.withOpacity(0.45),
+                        size: 20,
+                      ),
+                    )
+                  : suffix,
             ),
           ),
         ),

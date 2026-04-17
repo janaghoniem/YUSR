@@ -64,12 +64,13 @@ class AuthService {
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
-  /// Create account after face is registered
+/// Create account — password is optional (empty string if face-only)
   static Future<Map<String, dynamic>> createAccount({
     required String userId,
     required String username,
     required String introduction,
     required Map<String, dynamic> preferences,
+    String password = '',
   }) async {
     final r = await http
         .post(
@@ -78,7 +79,7 @@ class AuthService {
           body: jsonEncode({
             'user_id': userId,
             'username': username,
-            'password': '', // face-only; empty string is accepted by backend
+            'password': password,
             'introduction': introduction,
             'preferences': preferences,
           }),
@@ -143,6 +144,26 @@ class AuthService {
       print("❌ HTTP error: $e");
       rethrow;
     }
+  }
+
+  /// Create a server-side session ID tied to user_id
+  /// Password login — username + password fallback
+  static Future<Map<String, dynamic>> loginWithPassword({
+    required String username,
+    required String password,
+  }) async {
+    final r = await http
+        .post(
+          Uri.parse('$backendUrl/onboarding/login'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'username': username, 'password': password}),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (r.statusCode != 200) {
+      final err = jsonDecode(r.body);
+      throw Exception(err['detail'] ?? 'Login failed');
+    }
+    return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
   /// Create a server-side session ID tied to user_id

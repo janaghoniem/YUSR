@@ -120,22 +120,110 @@ def validate_output(text: str, context: str = "") -> ValidationResult:
 # It catches credential patterns embedded in code (print(password), hardcoded URIs)
 # that would never appear in the spoken response text.
 
+# ── Code pre-execution scanner ───────────────────────────────────────────────
+# Call this BEFORE running generated code in the sandbox.
+# It catches credential patterns embedded in code (print(password), hardcoded URIs)
+# that would never appear in the spoken response text.
+
 _CODE_BLOCK_PATTERNS = [
+    # Import statements - catch both 'import X' and 'from X import Y'
+    re.compile(r'^\s*import\s+shutil', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+shutil\s+import', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*import\s+pathlib', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+pathlib\s+import', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*import\s+ctypes', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+ctypes\s+import', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*import\s+subprocess', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+subprocess\s+import', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*import\s+winreg', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+winreg\s+import', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*import\s+socket', re.IGNORECASE | re.MULTILINE),
+    re.compile(r'^\s*from\s+socket\s+import', re.IGNORECASE | re.MULTILINE),
+    
+    # print(password) patterns
     re.compile(r'print\s*\(.*(?:password|passwd|api.?key|secret|token).*\)',
                re.IGNORECASE),
+    
+    # MongoDB URIs
     re.compile(r'mongodb\+srv://[^\s"\']+', re.IGNORECASE),
     re.compile(r'mongodb://[^\s"\']+', re.IGNORECASE),
+    
+    # API Keys
     re.compile(r'gsk_[A-Za-z0-9]{20,}', re.IGNORECASE),
     re.compile(r'sk-[A-Za-z0-9]{20,}'),
     re.compile(r'(?:AKIA|ASIA)[A-Z0-9]{16}'),
+    
     # Hardcoded credential assignments
     re.compile(r'(?:password|passwd|api_key|secret)\s*=\s*["\'][^"\']{6,}["\']',
                re.IGNORECASE),
+    
     # netsh commands (WiFi password extraction)
     re.compile(r'netsh\s+wlan', re.IGNORECASE),
+    
     # Registry reads targeting credential stores
     re.compile(r'OpenKey.*(?:SAM|Security|Credentials)', re.IGNORECASE),
+    
+    # os.remove and other dangerous os operations
+    re.compile(r'os\.remove\s*\(', re.IGNORECASE),
+    re.compile(r'os\.unlink\s*\(', re.IGNORECASE),
+    re.compile(r'os\.rmdir\s*\(', re.IGNORECASE),
+    re.compile(r'os\.system\s*\(', re.IGNORECASE),
+    re.compile(r'os\.popen\s*\(', re.IGNORECASE),
+    
+    # shutil dangerous operations
+    re.compile(r'shutil\.rmtree\s*\(', re.IGNORECASE),
+    re.compile(r'shutil\.move\s*\(', re.IGNORECASE),
+    re.compile(r'shutil\.copy\s*\(', re.IGNORECASE),
+    
+    # ctypes
+    re.compile(r'ctypes\.windll', re.IGNORECASE),
+    re.compile(r'ctypes\.cdll', re.IGNORECASE),
 ]
+
+
+def validate_code(code: str, context: str = "") -> ValidationResult:
+    """
+    Scan generated Python code for credential leakage patterns
+    before sandbox execution.
+
+    Returns ValidationResult. If violations is non-empty,
+    the caller should BLOCK execution, not just log.
+    """
+    if not code:
+        return ValidationResult(clean_text=code)
+
+    violations = []
+    code_lower = code.lower()
+    
+    for pattern in _CODE_BLOCK_PATTERNS:
+        matches = pattern.findall(code)
+        if matches:
+            violations.append(
+                f"Code pattern match: {pattern.pattern[:50]} "
+                f"({len(matches)} occurrence(s))"
+            )
+            logger.warning(
+                f"🔒 Layer 3 (code scan): Dangerous pattern in generated code "
+                f"[{context}]: {pattern.pattern[:50]}"
+            )
+    
+    # Also check for blocked imports using simple string matching (fallback)
+    BLOCKED_IMPORTS = [
+        'shutil', 'pathlib', 'ctypes', 'subprocess', 'winreg', 'socket'
+    ]
+    
+    for blocked in BLOCKED_IMPORTS:
+        # Check for 'import X' or 'from X import'
+        if f'import {blocked}' in code_lower or f'from {blocked} import' in code_lower:
+            if not any(blocked in v for v in violations):
+                violations.append(f"Blocked import detected: {blocked}")
+                logger.warning(f"🔒 Layer 3 (code scan): Blocked import '{blocked}' in [{context}]")
+
+    return ValidationResult(
+        clean_text=code,
+        was_modified=False,     # code scanner reports, execution layer decides
+        violations=violations,
+    )
 
 
 def validate_code(code: str, context: str = "") -> ValidationResult:

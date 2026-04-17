@@ -8,20 +8,31 @@ const ChatHistory = ({ messages, onClose, chatTitle }) => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Strip JSON wrapper from language agent responses
+
+  // Strip JSON wrapper from assistant responses and <user_input> tags from user messages
   const cleanContent = (role, content) => {
-    if (role !== "assistant" || typeof content !== "string") return content;
-    try {
-      const parsed = JSON.parse(content);
-      return (
-        parsed.response_text ||
-        parsed.text ||
-        parsed.response ||
-        content
-      );
-    } catch {
-      return content;
+    if (typeof content !== "string") return content;
+
+    if (role === "user") {
+      // Strip <user_input>...</user_input> security wrapper added by language_agent.py
+      return content.replace(/^<user_input>([\s\S]*)<\/user_input>$/, "$1").trim();
     }
+
+    if (role === "assistant") {
+      try {
+        const parsed = JSON.parse(content);
+        return (
+          parsed.response_text ||
+          parsed.text ||
+          parsed.response ||
+          content
+        );
+      } catch {
+        return content;
+      }
+    }
+
+    return content;
   };
 
   return (

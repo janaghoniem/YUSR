@@ -4,12 +4,12 @@ import Sidebar from "./components/SideBar";
 import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
-import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
 import LoginPage from "./components/onboarding/LoginPage";
 import ChatHistory from "./components/ChatHistory";
 import TitleBar from "./components/TitleBar";
 import Aurora from "./components/onboarding/Aurora";
+import SplitText from "./components/onboarding/SplitText";
 import screenReader from "./utils/ScreenReader";
 import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucide-react";
 
@@ -70,6 +70,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [deviceType, setDeviceType] = useState("desktop");
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("ttsVoice") || "Gacrux");
+  const [preferredLanguage, setPreferredLanguage] = useState(() => localStorage.getItem("preferredLanguage") || localStorage.getItem("appLanguage") || localStorage.getItem("userLanguage") || "en");
   const [screenSize, setScreenSize] = useState("desktop");
   const [userName, setUserName] = useState(() => {
     const stored = localStorage.getItem("userName");
@@ -78,6 +79,8 @@ function App() {
   });
   const [thinkingSteps, setThinkingSteps] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [auraStatus, setAuraStatus] = useState("starting");
+  const [wakePulse, setWakePulse] = useState(false);
   // True when server-provided SSE thinking stream is connected
   const [sseConnected, setSseConnected] = useState(false);
   const [chats, setChats] = useState([]);
@@ -111,6 +114,7 @@ function App() {
   // Detected user language — set on first voice interaction, persists for session
   const [userLanguage, setUserLanguage] = useState(() => localStorage.getItem("userLanguage") || null);
   const userLanguageRef = useRef(localStorage.getItem("userLanguage") || null);
+  const preferredLanguageRef = useRef(localStorage.getItem("preferredLanguage") || localStorage.getItem("appLanguage") || localStorage.getItem("userLanguage") || "en");
   // Whether to vocalize thinking steps
   const [vocalizeSteps, setVocalizeSteps] = useState(true);
   // Ref to track the last spoken step index (avoid re-speaking)
@@ -120,6 +124,8 @@ function App() {
   const thinkingSpeechQueueRef = useRef([]);
   const thinkingSpeechRunningRef = useRef(false);
   const wakeWatchdogRef = useRef(null);
+  const wakePulseTimerRef = useRef(null);
+  const manualCaptureCancelledRef = useRef(false);
   const silenceFrameRef = useRef(null);
   const noSpeechTimeoutRef = useRef(null);
   const userSpokeRef = useRef(false);
@@ -128,6 +134,32 @@ function App() {
   const audioChunksRef = useRef([]);
   const audioRef = useRef(new Audio());
   const audioContextRef = useRef(null);
+
+  const playWakePing = useCallback(() => {
+    try {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const ctx = new AudioContextCtor();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(920, ctx.currentTime);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.24);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+      osc.onended = () => {
+        ctx.close().catch(() => {
+          // no-op
+        });
+      };
+    } catch (error) {
+      console.warn("[Wake] Ping sound failed:", error);
+    }
+  }, []);
 
   const isArabicText = useCallback((text) => /[\u0600-\u06FF]/.test(text || ""), []);
 
@@ -151,6 +183,12 @@ function App() {
   useEffect(() => {
     userLanguageRef.current = userLanguage;
   }, [userLanguage]);
+
+  useEffect(() => {
+    preferredLanguageRef.current = preferredLanguage;
+    localStorage.setItem("preferredLanguage", preferredLanguage);
+    screenReader.setLanguage(preferredLanguage);
+  }, [preferredLanguage]);
 
   useEffect(() => {
     if (authState !== "app") {
@@ -275,170 +313,117 @@ function App() {
   }, [detectLanguageFromText, extractReadableText, rememberUserLanguageFromText, stopThinkingSpeech]);
 
   // Speech recognition (wake-word)
-  const [transcript,         setTranscript]         = useState("");
-  const [interimTranscript,  setInterimTranscript]  = useState("");
-  const [finalTranscript,    setFinalTranscript]     = useState("");
   const [listening,          setListening]           = useState(false);
-  const [wakeNetworkDown,    setWakeNetworkDown]     = useState(false); // true = STT unavailable
- 
-  const browserSupportsSpeechRecognition =
-    !!(window.SpeechRecognition || window.webkitSpeechRecognition);
- 
-  const recognitionRef      = useRef(null);
-  const reconnectTimeoutRef = useRef(null);
+  const [pendingWakeCommand, setPendingWakeCommand]  = useState(null);
+  const useElectronWakeWord =
+    !!window?.electronAPI?.onAuraWakeWord && !!window?.electronAPI?.onAuraFinalCommand;
+
   const wakeStoppedRef      = useRef(false); // true = we deliberately stopped
- 
-  const resetTranscript = useCallback(() => {
-    setTranscript("");
-    setInterimTranscript("");
-    setFinalTranscript("");
-  }, []);
  
   // Start one STT session for wake-word detection
   const startWakeWordListening = useCallback(() => {
-    if (!browserSupportsSpeechRecognition) return;
-    if (wakeNetworkDown) return;          // don't retry after network failure
-    if (wakeStoppedRef.current) return;   // deliberately stopped
-    if (isRecording) return;              // main mic is active
- 
-    // Clear any pending retry timer
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
- 
-    // Abort previous session before creating a new one
-    if (recognitionRef.current) {
-      try { recognitionRef.current.abort(); } catch (_) {}
-      recognitionRef.current = null;
-    }
- 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SpeechRecognition();
-    rec.continuous      = false;   // one utterance per session — avoids runaway loops
-    rec.interimResults  = true;
-    rec.lang            = userLanguage === "ar" ? "ar-EG" : "en-US";
-    recognitionRef.current = rec;
- 
-    rec.onstart = () => {
+    if (useElectronWakeWord) {
+      window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || "en" }).catch(() => {
+        // Keep silent and let manual text/mic fallback handle the flow.
+      });
       setListening(true);
-      console.log(`[Wake] Listening (lang=${rec.lang})`);
-    };
- 
-    rec.onresult = (event) => {
-      let interim = "";
-      let final_  = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const t = event.results[i][0].transcript;
-        if (event.results[i].isFinal) final_ += t;
-        else                           interim += t;
-      }
-      if (final_)  { setFinalTranscript(final_);  setTranscript(final_); }
-      if (interim) { setInterimTranscript(interim); }
-    };
- 
-    rec.onerror = (event) => {
-      const code = event.error;
-      if (code === "network") {
-        // Google STT servers unreachable — stop forever, don't loop
-        console.warn("[Wake] STT network error — Google servers unreachable. Wake-word disabled. Use text input.");
-        setWakeNetworkDown(true);
-        wakeStoppedRef.current = true;
-        setListening(false);
-        return;
-      }
-      if (code === "no-speech" || code === "aborted") return; // non-fatal
-      console.warn(`[Wake] Recognition error: ${code}`);
-    };
- 
-    rec.onend = () => {
-      setListening(false);
-      // Restart after a short gap — unless stopped or network is down
-      if (!wakeStoppedRef.current && !wakeNetworkDown && !isRecording) {
-        reconnectTimeoutRef.current = setTimeout(startWakeWordListening, 600);
-      }
-    };
- 
-    try {
-      rec.start();
-    } catch (err) {
-      // "already started" race — retry after a delay
-      console.warn("[Wake] start() threw:", err.message);
-      reconnectTimeoutRef.current = setTimeout(startWakeWordListening, 800);
+      return;
     }
+    setListening(false);
   }, [
-    browserSupportsSpeechRecognition,
-    userLanguage,
-    isRecording,
-    wakeNetworkDown,
+    useElectronWakeWord,
   ]);
 
-  // Ensure continuous listening starts on mount 
   useEffect(() => {
-    if (!browserSupportsSpeechRecognition || authState !== "app") return;
-    wakeStoppedRef.current = false;
-    startWakeWordListening();
-    return () => {
-      wakeStoppedRef.current = true;
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [browserSupportsSpeechRecognition, authState]);
- 
-  // Full cleanup on unmount
-  useEffect(() => {
-    return () => {
-      wakeStoppedRef.current = true;
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch (_) {}
-        recognitionRef.current = null;
-      }
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-    };
-  }, []);
+    if (!useElectronWakeWord || authState !== "app") return;
 
-  // Detect wake word AND interrupt commands in speech (always active, even during processing)
-  useEffect(() => {
-    const combined = `${interimTranscript || ""} ${finalTranscript || ""} ${transcript || ""}`
-      .toLowerCase().trim();
-    if (!combined) return;
- 
-    // Interrupt commands (work during processing too)
-    for (const [phrase, command] of Object.entries(INTERRUPT_COMMANDS)) {
-      if (combined.includes(phrase)) {
-        console.log(`[Wake] Interrupt: "${phrase}" → ${command}`);
-        resetTranscript();
-        sendInterrupt(command);
-        return;
+    const offWake = window.electronAPI.onAuraWakeWord((payload) => {
+      const detectedLang = payload?.lang === "ar" ? "ar" : "en";
+      if (payload?.lang) {
+        preferredLanguageRef.current = detectedLang;
+        setPreferredLanguage(detectedLang);
       }
-    }
- 
-    // Wake word
-    const hasEnglishWake = /\baura\b/.test(combined);
-    const hasArabicWake  = /أورا|اورا|أوره|اوره|اورة|أورة/.test(combined);
- 
-    if (hasEnglishWake || hasArabicWake) {
-      const detectedLang = hasArabicWake ? "ar" : "en";
-      console.log(`[Wake] Wake word detected (${detectedLang}): "${combined}"`);
- 
-      if (!userLanguage) {
+      if (!userLanguageRef.current) {
+        userLanguageRef.current = detectedLang;
         setUserLanguage(detectedLang);
         localStorage.setItem("userLanguage", detectedLang);
-        // Also update screenReader so TTS speaks the right language
         screenReader.setLanguage(detectedLang);
       }
- 
-      resetTranscript();
-      if (!isRecording && orbState !== "processing" && orbState !== "speaking") {
-        // Stop wake listener before starting main mic to avoid conflicts
-        wakeStoppedRef.current = true;
-        if (recognitionRef.current) {
-          try { recognitionRef.current.abort(); } catch (_) {}
-        }
-        startRecording();
+      setAuraStatus("armed");
+      setOrbState("listening");
+      setIsThinking(false);
+      setWakePulse(true);
+      playWakePing();
+      if (wakePulseTimerRef.current) {
+        clearTimeout(wakePulseTimerRef.current);
       }
-    }
-  }, [interimTranscript, finalTranscript, transcript, isRecording, orbState, resetTranscript, userLanguage]);
+      wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
+    });
+
+    const offPartial = window.electronAPI.onAuraPartialText((partial) => {
+      if (typeof partial === "string" && partial.trim()) {
+        setUserMessage(partial.trim());
+      }
+    });
+
+    const offFinal = window.electronAPI.onAuraFinalCommand(async (payload) => {
+      const text = (payload?.text || "").trim();
+      if (!text) return;
+      const lang = payload?.lang === "ar" ? "ar" : "en";
+      userLanguageRef.current = lang;
+      setUserLanguage(lang);
+      localStorage.setItem("userLanguage", lang);
+      setUserMessage(text);
+      setPendingWakeCommand({ text, lang });
+    });
+
+    const offStatus = window.electronAPI.onAuraStatus((status) => {
+      const state = typeof status === "string" ? status : status?.state;
+      if (status?.lang) {
+        const lang = status.lang === "ar" ? "ar" : "en";
+        setPreferredLanguage(lang);
+        preferredLanguageRef.current = lang;
+      }
+      if (state) {
+        setAuraStatus(state);
+      }
+      if (state === "error" || state === "stopped") {
+        setListening(false);
+      }
+      if (state === "idle" || state === "ready" || state === "started" || state === "listening" || state === "armed") {
+        setListening(true);
+        if (orbState !== "processing" && orbState !== "speaking") {
+          setOrbState("idle");
+        }
+      } else if (state === "listening") {
+        setListening(true);
+        setOrbState("listening");
+      }
+    });
+
+    return () => {
+      try { offWake?.(); } catch { /* no-op */ }
+      try { offPartial?.(); } catch { /* no-op */ }
+      try { offFinal?.(); } catch { /* no-op */ }
+      try { offStatus?.(); } catch { /* no-op */ }
+    };
+  }, [authState, useElectronWakeWord, orbState, playWakePing]);
+
+  useEffect(() => {
+    if (!useElectronWakeWord || authState !== "app") return;
+    window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || preferredLanguage || "en" }).catch(() => {
+      // The main process logs startup failures; the renderer only needs to retry when language changes.
+    });
+  }, [authState, preferredLanguage, useElectronWakeWord]);
+
+  useEffect(() => {
+    return () => {
+      wakeStoppedRef.current = true;
+      if (wakePulseTimerRef.current) {
+        clearTimeout(wakePulseTimerRef.current);
+      }
+    };
+  }, []);
 
   /* ---------- DEVICE DETECTION & RESPONSIVE LAYOUT ---------- */
   useEffect(() => {
@@ -539,6 +524,7 @@ function App() {
 
           case 'clarification':
           case 'clarification_needed': // server alias
+          case 'confirmation_needed':
             setThinkingSteps([]);
             setIsThinking(false);
             setClarificationResponseToId(msg.response_id);
@@ -548,7 +534,20 @@ function App() {
               localStorage.setItem("userLanguage", msg.user_language);
             }
             rememberUserLanguageFromText(msg.question);
-            speakAssistantResponse(msg.question, msg.user_language || userLanguage);
+            if (msg.type === 'confirmation_needed') {
+              setOrbState("speaking");
+              screenReader.speak(msg.question || "", {
+                onComplete: () => setOrbState("idle"),
+              });
+            } else {
+              speakAssistantResponse(msg.question, msg.user_language || userLanguage);
+            }
+            break;
+
+          case 'processing':
+            setOrbState("processing");
+            setIsThinking(true);
+            if (msg.text) setAssistantMessage(msg.text);
             break;
 
           case 'completion':
@@ -894,187 +893,57 @@ function App() {
 
   /* ---------- AUDIO RECORDING ---------- */
   const startRecording = async () => {
-    // 🛡️ Prevent multiple simultaneous recordings
-    if (isRecording || mediaRecorderRef.current?.state === 'recording') {
-      console.log('[Audio] Already recording, ignoring duplicate start');
+    if (!window?.electronAPI?.transcribeOnce) {
+      setAssistantMessage(t("Voice sidecar is unavailable", "محرك الصوت غير متاح"));
       return;
     }
+    if (isRecording) return;
+
+    manualCaptureCancelledRef.current = false;
+    setIsRecording(true);
+    setOrbState("listening");
+    setUserMessage(t("Listening...", "أستمع الآن..."));
 
     try {
-      console.log("[Audio] Starting recording...");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const preferredLang = preferredLanguageRef.current === "ar" ? "ar" : "en";
+      const result = await window.electronAPI.transcribeOnce({
+        lang: preferredLang,
+        timeoutMs: 10000,
+      });
 
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
+      if (manualCaptureCancelledRef.current) return;
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        console.log(`[Audio] Recording stopped. Size: ${blob.size} bytes`);
-        stream.getTracks().forEach((t) => t.stop());
-
-        if (silenceFrameRef.current) {
-          cancelAnimationFrame(silenceFrameRef.current);
-          silenceFrameRef.current = null;
-        }
-        if (noSpeechTimeoutRef.current) {
-          clearTimeout(noSpeechTimeoutRef.current);
-          noSpeechTimeoutRef.current = null;
-        }
-
-        // Stop and clear audio context if used
-        if (audioContextRef.current) {
-          try { audioContextRef.current.close(); } catch (e) {}
-          audioContextRef.current = null;
-        }
-
-        processAudio(blob);
-
-        // Resume wake-word listening after processing audio
-        try {
-          startWakeWordListening();
-          console.log('[Wake] Resumed wake-word listening');
-        } catch (e) {
-          console.warn('[Wake] Failed to resume listening:', e);
-        }
-      };
-
-      recorder.start();
-      setIsRecording(true);
-      setOrbState("listening");
-      setUserMessage(t("Listening...", "أستمع الآن..."));
-      userSpokeRef.current = false;
-
-      if (noSpeechTimeoutRef.current) {
-        clearTimeout(noSpeechTimeoutRef.current);
+      if (!result?.ok || !result?.text?.trim()) {
+        setOrbState("idle");
+        setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
+        return;
       }
-      noSpeechTimeoutRef.current = setTimeout(() => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording' && !userSpokeRef.current) {
-          console.log('[Audio] No speech detected in first 5s, finalizing input');
-          mediaRecorderRef.current.stop();
-        }
-      }, 5000);
 
-      // Silence detection using Web Audio API
-      try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        const audioCtx = new AudioCtx();
-        audioContextRef.current = audioCtx;
-        const sourceNode = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        sourceNode.connect(analyser);
-        const bufferLength = analyser.fftSize;
-        const dataArray = new Uint8Array(bufferLength);
-        let silentStart = null;
-
-        const checkSilence = () => {
-          analyser.getByteTimeDomainData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            const v = (dataArray[i] - 128) / 128;
-            sum += v * v;
-          }
-          const rms = Math.sqrt(sum / bufferLength);
-          if (rms >= 0.02) {
-            userSpokeRef.current = true;
-          }
-          if (rms < 0.01) {
-            if (silentStart === null) silentStart = Date.now();
-            else if (Date.now() - silentStart > 5000) {
-              console.log('[Audio] Silence detected >5s, stopping recording');
-              if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                mediaRecorderRef.current.stop();
-              }
-            }
-          } else {
-            silentStart = null;
-          }
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            silenceFrameRef.current = requestAnimationFrame(checkSilence);
-          } else {
-            try { audioCtx.close(); } catch (e) {}
-          }
-        };
-
-        silenceFrameRef.current = requestAnimationFrame(checkSilence);
-      } catch (e) {
-        console.warn('[Audio] Silence detection not available:', e);
-      }
+      const transcriptText = result.text.trim();
+      setUserMessage(transcriptText);
+      rememberUserLanguageFromText(transcriptText);
+      setOrbState("processing");
+      await processText(transcriptText);
     } catch (error) {
-      console.error("[Audio] Microphone access failed:", error);
-      setAssistantMessage(t("Microphone access denied", "تم رفض الوصول إلى الميكروفون"));
+      console.error("[Audio] Sidecar one-shot transcription failed:", error);
+      setOrbState("idle");
+      setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
+    } finally {
+      setIsRecording(false);
+      startWakeWordListening();
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      console.log("[Audio] Stopping recording...");
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-    if (silenceFrameRef.current) {
-      cancelAnimationFrame(silenceFrameRef.current);
-      silenceFrameRef.current = null;
-    }
-    if (noSpeechTimeoutRef.current) {
-      clearTimeout(noSpeechTimeoutRef.current);
-      noSpeechTimeoutRef.current = null;
-    }
+    manualCaptureCancelledRef.current = true;
+    setIsRecording(false);
+    setOrbState("idle");
   };
 
   const handleMicClick = () => {
     console.log("[UI] Mic clicked. State:", orbState);
     // Allow mic during processing/speaking for interrupt commands
     isRecording ? stopRecording() : startRecording();
-  };
-
-  /* ---------- AUDIO → TEXT ---------- */
-  const processAudio = async (blob) => {
-    try {
-      setOrbState("processing");
-      setUserMessage(t("Processing...", "جاري المعالجة..."));
-      console.log("[STT] Transcribing audio...");
-
-      const reader = new FileReader();
-      reader.readAsDataURL(blob);
-
-      reader.onloadend = async () => {
-        const base64 = reader.result.split(",")[1];
-
-        const res = await fetch("http://localhost:8000/transcribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            audio_data: base64,
-            session_id: sessionId,
-            user_id: userId,
-          }),
-        });
-
-        const data = await res.json();
-        console.log("[STT] Response:", data);
-
-        if (!res.ok) {
-          throw new Error(data.detail || "Transcription failed");
-        }
-
-        console.log(`[STT] Transcript: "${data.transcript}"`);
-        rememberUserLanguageFromText(data.transcript);
-        setUserMessage(data.transcript);
-        await processText(data.transcript);
-      };
-    } catch (error) {
-      console.error("[STT] Error:", error);
-      setOrbState("idle");
-      setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
-    }
   };
 
   /* ---------- DIRECT TEXT (SKIP STT) ---------- */
@@ -1117,6 +986,16 @@ function App() {
       localStorage.setItem("ttsVoice", profileData.voice);
       setTtsVoice(profileData.voice);
     }
+    if (profileData.language) {
+      const nextLanguage = profileData.language === "ar" ? "ar" : "en";
+      localStorage.setItem("preferredLanguage", nextLanguage);
+      localStorage.setItem("appLanguage", nextLanguage);
+      preferredLanguageRef.current = nextLanguage;
+      setPreferredLanguage(nextLanguage);
+      window.electronAPI?.initAura?.({ lang: nextLanguage }).catch(() => {
+        // Sidecar logs will show any restart issues.
+      });
+    }
   };
 
 
@@ -1135,6 +1014,13 @@ function App() {
       }
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
+      if (preferences?.language) {
+        const nextLanguage = preferences.language === "ar" ? "ar" : "en";
+        preferredLanguageRef.current = nextLanguage;
+        setPreferredLanguage(nextLanguage);
+        localStorage.setItem("preferredLanguage", nextLanguage);
+        localStorage.setItem("appLanguage", nextLanguage);
+      }
       localStorage.setItem("onboardingComplete", "true");
       setAuthState("app");
       wakeStoppedRef.current = false;
@@ -1356,6 +1242,8 @@ function App() {
         return;
       }
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
+      setOrbState("processing");
+      setIsThinking(true);
 
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1476,6 +1364,14 @@ function App() {
       setExecutionMode("normal");
     }
   };
+
+  useEffect(() => {
+    if (!pendingWakeCommand?.text) return;
+    const text = pendingWakeCommand.text;
+    setPendingWakeCommand(null);
+    void processText(text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingWakeCommand]);
 
   /* ---------- STOP SEQUENCE ---------- */
   const handleStopSequence = () => {
@@ -1638,6 +1534,13 @@ function App() {
             setUserId(realId);
             setUserName(username);
             if (preferences?.voice) setTtsVoice(preferences.voice);
+            if (preferences?.language) {
+              const nextLanguage = preferences.language === "ar" ? "ar" : "en";
+              preferredLanguageRef.current = nextLanguage;
+              setPreferredLanguage(nextLanguage);
+              localStorage.setItem("preferredLanguage", nextLanguage);
+              localStorage.setItem("appLanguage", nextLanguage);
+            }
             setAuthState("app");
             wakeStoppedRef.current = false;
             setTimeout(() => startWakeWordListening(), 500);
@@ -1771,19 +1674,27 @@ function App() {
                 onContentReady={handleHeaderContentReady}
               />
 
-              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-              {assistantMessage && !isThinking && (
-                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-                  <div className="response-message">
-                    {assistantMessage}
-                  </div>
+              <div className="mini-live-caption" role="status" aria-live="polite" aria-atomic="true" aria-label="Live caption">
+                <div className="mini-live-caption-kicker">
+                  {userMessage && (!assistantMessage || orbState === "listening") ? "You" : "AURA"}
                 </div>
-              )}
+                <div className="mini-live-caption-text">
+                  <SplitText
+                    key={`${orbState}-${userMessage}-${assistantMessage}-${isThinking}`}
+                    text={
+                      (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
+                        ? userMessage
+                        : (assistantMessage || (isThinking ? t("Thinking...", "بفكر...") : (listening ? t("Say hey aura", "قول يا أورا") : t("Wake service connecting", "جاري توصيل خدمة التنبيه"))))
+                    }
+                    delay={22}
+                  />
+                </div>
+              </div>
 
               <VoiceControls
                 isRecording={isRecording}
                 orbState={orbState}
+                wakePulse={wakePulse || auraStatus === "armed"}
                 onMicClick={handleMicClick}
                 onCancel={handleCancel}
                 chatMode={chatMode}
@@ -1803,6 +1714,7 @@ function App() {
               onLogout={handleLogout}
               initialName={userName}
               initialVoice={ttsVoice}
+              initialLanguage={preferredLanguage}
             />
           )}
 

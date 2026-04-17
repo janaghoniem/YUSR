@@ -49,6 +49,7 @@ export function useSpeechRecognition({
   const [supported]  = useState(!!SpeechRecognitionAPI);
 
   const recRef          = useRef(null);
+  const voskLoopRef     = useRef(null);
   const networkRetries  = useRef(0);
   const stoppedRef      = useRef(true);  // true = we deliberately stopped
   const onResultRef     = useRef(onResult);
@@ -63,12 +64,54 @@ export function useSpeechRecognition({
   const stop = useCallback(() => {
     stoppedRef.current = true;
     setListening(false);
+    if (voskLoopRef.current) {
+      clearTimeout(voskLoopRef.current);
+      voskLoopRef.current = null;
+    }
     if (recRef.current) {
-      try { recRef.current.stop(); } catch (_) {}
+      try { recRef.current.stop(); } catch { /* no-op */ }
     }
   }, []);
 
   const start = useCallback(() => {
+    const hasElectronVosk = !!window?.electronAPI?.transcribeOnce;
+
+    if (hasElectronVosk) {
+      stoppedRef.current = false;
+      setTranscript("");
+      setListening(true);
+
+      const loop = async () => {
+        if (stoppedRef.current) {
+          setListening(false);
+          return;
+        }
+
+        try {
+          const logicalLang = String(lang || "en-US").toLowerCase().startsWith("ar") ? "ar" : "en";
+          const result = await window.electronAPI.transcribeOnce({ lang: logicalLang, timeoutMs: 6000 });
+          const text = (result?.text || "").trim();
+          if (text) {
+            setTranscript(text);
+            onResultRef.current?.(text, true);
+          }
+        } catch (err) {
+          console.warn("[VOSK-HOOK] transcribeOnce failed:", err?.message || err);
+          onErrorRef.current?.("vosk-error");
+        }
+
+        onEndRef.current?.();
+        if (continuous && !stoppedRef.current) {
+          voskLoopRef.current = setTimeout(loop, 120);
+        } else {
+          setListening(false);
+        }
+      };
+
+      void loop();
+      return;
+    }
+
     if (!supported) return;
     if (networkUnavailable) {
       console.warn("[STT] Network unavailable — STT disabled, use text input.");
@@ -80,7 +123,7 @@ export function useSpeechRecognition({
 
     // Re-create each session (Chrome doesn't allow restarting same instance)
     if (recRef.current) {
-      try { recRef.current.abort(); } catch (_) {}
+      try { recRef.current.abort(); } catch { /* no-op */ }
     }
 
     const rec = new SpeechRecognitionAPI();
@@ -166,14 +209,17 @@ export function useSpeechRecognition({
       console.warn("[STT] Could not start recognition:", err.message);
       setListening(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lang, continuous, interimResults, maxNetworkRetries, supported, networkUnavailable]);
 
   // Clean up on unmount
   useEffect(() => {
     return () => {
       stoppedRef.current = true;
-      try { recRef.current?.abort(); } catch (_) {}
+      if (voskLoopRef.current) {
+        clearTimeout(voskLoopRef.current);
+        voskLoopRef.current = null;
+      }
+      try { recRef.current?.abort(); } catch { /* no-op */ }
     };
   }, []);
 

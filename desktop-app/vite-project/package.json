@@ -9,6 +9,7 @@
     "dev": "vite",
     "electron": "concurrently \"npm run dev\" \"electron .\"",
     "build": "vite build",
+    "build:python": "pyinstaller --noconfirm --onefile --name aura_engine --distpath python-dist --add-data \"resources;resources\" aura_engine.py",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -21,12 +22,14 @@
     "framer-motion": "^12.38.0",
     "lucide-react": "^0.546.0",
     "ogl": "^1.0.11",
+    "mic": "^2.1.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-speech-recognition": "^4.0.1",
     "react-webcam": "^7.2.0",
     "tailwind-merge": "^3.5.0",
-    "three": "^0.180.0"
+    "three": "^0.180.0",
+    "vosk": "^0.3.39"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
@@ -45,5 +48,19 @@
     "postcss": "^8.5.9",
     "tailwindcss": "^4.2.2",
     "vite": "^7.1.7"
+  },
+  "build": {
+    "appId": "com.aura.desktop",
+    "productName": "AURA",
+    "extraResources": [
+      {
+        "from": "python-dist/aura_engine.exe",
+        "to": "aura_engine.exe"
+      },
+      {
+        "from": "resources",
+        "to": "resources"
+      }
+    ]
   }
 }

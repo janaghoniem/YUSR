@@ -23,6 +23,7 @@ const VoiceControls = ({
   onSettingsClick,
   isExecuting = false,
   onInterrupt,
+  wakePulse = false,
 }) => {
   const [text, setText] = useState("");
   const [isPaused, setIsPaused] = useState(false);
@@ -209,21 +210,21 @@ const VoiceControls = ({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', marginTop: 'auto' }}>
       <BorderGlow 
-        className={`rounded-full ${isRecording ? "recording" : ""}`}
+        className={`rounded-full ${isRecording ? "recording" : ""} ${wakePulse ? "wake-pulse" : ""}`}
         style={{ 
           width: 'fit-content', 
           display: 'flex', 
           borderRadius: '9999px',
           alignSelf: 'center'
         }}
-        glowColor={isRecording ? "330 100 60" : "40 80 80"}
-        colors={isRecording ? ['#ff4d6d', '#ff758c', '#ff8fa3'] : ['#c084fc', '#f472b6', '#38bdf8']}
+        glowColor={wakePulse ? "170 86 70" : (isRecording ? "330 100 60" : "40 80 80")}
+        colors={wakePulse ? ['#45f3ff', '#38bdf8', '#8bffe5'] : (isRecording ? ['#ff4d6d', '#ff758c', '#ff8fa3'] : ['#c084fc', '#f472b6', '#38bdf8'])}
         backgroundColor="transparent"
         animated={true} 
-        duration={isRecording ? 2 : 4}
+        duration={wakePulse ? 1.5 : (isRecording ? 2 : 4)}
       >
         <div
-          className={`voice-controls ${isRecording ? "recording" : ""}`}
+          className={`voice-controls ${isRecording ? "recording" : ""} ${wakePulse ? "wake-pulse" : ""}`}
           role="region"
           aria-label="Voice controls"
           aria-live="polite"

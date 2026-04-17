@@ -389,6 +389,128 @@ body {
   animation: fadeUp var(--dur-slow) var(--ease-out);
   scrollbar-width: thin; scrollbar-color: var(--bg-muted) transparent;
 }
+.mini-live-caption {
+  align-self: center;
+  width: min(620px, calc(100vw - 56px));
+  margin: 18px auto 0;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: linear-gradient(160deg, rgba(32, 24, 35, 0.66), rgba(14, 11, 19, 0.62));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.34);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.mini-live-caption-kicker {
+  font-size: 11px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.56);
+  margin-bottom: 6px;
+}
+.mini-live-caption-text {
+  font-size: 15px;
+  line-height: 1.55;
+  color: rgba(255,255,255,0.94);
+  word-break: break-word;
+  min-height: 25px;
+}
+.response-container.aura-live-surface {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 18px;
+  overflow: visible;
+}
+.aura-live-card {
+  width: 100%;
+}
+.aura-live-card-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 28px 30px;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(27, 18, 28, 0.92), rgba(16, 12, 22, 0.82));
+  border: 1px solid rgba(255,255,255,0.05);
+  backdrop-filter: blur(24px);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+}
+.aura-live-headline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.aura-live-kicker {
+  font-size: 13px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.aura-live-subtitle {
+  margin-top: 8px;
+  font-size: 15px;
+  color: rgba(255,255,255,0.72);
+}
+.aura-live-chip {
+  flex: 0 0 auto;
+  min-width: 52px;
+  padding: 9px 12px;
+  border-radius: 999px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgba(255,255,255,0.92);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.aura-live-stack {
+  display: grid;
+  gap: 16px;
+}
+.aura-live-block {
+  display: grid;
+  gap: 10px;
+  padding: 18px 18px 20px;
+  border-radius: 22px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+}
+.aura-live-block-assistant {
+  background: linear-gradient(180deg, rgba(255, 77, 109, 0.08), rgba(255,255,255,0.03));
+}
+.aura-live-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.56);
+}
+.aura-live-text {
+  font-size: 18px;
+  line-height: 1.65;
+  color: rgba(255,255,255,0.95);
+  word-break: break-word;
+}
+.aura-live-text .thinking-container {
+  margin-top: 0;
+}
+.aura-live-text .thinking-content {
+  max-width: none;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  backdrop-filter: none;
+}
+.aura-live-footer {
+  font-size: 12px;
+  color: rgba(255,255,255,0.52);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .response-message { font-size: 16px; line-height: 1.8; color: var(--text-primary); max-width: 680px; }
 .read-aloud-btn {
   display: inline-flex; align-items: center; gap: 6px; margin-top: 14px;
@@ -413,9 +535,19 @@ body {
   box-shadow: 0 0 0 4px rgba(255,61,154,0.1), 0 2px 24px rgba(255,61,154,0.18);
   animation: recPulse 1.8s ease-in-out infinite;
 }
+.voice-controls.wake-pulse {
+  border-color: rgba(69,243,255,0.58);
+  box-shadow: 0 0 0 4px rgba(69,243,255,0.16), 0 2px 30px rgba(56,189,248,0.34);
+  animation: wakePulse 1.2s ease-out 1;
+}
 @keyframes recPulse {
   0%,100% { box-shadow: 0 0 0 4px rgba(255,61,154,0.1), 0 2px 24px rgba(255,61,154,0.18); }
   50% { box-shadow: 0 0 0 6px rgba(255,61,154,0.16), 0 2px 32px rgba(255,61,154,0.28); }
+}
+@keyframes wakePulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(69,243,255,0.48), 0 2px 16px rgba(56,189,248,0.25); }
+  60% { transform: scale(1.02); box-shadow: 0 0 0 12px rgba(69,243,255,0), 0 2px 40px rgba(56,189,248,0.34); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(69,243,255,0), 0 2px 24px rgba(56,189,248,0.2); }
 }
 .control-btn {
   width: 40px; height: 40px; border-radius: 50%;

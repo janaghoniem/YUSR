@@ -10,13 +10,14 @@ const SettingsModal = ({
   onLogout,
   initialName = "User",
   initialVoice = "Gacrux",
+  initialLanguage = "en",
 }) => {
   const [activeSection, setActiveSection] = useState("profile");
   const [profileData, setProfileData] = useState({
     username: initialName,
     email: "",
     theme: "dark",
-    language: "en",
+    language: initialLanguage,
     voice: initialVoice,
   });
   const [profileLoading, setProfileLoading] = useState(false);
@@ -49,6 +50,15 @@ const SettingsModal = ({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  useEffect(() => {
+    setProfileData((prev) => ({
+      ...prev,
+      username: initialName,
+      language: initialLanguage,
+      voice: initialVoice,
+    }));
+  }, [initialName, initialLanguage, initialVoice]);
 
   // Load real profile data on mount
   useEffect(() => {

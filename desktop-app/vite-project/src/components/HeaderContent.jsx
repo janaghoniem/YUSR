@@ -5,7 +5,7 @@ const MORNING_HEADLINES = [
   "What would you like to achieve today?",
   "Let's get a head start.",
   "Ready to tackle the day?",
-  "How can I assist your morning?",
+  "How can I assist your morning?", 
 ];
 
 const AFTERNOON_HEADLINES = [

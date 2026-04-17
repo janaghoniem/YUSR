@@ -187,7 +187,8 @@ class UIAction(BaseModel):
     direction:     Optional[Literal["up", "down", "left", "right"]] = None  # scroll
     duration:      Optional[int]   = None   # wait (ms) or long_click (ms)
     global_action: Optional[Literal[
-        "HOME", "BACK", "RECENTS", "POWER", "VOLUME_UP", "VOLUME_DOWN"
+        "HOME", "BACK", "RECENTS", "POWER", "VOLUME_UP", "VOLUME_DOWN",
+        "ENTER", "SEARCH"
     ]] = None
 
     # ── ADD x, y for coordinate_tap ──────────────────────────────────────

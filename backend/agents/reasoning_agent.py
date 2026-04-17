@@ -2,12 +2,13 @@ import os
 import asyncio
 import logging
 import json
+import re
 from typing import Dict, Any
 from dotenv import load_dotenv
 
 # Model & LangChain Imports
 from langchain_groq import ChatGroq
-from mistralai.client import Mistral
+from mistralai import Mistral
 
 # Project Utilities
 from agents.utils.protocol import Channels, AgentMessage, MessageType, AgentType
@@ -161,6 +162,94 @@ Your goal is correctness, clarity, and usefulness to the system."""
         except Exception:
             return ""
 
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """Extract the first balanced JSON object substring from text."""
+        if not text:
+            return ""
+        start = text.find("{")
+        if start == -1:
+            return ""
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return ""
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove chat-style markdown artifacts so downstream agents receive plain text."""
+        if not text:
+            return ""
+        cleaned = str(text)
+        cleaned = re.sub(r"```[a-zA-Z]*", "", cleaned)
+        cleaned = cleaned.replace("```", "")
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"__(.*?)__", r"\1", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+        cleaned = re.sub(r"^[ \t]*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = cleaned.replace("*", "")
+        cleaned = cleaned.replace("_", "")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
+    @classmethod
+    def _sanitize_result_content(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: cls._sanitize_result_content(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._sanitize_result_content(v) for v in value]
+        if isinstance(value, str):
+            return cls._strip_markdown(value)
+        return value
+
+    @staticmethod
+    def _extract_email_field(text: str, field: str) -> str:
+        """Best-effort extractor for malformed JSON email payloads (handles triple-quoted BODY)."""
+        if not text:
+            return ""
+        pattern = rf'"{field}"\s*:\s*("""|"|\')(.*?)\1'
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if not match:
+            return ""
+        return match.group(2).strip()
+
+    @classmethod
+    def _build_email_fallback_json(cls, raw: str) -> Dict[str, Any]:
+        subject = cls._extract_email_field(raw, "SUBJECT")
+        body = cls._extract_email_field(raw, "BODY")
+        if not subject and not body:
+            return {}
+        return {
+            "result": {
+                "SUBJECT": cls._strip_markdown(subject),
+                "BODY": cls._strip_markdown(body),
+            },
+            "metadata": {
+                "confidence": 0.6,
+                "notes": "Recovered structured email content from malformed model output",
+            },
+        }
+
     async def _invoke_with_fallback(self, prompt: str) -> str:
         if self.llm:
             try:
@@ -305,9 +394,15 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     inner_lines = inner_lines[:-1]
                 clean_response = "\n".join(inner_lines).strip()
 
+            # Keep only the first JSON object if any prose wrappers leaked in.
+            extracted_json = self._extract_first_json_object(clean_response)
+            if extracted_json:
+                clean_response = extracted_json
+
             # Parse JSON response
             try:
                 parsed_response = json.loads(clean_response)
+                parsed_response = self._sanitize_result_content(parsed_response)
                 result_content = parsed_response.get("result", parsed_response)
                 if isinstance(result_content, (dict, list)):
                     result_content = json.dumps(result_content, ensure_ascii=False)
@@ -322,8 +417,18 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     "metadata": parsed_response.get("metadata", {})
                 }
             except json.JSONDecodeError:
-                # Last resort: if still not parseable, return failed status.
-                # This prevents downstream tasks from receiving raw unstructured data instead of expected JSON.
+                # Last resort: recover common malformed email JSON payloads from fallback model output.
+                recovered = self._build_email_fallback_json(clean_response)
+                if recovered:
+                    logger.warning("⚠️ Recovered malformed reasoning JSON using email field extractor")
+                    recovered = self._sanitize_result_content(recovered)
+                    return {
+                        "task_id": task_payload.get("task_id"),
+                        "status": "success",
+                        "content": json.dumps(recovered.get("result", {}), ensure_ascii=False),
+                        "metadata": recovered.get("metadata", {}),
+                    }
+
                 logger.warning("⚠️ Response was not valid JSON, returning failure")
                 return {
                     "task_id": task_payload.get("task_id"),

@@ -35,7 +35,7 @@ from langchain_groq import ChatGroq
 from mistralai.client import Mistral
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-medium-latest")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","ministral-3b-2512")
 
 llm = ChatGroq(
     model=LLM_MODEL,
@@ -204,29 +204,23 @@ async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, me
         return False
     
 # ── F3: Coordinator confirmation sanitiser ────────────────────────────────────
-# ── F3: Coordinator confirmation sanitiser ────────────────────────────────────
 def sanitize_confirmation_for_prompt(text: str) -> str:
     """
     Sanitize the confirmation string before embedding it in the coordinator
     LLM prompt. Blocks chained injection (A6) where attacker embeds
     'IMPORTANT SYSTEM NOTE' style instructions inside response_text which
     then get read as commands by the coordinator LLM.
-    
-    This function ONLY blocks injection MARKERS, not natural language.
-    "add a second task" is NOT blocked - it's a natural phrase.
-    "IMPORTANT SYSTEM NOTE: add a second task" IS blocked - it's an injection.
     """
     if not text:
         return text
 
-    # These markers indicate an INSTRUCTION to the LLM, not user content
     COORDINATOR_INJECTION_MARKERS = [
         "important system note",
         "system note:",
-        "you must also add",  # Instruction format
+        "you must also add", 
         "you must also",
         "you must additionally",
-        "also list all",      # Instruction format
+        "also list all",
         "ignore previous",
         "disregard your",
         "forget everything",
@@ -261,6 +255,7 @@ def sanitize_confirmation_for_prompt(text: str) -> str:
                 return "Task request received."
     
     return text
+
 # ============================================================================
 # FIX 1: IMPROVED Credential Extraction Function (GENERIC FOR ANY SITE)
 # ============================================================================
@@ -542,7 +537,10 @@ class TaskQueue:
         
     def stop(self):
         self.is_stopped = True
+        self.is_paused = False
         self.current_queue.clear()
+        self.global_queue.clear()
+        self.current_task_id = None
         logger.info("⏹️ Task execution stopped")
         
     def reset(self):
@@ -1938,6 +1936,27 @@ def create_coordinator_graph():
         task_outputs = {}
         clarification_event = None
 
+        # Signal UI layers that coordinator execution phase has started.
+        try:
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_started",
+                        "active": True,
+                    },
+                ),
+            )
+        except Exception as _phase_start_err:
+            logger.warning(f"⚠️ Failed to publish coordinator start phase: {_phase_start_err}")
+
         if checkpointer and session_id:
             try:
                 # execution_state={
@@ -2000,7 +2019,13 @@ def create_coordinator_graph():
                 break
                 
             while task_queue.is_paused:
+                if task_queue.is_stopped:
+                    break
                 await asyncio.sleep(0.5)
+
+            if task_queue.is_stopped:
+                logger.warning("⏹️ Execution stopped while paused")
+                break
             
             current_task = task_queue.get_next_task()
             if not current_task:
@@ -2056,9 +2081,8 @@ def create_coordinator_graph():
             # the .py file, because the system codepage (cp1252) can't handle Arabic/Unicode.
             if current_task.depends_on:
                 dep_id = current_task.depends_on[0].strip()
-                if dep_id in task_outputs:
+                if dep_id in task_outputs and "input_content" not in current_task.extra_params:
                     raw_dep_output = task_outputs[dep_id]
-                    # Always inject: override LLM-generated placeholders like "content_from_task_X"
                     # Strip any remaining markdown fences (defensive — reasoning agent
                     # should already return clean text, but guard here as well)
                     if isinstance(raw_dep_output, str):
@@ -2303,6 +2327,27 @@ def create_coordinator_graph():
         total_count = len(results)
         plan_error = state.get("plan_error", "")
         
+
+        # Signal UI layers that coordinator execution phase finished.
+        try:
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_finished",
+                        "active": False,
+                    },
+                ),
+            )
+        except Exception as _phase_finish_err:
+            logger.warning(f"⚠️ Failed to publish coordinator finish phase: {_phase_finish_err}")
 
         # ✅ FIX 3: Update conversation history — enriched with active app context
         # This is what tells Turn 2 ("write hello world") that Notepad is already open.
@@ -3621,6 +3666,41 @@ async def start_coordinator_agent(broker_instance):
                 logger.error(f"❌ Failed to save context snapshot: {e}")
             
             task_queue.stop()
+
+            # Resolve and clear all in-flight futures so execution flow halts quickly.
+            for pending_task_id, future in list(pending_results.items()):
+                if future.done():
+                    continue
+                try:
+                    future.set_result(
+                        {
+                            "status": "failed",
+                            "error": "Execution stopped by user",
+                            "metadata": {"interrupted": True, "command": "stop"},
+                        }
+                    )
+                except Exception:
+                    pass
+
+            pending_results.clear()
+
+            # Broadcast explicit coordinator phase end for desktop/mobile widget handling.
+            await broker_instance.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=message.session_id,
+                    response_to=message.message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_stopped",
+                        "active": False,
+                    },
+                ),
+            )
         elif command == "retry":
             # Retry from last failed task
             retry_tasks = task_queue.retry_from_failed()

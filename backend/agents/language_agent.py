@@ -927,13 +927,48 @@ class LanguageAgent:
             except Exception:
                 return None
 
+        def _extract_first_json_object(text: str) -> Optional[str]:
+            """Extract first balanced JSON object while respecting quoted strings."""
+            start = text.find("{")
+            if start == -1:
+                return None
+
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i in range(start, len(text)):
+                ch = text[i]
+
+                if escape_next:
+                    escape_next = False
+                    continue
+
+                if ch == "\\" and in_string:
+                    escape_next = True
+                    continue
+
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+
+                if in_string:
+                    continue
+
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+
+            return None
+
         try:
-            cleaned_response = response.replace("\\\\", "/").replace("\\", "/")
+            cleaned_response = str(response or "").strip()
 
             # F2: Extract FIRST valid JSON object only — ignore anything after it
-            import re as _re
-            json_match = _re.search(r'\{[^{}]*\}', cleaned_response, _re.DOTALL)
-            if not json_match:
+            json_obj = _extract_first_json_object(cleaned_response)
+            if not json_obj:
                 # Try repair
                 repaired = _attempt_repair(cleaned_response)
                 if repaired:
@@ -944,9 +979,9 @@ class LanguageAgent:
             else:
                 import json as _json
                 try:
-                    parsed = _json.loads(json_match.group(0))
+                    parsed = _json.loads(json_obj)
                 except _json.JSONDecodeError:
-                    repaired = _attempt_repair(json_match.group(0))
+                    repaired = _attempt_repair(json_obj)
                     if repaired:
                         parsed = _json.loads(repaired)
                     else:
@@ -1287,7 +1322,7 @@ async def start_language_agent(broker):
                     receiver=AgentType.COORDINATOR,
                     session_id=session_id,
                     task_id=task_id,
-                    response_to=orig_request or http_request_id,
+                    response_to=http_request_id,
                     payload={
                         "status": "success",
                         "content": input_text,

@@ -25,7 +25,9 @@ class _TaskExecutionBorderState extends State<TaskExecutionBorder>
   void initState() {
     super.initState();
     _ctrl = AnimationController(
-        duration: const Duration(seconds: 3), vsync: this);
+      duration: const Duration(seconds: 3),
+      vsync: this,
+    );
     if (widget.isExecuting) _ctrl.repeat();
   }
 
@@ -52,16 +54,17 @@ class _TaskExecutionBorderState extends State<TaskExecutionBorder>
 
     return AnimatedBuilder(
       animation: _ctrl,
-      builder: (_, __) => CustomPaint(
-        painter: _ArcBorderPainter(progress: _ctrl.value, radius: 24),
-        child: Padding(
-          padding: const EdgeInsets.all(3),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(21),
-            child: widget.child,
+      builder:
+          (_, __) => CustomPaint(
+            painter: _ArcBorderPainter(progress: _ctrl.value, radius: 24),
+            child: Padding(
+              padding: const EdgeInsets.all(3),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(21),
+                child: widget.child,
+              ),
+            ),
           ),
-        ),
-      ),
     );
   }
 }
@@ -74,30 +77,27 @@ class _ArcBorderPainter extends CustomPainter {
 
   _ArcBorderPainter({required this.progress, required this.radius});
 
-  static const int _segments = 12;
-
   @override
   void paint(Canvas canvas, Size size) {
-    final rect =
-        Rect.fromLTWH(1.5, 1.5, size.width - 3, size.height - 3);
-    final segAngle = (2 * pi) / _segments;
-    final startOffset = progress * 2 * pi;
+    final rect = Rect.fromLTWH(1.5, 1.5, size.width - 3, size.height - 3);
+    final paint =
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3.0
+          ..shader = LinearGradient(
+            colors: const [
+              Color(0xFFFF3D9A), // pink400
+              Color(0xFF4DD68C), // success
+              Color(0xFFFFBA44), // warning
+              Color(0xFFFF3D9A), // wrap around
+            ],
+            stops: const [0.0, 0.33, 0.66, 1.0],
+            transform: GradientRotation(progress * 2 * pi),
+          ).createShader(rect)
+          ..strokeJoin = StrokeJoin.round;
 
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.8
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = true;
-
-    for (int i = 0; i < _segments; i++) {
-      final hue = ((i / _segments) * 360 + progress * 360) % 360;
-      paint.color =
-          HSLColor.fromAHSL(1.0, hue, 0.85, 0.58).toColor();
-
-      final start = startOffset + i * segAngle;
-      // Tiny gap between segments for a broken-arc look
-      canvas.drawArc(rect, start, segAngle * 0.88, false, paint);
-    }
+    final rrect = RRect.fromRectAndRadius(rect, Radius.circular(radius));
+    canvas.drawRRect(rrect, paint);
   }
 
   @override

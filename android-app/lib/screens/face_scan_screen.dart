@@ -1,24 +1,29 @@
 // lib/screens/face_scan_screen.dart
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:video_player/video_player.dart';
 import '../theme.dart';
 
-TextStyle _f(Color color,
-    {FontWeight weight = FontWeight.w400,
-    double size = 14,
-    double spacing = 0,
-    double height = 1.45}) =>
-    TextStyle(
-      fontFamily: 'PlusJakartaSans',
-      color: color,
-      fontWeight: weight,
-      fontSize: size,
-      letterSpacing: spacing,
-      height: height,
-    );
+TextStyle _f(
+  Color color, {
+  FontWeight weight = FontWeight.w400,
+  double size = 14,
+  double spacing = 0,
+  double height = 1.45,
+}) => TextStyle(
+  fontFamily: 'PlusJakartaSans',
+  color: color,
+  fontWeight: weight,
+  fontSize: size,
+  letterSpacing: spacing,
+  height: height,
+);
 
 class FaceScanScreen extends StatefulWidget {
   final String title;
@@ -41,17 +46,54 @@ class _FaceScanScreenState extends State<FaceScanScreen>
   bool _cameraReady = false;
   bool _scanning = false;
   String? _error;
+  bool _cardVisible = false;
+  bool _rotatePreviewQuarterTurn = false;
 
   late AnimationController _pulseCtrl;
+  late VideoPlayerController _videoCtrl;
+  static const _tts = MethodChannel('com.example.automation/tts');
+  final FlutterTts _fallbackTts = FlutterTts();
 
   @override
   void initState() {
     super.initState();
+    _fallbackTts.setLanguage('en-US').catchError((_) {});
+    _fallbackTts.setSpeechRate(0.46).catchError((_) {});
+    _fallbackTts.setPitch(1.0).catchError((_) {});
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
     )..repeat(reverse: true);
+    _videoCtrl =
+        VideoPlayerController.asset('assets/aura.mp4')
+          ..setLooping(true)
+          ..initialize().then((_) {
+            if (mounted) {
+              setState(() {
+                _cardVisible = true;
+              });
+              _videoCtrl.play();
+            }
+          });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _speak(
+        '${widget.title}. ${widget.subtitle}. Tap Capture Face when your face is centered.',
+      );
+    });
     _initCamera();
+  }
+
+  Future<void> _speak(String text) async {
+    try {
+      await _tts.invokeMethod('speak', {'text': text});
+    } catch (_) {
+      try {
+        await _fallbackTts.stop();
+        await _fallbackTts.setSpeechRate(0.46);
+        await _fallbackTts.setPitch(1.0);
+        await _fallbackTts.speak(text);
+      } catch (_) {}
+    }
   }
 
   Future<void> _initCamera() async {
@@ -64,7 +106,8 @@ class _FaceScanScreenState extends State<FaceScanScreen>
       if (permission != PermissionStatus.granted) {
         if (mounted) {
           setState(() {
-            _error = 'Camera permission denied. Please grant camera access in settings.';
+            _error =
+                'Camera permission denied. Please grant camera access in settings.';
             _cameraReady = false;
           });
         }
@@ -84,7 +127,25 @@ class _FaceScanScreenState extends State<FaceScanScreen>
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
       await _cameraController!.initialize();
-      if (mounted) setState(() => _cameraReady = true);
+
+      if (Platform.isAndroid) {
+        await _cameraController!.lockCaptureOrientation(
+          DeviceOrientation.portraitUp,
+        );
+      }
+
+      final previewSize = _cameraController!.value.previewSize;
+      final shouldRotate =
+          Platform.isAndroid &&
+          previewSize != null &&
+          previewSize.width > previewSize.height;
+
+      if (mounted) {
+        setState(() {
+          _rotatePreviewQuarterTurn = shouldRotate;
+          _cameraReady = true;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'Camera error: $e');
     }
@@ -92,36 +153,35 @@ class _FaceScanScreenState extends State<FaceScanScreen>
 
   Future<void> _capture() async {
     if (_scanning || _cameraController == null || !_cameraReady) return;
-    if (!mounted) return;
     setState(() {
       _scanning = true;
       _error = null;
     });
+    print("📸 Capture started");
 
     XFile? file;
     try {
-      file = await _cameraController!.takePicture();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _scanning = false;
-          _error = 'Capture failed. Try again.';
-        });
-      }
-      return;
-    }
+      file = await _cameraController!.takePicture().timeout(
+        const Duration(seconds: 12),
+      );
+      print("✅ Picture taken: ${file.path}");
 
-    try {
-      final bytes = await File(file.path).readAsBytes();
-      final base64Image = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-      if (mounted) {
-        Navigator.of(context).pop(base64Image);
-      }
+      final bytes = await File(
+        file.path,
+      ).readAsBytes().timeout(const Duration(seconds: 8));
+      print("📦 Raw image size: ${bytes.length} bytes");
+
+      final base64Image = base64Encode(bytes);
+      print("✅ Base64 length: ${base64Image.length}");
+
+      if (!mounted) return;
+      Navigator.of(context).pop(base64Image);
     } catch (e) {
+      print("❌ Capture/read error: $e");
       if (mounted) {
         setState(() {
           _scanning = false;
-          _error = 'Failed to read image. Try again.';
+          _error = 'Capture failed. Please try again.';
         });
       }
     }
@@ -131,6 +191,8 @@ class _FaceScanScreenState extends State<FaceScanScreen>
   void dispose() {
     _pulseCtrl.dispose();
     _cameraController?.dispose();
+    _videoCtrl.dispose();
+    _fallbackTts.stop();
     super.dispose();
   }
 
@@ -138,202 +200,299 @@ class _FaceScanScreenState extends State<FaceScanScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AuraTheme.bgBase,
-      body: SafeArea(
-        child: Column(
-          children: [
-            // ── Header ──────────────────────────────────────────────────────
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Row(
-                children: [
-                  GestureDetector(
-                    onTap: () => Navigator.of(context).pop(null),
-                    child: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: AuraTheme.bgElevated,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                            color: Colors.white.withOpacity(0.08)),
-                      ),
-                      child: const Icon(Icons.arrow_back_rounded,
-                          color: AuraTheme.textSecondary, size: 20),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(widget.title,
-                          style: _f(AuraTheme.textPrimary,
-                              size: 18, weight: FontWeight.w600)),
-                      Text(widget.subtitle,
-                          style: _f(AuraTheme.textSecondary, size: 13)),
-                    ],
-                  ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_videoCtrl.value.isInitialized)
+            FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _videoCtrl.value.size.width,
+                height: _videoCtrl.value.size.height,
+                child: VideoPlayer(_videoCtrl),
+              ),
+            ),
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withOpacity(0.2),
+                  Colors.black.withOpacity(0.5),
                 ],
               ),
             ),
-
-            // ── Camera preview in circular frame ────────────────────────────
-            Expanded(
-              child: Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // FIX: CameraPreview must NOT live inside AnimatedBuilder.
-                    // AnimatedBuilder rebuilds its subtree on every animation tick
-                    // (~60×/sec) which races with the Android SurfaceTexture and
-                    // causes the preview to stay black/blank.
-                    // Solution: use a Stack — the animated border sits below,
-                    // the preview sits above in a separate, stable widget slot.
-                    SizedBox(
-                      width: 280,
-                      height: 280,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          // Layer 1 — animated glowing border (rebuilds freely)
-                          AnimatedBuilder(
-                            animation: _pulseCtrl,
-                            builder: (_, __) => Container(
-                              width: 280,
-                              height: 280,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: AuraTheme.pink400.withOpacity(
-                                      0.4 + _pulseCtrl.value * 0.4),
-                                  width: 2.5,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: AuraTheme.pink400.withOpacity(
-                                        0.15 + _pulseCtrl.value * 0.15),
-                                    blurRadius: 30,
-                                    spreadRadius: 8,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-
-                          // Layer 2 — camera preview (stable, never rebuilt by animation)
-                          ClipOval(
-                            child: SizedBox(
-                              width: 274,
-                              height: 274,
-                              child: _error != null
-                                  ? Container(
-                                      color: AuraTheme.bgElevated,
-                                      child: Center(
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(16),
-                                          child: Text(
-                                            _error!,
-                                            style: _f(AuraTheme.error, size: 13),
-                                            textAlign: TextAlign.center,
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  : !_cameraReady
-                                      ? Container(
-                                          color: AuraTheme.bgElevated,
-                                          child: Column(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.center,
-                                            children: [
-                                              const Icon(
-                                                Icons.face_retouching_natural,
-                                                color: AuraTheme.pink400,
-                                                size: 48,
-                                              ),
-                                              const SizedBox(height: 12),
-                                              const SizedBox(
-                                                width: 24,
-                                                height: 24,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                  color: AuraTheme.pink400,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        )
-                                      : FittedBox(
-                                          fit: BoxFit.cover,
-                                          child: SizedBox(
-                                            width: _cameraController!
-                                                .value
-                                                .previewSize!
-                                                .height,
-                                            height: _cameraController!
-                                                .value
-                                                .previewSize!
-                                                .width,
-                                            child: CameraPreview(
-                                                _cameraController!),
-                                          ),
-                                        ),
-                            ),
-                          ),
-                        ],
-                      ),
+          ),
+          SafeArea(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.12, end: _cardVisible ? 0 : 0.12),
+                duration: const Duration(milliseconds: 560),
+                curve: Curves.easeOutCubic,
+                builder:
+                    (context, offsetY, child) => Transform.translate(
+                      offset: Offset(0, offsetY * 220),
+                      child: child,
                     ),
-
-                    const SizedBox(height: 32),
-
-                    if (_scanning)
-                      Column(
-                        children: [
-                          const CircularProgressIndicator(
-                              color: AuraTheme.pink400),
-                          const SizedBox(height: 12),
-                          Text('Scanning...',
-                              style: _f(AuraTheme.textSecondary, size: 14)),
-                        ],
-                      )
-                    else
-                      GestureDetector(
-                        onTap: _capture,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 48, vertical: 16),
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(
-                              colors: [AuraTheme.pink500, AuraTheme.pink700],
-                            ),
-                            borderRadius: BorderRadius.circular(30),
-                            boxShadow: [
-                              BoxShadow(
-                                color: AuraTheme.pink500.withOpacity(0.4),
-                                blurRadius: 16,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            'Scan Face',
-                            style: _f(Colors.white,
-                                size: 15, weight: FontWeight.w600),
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(34),
+                  ),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+                    child: Container(
+                      width: double.infinity,
+                      constraints: BoxConstraints(
+                        minHeight: MediaQuery.of(context).size.height * 0.9,
+                        maxHeight: MediaQuery.of(context).size.height * 0.9,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.14),
+                        border: Border(
+                          top: BorderSide(
+                            color: Colors.white.withOpacity(0.15),
+                            width: 1,
                           ),
                         ),
                       ),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(24, 26, 24, 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Row(
+                              children: [
+                                GestureDetector(
+                                  onTap: () => Navigator.of(context).pop(null),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(9),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.08),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: Colors.white.withOpacity(0.14),
+                                      ),
+                                    ),
+                                    child: const Icon(
+                                      Icons.arrow_back_rounded,
+                                      color: Colors.white,
+                                      size: 18,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Container(
+                              width: 44,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.28),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+                            Text(
+                              widget.title,
+                              style: _f(
+                                AuraTheme.textPrimary,
+                                size: 31,
+                                weight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              widget.subtitle,
+                              style: _f(AuraTheme.textSecondary, size: 13),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 40),
+                            if (_error != null)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 14),
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: AuraTheme.error.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(
+                                      color: AuraTheme.error.withOpacity(0.35),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    _error!,
+                                    style: _f(AuraTheme.error, size: 12),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ),
+                              ),
+                            AnimatedBuilder(
+                              animation: _pulseCtrl,
+                              builder: (_, __) {
+                                final glow = 0.08 + (_pulseCtrl.value * 0.07);
+                                return Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.fromLTRB(
+                                    20,
+                                    18,
+                                    20,
+                                    14,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.04),
+                                    borderRadius: BorderRadius.circular(24),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.14),
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.white.withOpacity(glow),
+                                        blurRadius: 18,
+                                        offset: const Offset(0, 5),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Column(
+                                    children: [
+                                      SizedBox(
+                                        width: 170,
+                                        height: 170,
+                                        child: ClipOval(
+                                          child:
+                                              _error != null
+                                                  ? Container(
+                                                    color: AuraTheme.bgElevated,
+                                                    alignment: Alignment.center,
+                                                    child: Padding(
+                                                      padding:
+                                                          const EdgeInsets.all(
+                                                            14,
+                                                          ),
+                                                      child: Text(
+                                                        _error!,
+                                                        style: _f(
+                                                          AuraTheme.error,
+                                                          size: 12,
+                                                        ),
+                                                        textAlign:
+                                                            TextAlign.center,
+                                                      ),
+                                                    ),
+                                                  )
+                                                  : !_cameraReady
+                                                  ? Container(
+                                                    color: AuraTheme.bgElevated,
+                                                    alignment: Alignment.center,
+                                                    child: const SizedBox(
+                                                      width: 26,
+                                                      height: 26,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                            strokeWidth: 2,
+                                                            color:
+                                                                AuraTheme
+                                                                    .pink400,
+                                                          ),
+                                                    ),
+                                                  )
+                                                  : Builder(
+                                                    builder: (_) {
+                                                      Widget
+                                                      preview = FittedBox(
+                                                        fit: BoxFit.cover,
+                                                        child: SizedBox(
+                                                          width:
+                                                              _cameraController!
+                                                                  .value
+                                                                  .previewSize!
+                                                                  .height,
+                                                          height:
+                                                              _cameraController!
+                                                                  .value
+                                                                  .previewSize!
+                                                                  .width,
+                                                          child: CameraPreview(
+                                                            _cameraController!,
+                                                          ),
+                                                        ),
+                                                      );
 
-                    const SizedBox(height: 16),
-                    Text(
-                      'Your face data is encrypted and never stored as an image.',
-                      style: _f(AuraTheme.textMuted, size: 12),
-                      textAlign: TextAlign.center,
+                                                      if (_rotatePreviewQuarterTurn) {
+                                                        preview = RotatedBox(
+                                                          quarterTurns: 1,
+                                                          child: preview,
+                                                        );
+                                                      }
+
+                                                      return preview;
+                                                    },
+                                                  ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 30),
+                                      Text(
+                                        _scanning
+                                            ? 'Capturing...'
+                                            : 'Position your face in the circle',
+                                        style: _f(AuraTheme.pink400, size: 13),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        'Your face data is encrypted and never stored as an image.',
+                                        style: _f(
+                                          AuraTheme.textSecondary,
+                                          size: 11,
+                                          weight: FontWeight.w500,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 50),
+                            GestureDetector(
+                              onTap:
+                                  (_scanning || !_cameraReady)
+                                      ? null
+                                      : _capture,
+                              child: Container(
+                                width: double.infinity,
+                                height: 54,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.06),
+                                  borderRadius: BorderRadius.circular(28),
+                                  border: Border.all(
+                                    color: AuraTheme.pink400.withOpacity(0.55),
+                                    width: 1.2,
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    _scanning ? 'Capturing...' : 'Capture Face',
+                                    style: _f(
+                                      AuraTheme.pink300,
+                                      size: 15,
+                                      weight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                  ],
+                  ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

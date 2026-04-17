@@ -1,7 +1,7 @@
+// lib/screens/startup_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:video_player/video_player.dart';
-// import '../services/session_store.dart';
 import '../screens/android_login_screen.dart';
 import '../screens/android_onboarding_flow.dart';
 import '../main.dart';
@@ -13,10 +13,13 @@ class StartupScreen extends StatefulWidget {
   State<StartupScreen> createState() => _StartupScreenState();
 }
 
-class _StartupScreenState extends State<StartupScreen> {
+class _StartupScreenState extends State<StartupScreen>
+    with SingleTickerProviderStateMixin {
   late VideoPlayerController _controller;
   late TapGestureRecognizer _termsRecognizer;
   late TapGestureRecognizer _privacyRecognizer;
+  late AnimationController _fadeCtrl;
+  late Animation<double> _fadeAnim;
 
   @override
   void initState() {
@@ -24,11 +27,22 @@ class _StartupScreenState extends State<StartupScreen> {
     _termsRecognizer = TapGestureRecognizer()..onTap = _showTerms;
     _privacyRecognizer = TapGestureRecognizer()..onTap = _showPrivacy;
 
-    _controller = VideoPlayerController.asset('assets/aura1.webm')
+    _fadeCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    );
+    _fadeAnim = CurvedAnimation(
+      parent: _fadeCtrl,
+      curve: const Interval(0.0, 1.0, curve: Curves.easeOut),
+    );
+
+    // REQ 3: aura.mp4 for startup/login
+    _controller = VideoPlayerController.asset('assets/aura.mp4')
       ..setLooping(true)
       ..initialize().then((_) {
         setState(() {});
         _controller.play();
+        _fadeCtrl.forward();
       });
   }
 
@@ -37,6 +51,7 @@ class _StartupScreenState extends State<StartupScreen> {
     _termsRecognizer.dispose();
     _privacyRecognizer.dispose();
     _controller.dispose();
+    _fadeCtrl.dispose();
     super.dispose();
   }
 
@@ -128,8 +143,8 @@ class _StartupScreenState extends State<StartupScreen> {
     return Container(
       height: MediaQuery.of(context).size.height * 0.70,
       decoration: const BoxDecoration(
-        color: Color(0xFF141416),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        color: Color(0xFF111114),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       padding: const EdgeInsets.only(top: 12, left: 24, right: 24, bottom: 24),
       child: Column(
@@ -137,8 +152,8 @@ class _StartupScreenState extends State<StartupScreen> {
         children: [
           Center(
             child: Container(
-              width: 40,
-              height: 4,
+              width: 36,
+              height: 3,
               margin: const EdgeInsets.only(bottom: 24),
               decoration: BoxDecoration(
                 color: Colors.white24,
@@ -153,15 +168,21 @@ class _StartupScreenState extends State<StartupScreen> {
                 title,
                 style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 22,
+                  fontSize: 20,
                   fontWeight: FontWeight.w600,
                   fontFamily: 'PlusJakartaSans',
                 ),
               ),
-              IconButton(
-                padding: EdgeInsets.zero,
-                icon: const Icon(Icons.close_rounded, color: Colors.white54),
-                onPressed: () => Navigator.pop(context),
+              GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.close_rounded, color: Colors.white54, size: 18),
+                ),
               ),
             ],
           ),
@@ -171,8 +192,8 @@ class _StartupScreenState extends State<StartupScreen> {
               child: Text(
                 content,
                 style: TextStyle(
-                  color: Colors.white.withOpacity(0.8),
-                  fontSize: 14,
+                  color: Colors.white.withOpacity(0.75),
+                  fontSize: 13.5,
                   fontFamily: 'PlusJakartaSans',
                   height: 1.7,
                 ),
@@ -191,6 +212,7 @@ class _StartupScreenState extends State<StartupScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
+          // REQ 3: aura.mp4 background
           if (_controller.value.isInitialized)
             FittedBox(
               fit: BoxFit.cover,
@@ -200,107 +222,116 @@ class _StartupScreenState extends State<StartupScreen> {
                 child: VideoPlayer(_controller),
               ),
             ),
-          SafeArea(
-            child: Align(
-              alignment: Alignment.topCenter,
-              child: Padding(
-                padding: const EdgeInsets.only(top: 52),
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: const Duration(milliseconds: 1400),
-                  curve: Curves.easeOut,
-                  builder: (_, v, child) => Opacity(opacity: v, child: child),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
-                        'AURA',
-                        style: TextStyle(
-                          fontFamily: 'PlusJakartaSans',
-                          fontSize: 34,
-                          fontWeight: FontWeight.w500,
-                          letterSpacing: 1.5,
-                          color: Color(0xDDFFFFFF),
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                    ],
-                  ),
-                ),
+          // Gradient overlay
+          Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withOpacity(0.2),
+                  Colors.black.withOpacity(0.55),
+                ],
               ),
             ),
           ),
+
           SafeArea(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 52),
-                child: TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: const Duration(milliseconds: 1600),
-                  curve: const Interval(0.4, 1.0, curve: Curves.easeOut),
-                  builder: (_, v, child) => Opacity(opacity: v, child: child),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      GestureDetector(
-                        onTap: _goToLogin,
-                        child: const _GlassButton(label: 'Sign In'),
-                      ),
-                      const SizedBox(height: 14),
-                      GestureDetector(
-                        onTap: _goToOnboarding,
-                        child: const _OutlineButton(label: 'Create Account'),
-                      ),
-                      const SizedBox(height: 16),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 40),
-                        child: RichText(
-                          textAlign: TextAlign.center,
-                          text: TextSpan(
-                            style: TextStyle(
-                              fontFamily: 'PlusJakartaSans',
-                              fontSize: 11,
-                              height: 1.5,
-                              fontWeight: FontWeight.w500,
-                              letterSpacing: 0.5,
-                              color: Colors.white.withOpacity(0.6),
-                            ),
-                            children: [
-                              const TextSpan(
-                                text: 'By tapping "Get Started", you agree to our\n',
-                              ),
-                              TextSpan(
-                                text: 'Terms of Service',
-                                style: TextStyle(
-                                  decoration: TextDecoration.underline,
-                                  decorationColor:
-                                      Colors.white.withOpacity(0.8),
-                                  color: Colors.white.withOpacity(0.8),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                recognizer: _termsRecognizer,
-                              ),
-                              const TextSpan(text: ' and '),
-                              TextSpan(
-                                text: 'Privacy Policy',
-                                style: TextStyle(
-                                  decoration: TextDecoration.underline,
-                                  decorationColor:
-                                      Colors.white.withOpacity(0.8),
-                                  color: Colors.white.withOpacity(0.8),
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                recognizer: _privacyRecognizer,
-                              ),
-                              const TextSpan(text: '.'),
-                            ],
+            child: FadeTransition(
+              opacity: _fadeAnim,
+              child: Column(
+                children: [
+                  // REQ 2: AURA title always at top, fixed alignment
+                  Padding(
+                    padding: const EdgeInsets.only(top: 44),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'AURA',
+                          style: TextStyle(
+                            fontFamily: 'PlusJakartaSans',
+                            fontSize: 36,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 6,
+                            color: Color(0xEEFFFFFF),
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Text(
+                          'Your intelligent assistant',
+                          style: TextStyle(
+                            fontFamily: 'PlusJakartaSans',
+                            fontSize: 13,
+                            fontWeight: FontWeight.w400,
+                            letterSpacing: 0.5,
+                            color: Colors.white.withOpacity(0.55),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+
+                  const Spacer(),
+
+                  // REQ 1: buttons — same size, sleek
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 0, 28, 12),
+                    child: Column(
+                      children: [
+                        // Sign In — primary filled
+                        _PrimaryButton(
+                          label: 'Sign In',
+                          onTap: _goToLogin,
+                        ),
+                        const SizedBox(height: 12),
+                        // Create Account — ghost outline
+                        _OutlineButton(
+                          label: 'Create Account',
+                          onTap: _goToOnboarding,
+                        ),
+                        const SizedBox(height: 20),
+                        // Legal text
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: RichText(
+                            textAlign: TextAlign.center,
+                            text: TextSpan(
+                              style: TextStyle(
+                                fontFamily: 'PlusJakartaSans',
+                                fontSize: 11,
+                                height: 1.6,
+                                fontWeight: FontWeight.w400,
+                                color: Colors.white.withOpacity(0.45),
+                              ),
+                              children: [
+                                const TextSpan(text: 'By continuing you agree to our '),
+                                TextSpan(
+                                  text: 'Terms',
+                                  style: TextStyle(
+                                    decoration: TextDecoration.underline,
+                                    color: Colors.white.withOpacity(0.7),
+                                  ),
+                                  recognizer: _termsRecognizer,
+                                ),
+                                const TextSpan(text: ' and '),
+                                TextSpan(
+                                  text: 'Privacy Policy',
+                                  style: TextStyle(
+                                    decoration: TextDecoration.underline,
+                                    color: Colors.white.withOpacity(0.7),
+                                  ),
+                                  recognizer: _privacyRecognizer,
+                                ),
+                                const TextSpan(text: '.'),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -310,54 +341,77 @@ class _StartupScreenState extends State<StartupScreen> {
   }
 }
 
-class _GlassButton extends StatelessWidget {
+// REQ 1: Primary button — same width/height as outline button
+class _PrimaryButton extends StatelessWidget {
   final String label;
-  const _GlassButton({required this.label});
+  final VoidCallback onTap;
+  const _PrimaryButton({required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 110, vertical: 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: Colors.white.withOpacity(0.18), width: 0.8),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontFamily: 'PlusJakartaSans',
-          fontSize: 13,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 1.5,
-          color: Color.fromARGB(204, 0, 0, 0),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        height: 56,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(28),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.white.withOpacity(0.15),
+              blurRadius: 20,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: const Text(
+          'Sign In',
+          style: TextStyle(
+            fontFamily: 'PlusJakartaSans',
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.0,
+            color: Color(0xFF0D0B10),
+          ),
         ),
       ),
     );
   }
 }
 
+// REQ 1: Outline button — exact same dimensions as primary
 class _OutlineButton extends StatelessWidget {
   final String label;
-  const _OutlineButton({required this.label});
+  final VoidCallback onTap;
+  const _OutlineButton({required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 110, vertical: 18),
-      decoration: BoxDecoration(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(30),
-        border: Border.all(color: Colors.white.withOpacity(0.45), width: 1.2),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: 'PlusJakartaSans',
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.5,
-          color: Colors.white.withOpacity(0.85),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        height: 56,
+        decoration: BoxDecoration(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(
+            color: Colors.white.withOpacity(0.4),
+            width: 1.2,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            fontFamily: 'PlusJakartaSans',
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.0,
+            color: Colors.white.withOpacity(0.85),
+          ),
         ),
       ),
     );

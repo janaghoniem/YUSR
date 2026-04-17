@@ -6,14 +6,6 @@ MobileReActStrategy — 3-Tier ReAct loop for Android UI automation.
 Tier 1  Deterministic handlers        (0 tokens · 0 ms)
 Tier 2  ChromaDB semantic retrieval   (0 tokens · ~5 ms)
 Tier 3  LLM ReAct loop                (~400 ms/step)
-
-
-
-Debug logging:
-    [CACHE] prefix — all Tier 2 / ChromaDB events
-    [T1]   prefix — Tier 1 decisions
-    [T2]   prefix — Tier 2 decisions
-    [T3]   prefix — Tier 3 LLM decisions
 """
 
 import asyncio
@@ -169,6 +161,11 @@ _INTERNAL_KEYS = {
 }
 
 _SIG_VERIFY_THRESHOLD = 0.50
+
+_UIA2_CONNECT_TIMEOUT = 8.0
+_UIA2_HIERARCHY_TIMEOUT = 12.0
+_UIA2_INITIAL_RETRIES = 3
+_UIA2_INITIAL_RETRY_DELAY = 2.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -723,7 +720,11 @@ class MobileReActStrategy:
 
         logger.info("👁️ Getting initial UI state …")
         await asyncio.sleep(1.5)
-        ui_tree = await self._fetch_ui_tree_with_retries("wait", max_attempts=2, retry_delay=1.5)
+        ui_tree = await self._fetch_ui_tree_with_retries(
+            "wait",
+            max_attempts=_UIA2_INITIAL_RETRIES,
+            retry_delay=_UIA2_INITIAL_RETRY_DELAY,
+        )
         if not ui_tree:
             return self._build_error_result(task.task_id, "Failed to get initial UI tree")
 
@@ -3034,19 +3035,21 @@ Action: {{"action_type": "complete"}}"""
         try:
             device = await asyncio.wait_for(
                 asyncio.to_thread(self._get_u2_device),
-                timeout=3.0,
+                timeout=_UIA2_CONNECT_TIMEOUT,
             )
             xml_dump = await asyncio.wait_for(
                 asyncio.to_thread(device.dump_hierarchy),
-                timeout=self.uiautomator_timeout,
+                timeout=max(self.uiautomator_timeout, _UIA2_HIERARCHY_TIMEOUT),
             )
             ui_tree = self._parse_uia2_tree(xml_dump)
             if ui_tree is not None:
                 return ui_tree
         except asyncio.TimeoutError:
-            logger.debug("UI tree fetch via uiautomator2 client timed out")
+            logger.warning(
+                "[UIA2] UI tree fetch timed out while waiting for device or hierarchy dump"
+            )
         except Exception as e:
-            logger.debug(f"UI tree fetch error via uiautomator2 client: {e}")
+            logger.warning(f"[UIA2] UI tree fetch error via uiautomator2 client: {e}")
 
         try:
             async with httpx.AsyncClient() as client:
@@ -3077,6 +3080,10 @@ Action: {{"action_type": "complete"}}"""
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(retry_delay)
                     continue
+                logger.warning(
+                    f"[UIA2] Could not fetch UI tree after {max_attempts} attempts "
+                    f"(action_type={action_type}, device={self.device_id}, serial={self._u2_serial or 'unresolved'})"
+                )
                 return None
             if len(ui.elements) >= min_elems: return ui
             if attempt < max_attempts - 1: await asyncio.sleep(retry_delay)

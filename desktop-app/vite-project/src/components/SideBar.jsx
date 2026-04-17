@@ -48,7 +48,8 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
               <ul className="chat-list" role="list" aria-labelledby="chat-history-heading">
                 {chats.slice(0, 20).map((chat, idx) => {
                   const sid = chat.session_id || chat.sessionId || chat.id || null;
-                  const title = chat.title || chat.name || `Chat ${idx + 1}`;
+                  const rawTitle = chat.title || chat.name || `Chat ${idx + 1}`;
+                  const title = rawTitle.replace(/^<user_input>([\s\S]*)<\/user_input>$/, "$1").trim();
                   const isActive = currentSessionId === sid;
                   if (!sid) {
                     return (

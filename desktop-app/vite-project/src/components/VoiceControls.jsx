@@ -80,6 +80,12 @@ const VoiceControls = ({
     el.style.height = Math.min(el.scrollHeight, 320) + "px";
   }, [text]);
 
+  useEffect(() => {
+    if (!isExecuting) {
+      setIsPaused(false);
+    }
+  }, [isExecuting]);
+
   /* ── CHAT (text) MODE ─────────────────────────────────────── */
   if (chatMode) {
     const handleSend = () => {
@@ -271,7 +277,7 @@ const VoiceControls = ({
       {/* Floating interrupt controls during execution */}
       {isExecuting && onInterrupt && (
         <div
-          className="interrupt-controls"
+          className="interrupt-controls interrupt-controls-floating"
           role="group"
           aria-label="Execution controls"
         >

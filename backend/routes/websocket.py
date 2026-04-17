@@ -51,6 +51,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await ws_manager.send_to_session(session_id, {
                     "type": "thinking_step",
                     "step": payload.get("step", ""),
+                    "step_key": payload.get("step_key", ""),
                     "language": payload.get("language", "en"),
                 })
             elif payload.get("action") == "thinking_clear":

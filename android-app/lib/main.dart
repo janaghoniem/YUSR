@@ -1,20 +1,26 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 
-import 'package:audioplayers/audioplayers.dart';
+import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_recognition_error.dart' as stt;
+import 'package:speech_to_text/speech_recognition_result.dart' as stt;
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:video_player/video_player.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'screens/startup_screen.dart';
 import 'theme.dart';
 import 'widgets/execution_widget.dart';
 import 'widgets/task_execution_border.dart';
-import 'widgets/voice_spectrum_visualizer.dart';
 
 TextStyle _f(
   Color color, {
@@ -51,12 +57,14 @@ class MyApp extends StatelessWidget {
 // ─── Device Manager ───────────────────────────────────────────────────────────
 class DeviceManager {
   static const String backendUrl = 'http://10.0.2.2:8000';
-  static const String deviceId = 'android_device_1';
-  static const _platform = MethodChannel('com.example.automation/service');
+  static const String deviceId = 'flutter_device';
+  static const MethodChannel _platform = MethodChannel(
+    'com.example.automation/service',
+  );
 
   static Future<bool> registerDevice() async {
     try {
-      final r = await http.post(
+      final response = await http.post(
         Uri.parse('$backendUrl/device/$deviceId/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -67,7 +75,7 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-      return r.statusCode == 200;
+      return response.statusCode == 200;
     } catch (_) {
       return false;
     }
@@ -75,12 +83,12 @@ class DeviceManager {
 
   static Future<bool> sendUITree(Map<String, dynamic> tree) async {
     try {
-      final r = await http.post(
+      final response = await http.post(
         Uri.parse('$backendUrl/device/$deviceId/ui-tree'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(tree),
       );
-      return r.statusCode == 200;
+      return response.statusCode == 200;
     } catch (_) {
       return false;
     }
@@ -88,7 +96,7 @@ class DeviceManager {
 
   static Future<bool> sendStatus() async {
     try {
-      final r = await http.post(
+      final response = await http.post(
         Uri.parse('$backendUrl/device/$deviceId/status'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -98,7 +106,7 @@ class DeviceManager {
           'screen_height': 2340,
         }),
       );
-      return r.statusCode == 200;
+      return response.statusCode == 200;
     } catch (_) {
       return false;
     }
@@ -107,8 +115,12 @@ class DeviceManager {
   static Future<Map<String, dynamic>> getAccessibilityTree() async {
     try {
       final result = await _platform.invokeMethod('getAccessibilityTree');
-      if (result is String) return jsonDecode(result) as Map<String, dynamic>;
-      if (result is Map) return Map<String, dynamic>.from(result);
+      if (result is String) {
+        return jsonDecode(result) as Map<String, dynamic>;
+      }
+      if (result is Map) {
+        return Map<String, dynamic>.from(result);
+      }
       return {};
     } catch (_) {
       return {};
@@ -119,7 +131,7 @@ class DeviceManager {
     Map<String, dynamic> action,
   ) async {
     try {
-      final type = action['action_type'] ?? '';
+      final type = action['action_type']?.toString() ?? '';
       switch (type) {
         case 'click':
           await _platform.invokeMethod('executeAction', {
@@ -127,8 +139,10 @@ class DeviceManager {
             'element_id': action['element_id'],
           });
           await Future.delayed(const Duration(milliseconds: 1500));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
         case 'type':
           await _platform.invokeMethod('executeAction', {
@@ -137,8 +151,10 @@ class DeviceManager {
             'text': action['text'],
           });
           await Future.delayed(const Duration(milliseconds: 500));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
         case 'scroll':
           await _platform.invokeMethod('executeAction', {
@@ -146,8 +162,10 @@ class DeviceManager {
             'direction': action['direction'] ?? 'down',
           });
           await Future.delayed(const Duration(milliseconds: 800));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
         case 'wait':
           await Future.delayed(
@@ -161,8 +179,10 @@ class DeviceManager {
             'action_name': 'HOME',
           });
           await Future.delayed(const Duration(milliseconds: 2500));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
         case 'navigate_back':
           await _platform.invokeMethod('executeAction', {
@@ -170,8 +190,10 @@ class DeviceManager {
             'action_name': 'BACK',
           });
           await Future.delayed(const Duration(milliseconds: 1000));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
         case 'global_action':
           final name =
@@ -181,10 +203,13 @@ class DeviceManager {
             'action_name': name,
           });
           await Future.delayed(const Duration(milliseconds: 1000));
-          final t = await getAccessibilityTree();
-          if (t.isNotEmpty) await sendUITree(t);
+          final tree = await getAccessibilityTree();
+          if (tree.isNotEmpty) {
+            await sendUITree(tree);
+          }
           break;
       }
+
       return {
         'action_id': action['action_id'] ?? 'unknown',
         'success': true,
@@ -247,6 +272,7 @@ class _AutomationDemoState extends State<AutomationDemo>
   bool _showExecutionWidget = false;
   bool _executionWidgetMinimized = true;
   bool _executionNeedsAttention = false;
+  int _executionDismissToken = 0;
   String _executionWidgetTitle = 'Executing task';
   String _executionWidgetSubtitle = 'AURA is running in background';
   int _activeSettingsSection = 0;
@@ -270,6 +296,16 @@ class _AutomationDemoState extends State<AutomationDemo>
   String _draftedMessage = '';
   bool _needsConfirmation = false;
   bool _isThinking = false;
+  bool _speechAvailable = false;
+  bool _alwaysListening = true;
+  bool _awaitingCommandAfterWake = false;
+  bool _manualListeningLatch = false;
+  bool _speechInitialized = false;
+  bool _restartScheduled = false;
+  bool _speechRecoveryInProgress = false;
+  DateTime _lastListenStart = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastListenStop = DateTime.fromMillisecondsSinceEpoch(0);
+  final List<String> _thinkingSteps = [];
   late String _userName;
 
   // REQ 4: accessibility toggle in settings
@@ -278,9 +314,12 @@ class _AutomationDemoState extends State<AutomationDemo>
   HttpServer? _actionServer;
   late AnimationController _pulseCtrl;
   late AnimationController _thinkCtrl;
-  late AnimationController _waveCtrl; // REQ 6: wave visualizer
+  late AnimationController _waveCtrl;
   late VideoPlayerController _videoCtrl;
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  late stt.SpeechToText _speechToText;
+  late FlutterTts _flutterTts;
+  WebSocketChannel? _wsChannel;
+  StreamSubscription? _wsSub;
 
   @override
   void initState() {
@@ -301,6 +340,10 @@ class _AutomationDemoState extends State<AutomationDemo>
     _startActionServer();
     _startPollingForActions();
     _loadAccessibilityPref();
+    _speechToText = stt.SpeechToText();
+    _flutterTts = FlutterTts();
+    _initSpeechAndTts();
+    _connectThinkingSocket();
 
     _pulseCtrl = AnimationController(
       vsync: this,
@@ -315,14 +358,325 @@ class _AutomationDemoState extends State<AutomationDemo>
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
 
-    // REQ 3: aura_calm.webm for main pages
-    _videoCtrl = VideoPlayerController.asset('assets/aura_calm.webm')
+    _videoCtrl = VideoPlayerController.asset('assets/aura_main.mp4')
       ..initialize().then((_) {
         setState(() {});
         _videoCtrl
           ..setLooping(true)
           ..play();
       });
+  }
+
+  Future<void> _initSpeechAndTts() async {
+    final mic = await Permission.microphone.request();
+    final canUseMic = mic.isGranted || mic.isLimited;
+    bool canUseSpeech = true;
+    if (!Platform.isAndroid) {
+      final speech = await Permission.speech.request();
+      canUseSpeech = speech.isGranted || speech.isLimited;
+    }
+
+    if (!canUseMic || !canUseSpeech) {
+      setState(() {
+        _speechAvailable = false;
+        _status = 'Microphone permission is required for voice control.';
+      });
+      return;
+    }
+
+    final available = await _speechToText.initialize(
+      onStatus: _onSpeechStatus,
+      onError: _onSpeechError,
+    );
+
+    await _flutterTts.setLanguage(widget.language == 'ar' ? 'ar-EG' : 'en-US');
+    await _flutterTts.setPitch(1.0);
+    await _flutterTts.setSpeechRate(0.46);
+
+    if (!mounted) return;
+    setState(() {
+      _speechAvailable = available;
+      _speechInitialized = available;
+      _status =
+          available ? _status : 'Speech recognition unavailable on device.';
+    });
+
+    if (available && !_chatMode) {
+      _beginListening();
+    }
+  }
+
+  void _onSpeechStatus(String status) {
+    if (!mounted) return;
+    final lower = status.toLowerCase();
+    if (lower.contains('listening')) {
+      setState(() {
+        _isRecording = true;
+      });
+      if (!_pulseCtrl.isAnimating) {
+        _pulseCtrl.repeat(reverse: true);
+      }
+      return;
+    }
+
+    if (lower.contains('notlistening') || lower.contains('done')) {
+      setState(() {
+        _isRecording = !_chatMode && _alwaysListening;
+      });
+      if (_chatMode) {
+        _pulseCtrl.stop();
+        _pulseCtrl.reset();
+      }
+      _lastListenStop = DateTime.now();
+      _scheduleSpeechRestart();
+    }
+  }
+
+  void _scheduleSpeechRestart() {
+    if (!_alwaysListening ||
+        !_speechInitialized ||
+        _restartScheduled ||
+        _chatMode) {
+      return;
+    }
+    _restartScheduled = true;
+    Future.delayed(const Duration(milliseconds: 650), () async {
+      _restartScheduled = false;
+      if (!mounted || !_alwaysListening || _chatMode) return;
+      await _beginListening();
+    });
+  }
+
+  void _onSpeechError(stt.SpeechRecognitionError err) {
+    if (!mounted) return;
+
+    final msg = err.errorMsg.toLowerCase();
+    final permissionIssue =
+        msg.contains('permission') ||
+        msg.contains('not allowed') ||
+        msg.contains('denied');
+
+    if (permissionIssue) {
+      setState(() {
+        _isRecording = false;
+        _speechAvailable = false;
+        _speechInitialized = false;
+        _status = 'Microphone permission is required for voice control.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isRecording = false;
+      if (_status.toLowerCase().contains('retrying')) {
+        _status = 'Reconnecting voice recognition...';
+      }
+    });
+
+    if (err.permanent) {
+      _speechInitialized = false;
+      unawaited(_recoverSpeechEngine());
+      return;
+    }
+
+    _scheduleSpeechRestart();
+  }
+
+  Future<void> _recoverSpeechEngine() async {
+    if (_speechRecoveryInProgress || !mounted || _chatMode) return;
+    _speechRecoveryInProgress = true;
+    try {
+      try {
+        await _speechToText.stop();
+      } catch (_) {}
+
+      final available = await _speechToText.initialize(
+        onStatus: _onSpeechStatus,
+        onError: _onSpeechError,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _speechAvailable = available;
+        _speechInitialized = available;
+        if (!available) {
+          _status = 'Speech recognition unavailable on device.';
+        }
+      });
+
+      if (available && _alwaysListening && !_chatMode) {
+        await Future.delayed(const Duration(milliseconds: 280));
+        await _beginListening();
+      }
+    } catch (_) {
+      _scheduleSpeechRestart();
+    } finally {
+      _speechRecoveryInProgress = false;
+    }
+  }
+
+  void _onSpeechResult(stt.SpeechRecognitionResult result) {
+    if (!mounted) return;
+    final spoken = result.recognizedWords.trim();
+    if (spoken.isEmpty) return;
+
+    final normalized = spoken.toLowerCase();
+    final wakeDetected =
+        normalized.contains('hey aura') || normalized.contains('hi aura');
+
+    setState(() {
+      _transcribedText = spoken;
+      if (wakeDetected) {
+        _awaitingCommandAfterWake = true;
+      }
+    });
+
+    if (!result.finalResult) return;
+
+    final cleaned =
+        spoken.replaceAll(RegExp(r'(?i)\b(hey aura|hi aura)\b'), '').trim();
+    final shouldSend =
+        cleaned.isNotEmpty &&
+        (_awaitingCommandAfterWake || _manualListeningLatch);
+
+    if (shouldSend) {
+      setState(() {
+        _awaitingCommandAfterWake = false;
+        _manualListeningLatch = false;
+      });
+      _sendTextToBackend(cleaned);
+    }
+  }
+
+  Future<void> _beginListening() async {
+    if (!_speechAvailable ||
+        !_speechInitialized ||
+        _speechToText.isListening ||
+        !_alwaysListening ||
+        _chatMode) {
+      return;
+    }
+    final now = DateTime.now();
+    if (now.difference(_lastListenStart).inMilliseconds < 500) {
+      return;
+    }
+    if (now.difference(_lastListenStop).inMilliseconds < 1200) {
+      return;
+    }
+
+    try {
+      _lastListenStart = now;
+      await _speechToText.listen(
+        onResult: _onSpeechResult,
+        listenFor: const Duration(minutes: 30),
+        pauseFor: const Duration(seconds: 12),
+        partialResults: true,
+        localeId: widget.language == 'ar' ? 'ar_EG' : 'en_US',
+        listenMode: stt.ListenMode.dictation,
+        cancelOnError: false,
+      );
+    } catch (_) {
+      _scheduleSpeechRestart();
+    }
+  }
+
+  Future<void> _connectThinkingSocket() async {
+    await _wsSub?.cancel();
+    await _wsChannel?.sink.close();
+
+    final uri = Uri.parse('ws://10.0.2.2:8000/ws/$_activeSessionId');
+    _wsChannel = WebSocketChannel.connect(uri);
+    _wsSub = _wsChannel!.stream.listen(
+      (event) {
+        try {
+          final payload = jsonDecode(event as String) as Map<String, dynamic>;
+          final type = (payload['type'] ?? '').toString();
+
+          if (type == 'thinking_step') {
+            final step = (payload['step'] ?? '').toString().trim();
+            if (step.isNotEmpty && mounted) {
+              setState(() {
+                _isThinking = true;
+                if (_thinkingSteps.isEmpty || _thinkingSteps.last != step) {
+                  _thinkingSteps.add(step);
+                  if (_thinkingSteps.length > 8) {
+                    _thinkingSteps.removeAt(0);
+                  }
+                }
+              });
+            }
+          } else if (type == 'thinking_clear') {
+            if (mounted) {
+              setState(() {
+                _thinkingSteps.clear();
+                _isThinking = false;
+              });
+            }
+          } else if (type == 'confirmation_needed' ||
+              type == 'clarification_needed') {
+            final question =
+                (payload['question'] ?? payload['text'] ?? '')
+                    .toString()
+                    .trim();
+            if (mounted && question.isNotEmpty) {
+              setState(() {
+                _isThinking = false;
+                _needsConfirmation = true;
+                _confirmationRequest = question;
+                _draftedMessage = (payload['full_content'] ?? '').toString();
+                _responseText = question;
+                _showExecutionWidget = true;
+                _executionWidgetMinimized = false;
+                _executionNeedsAttention = true;
+                _executionWidgetTitle = 'Clarification needed';
+                _executionWidgetSubtitle = _compactForWidget(question);
+              });
+            }
+          }
+        } catch (_) {}
+      },
+      onError: (_) {
+        if (_alwaysListening) {
+          Future.delayed(const Duration(seconds: 1), _connectThinkingSocket);
+        }
+      },
+      onDone: () {
+        if (_alwaysListening) {
+          Future.delayed(const Duration(seconds: 1), _connectThinkingSocket);
+        }
+      },
+      cancelOnError: false,
+    );
+  }
+
+  Future<void> _minimizeToHomeForExecution() async {
+    try {
+      await _platform.invokeMethod('goToHome');
+      return;
+    } catch (_) {}
+
+    try {
+      final intent = AndroidIntent(
+        action: 'android.intent.action.MAIN',
+        category: 'android.intent.category.HOME',
+      );
+      await intent.launch();
+    } catch (_) {}
+  }
+
+  Future<void> _restoreAppAfterExecution() async {
+    try {
+      await _platform.invokeMethod('bringToFront');
+      return;
+    } catch (_) {}
+
+    try {
+      final intent = AndroidIntent(
+        action: 'android.intent.action.MAIN',
+        package: 'com.example.aura_project',
+      );
+      await intent.launch();
+    } catch (_) {}
   }
 
   Future<void> _loadAccessibilityPref() async {
@@ -444,7 +798,13 @@ class _AutomationDemoState extends State<AutomationDemo>
                 : 'Please enable Accessibility Service';
       });
     } catch (e) {
-      setState(() => _status = 'Error: $e');
+      setState(
+        () =>
+            _status = _toUserFriendlyError(
+              e.toString(),
+              fallback: 'Unable to check accessibility status right now.',
+            ),
+      );
     }
   }
 
@@ -459,7 +819,13 @@ class _AutomationDemoState extends State<AutomationDemo>
     try {
       await _platform.invokeMethod('openAccessibilitySettings');
     } catch (e) {
-      setState(() => _status = 'Error: $e');
+      setState(
+        () =>
+            _status = _toUserFriendlyError(
+              e.toString(),
+              fallback: 'Unable to open accessibility settings right now.',
+            ),
+      );
     }
   }
 
@@ -470,10 +836,11 @@ class _AutomationDemoState extends State<AutomationDemo>
       _isLoading = true;
       _isExecuting = true; // REQ 14
       _isThinking = true;
+      _thinkingSteps.clear();
       _status = 'Processing...';
       _responseText = '';
       _showExecutionWidget = true;
-      _executionWidgetMinimized = true;
+      _executionWidgetMinimized = false;
       _executionNeedsAttention = false;
       _executionWidgetTitle = 'Executing task';
       _executionWidgetSubtitle =
@@ -482,6 +849,7 @@ class _AutomationDemoState extends State<AutomationDemo>
               : 'AURA is running in background';
     });
     _thinkCtrl.repeat();
+    unawaited(_minimizeToHomeForExecution());
     try {
       await _sendUITree();
       final resp = await http.post(
@@ -496,10 +864,16 @@ class _AutomationDemoState extends State<AutomationDemo>
         }),
       );
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      final extractedThinking = _extractThinkingSteps(data);
       setState(() {
         _isLoading = false;
         _isExecuting = false; // REQ 14
         _isThinking = false;
+        if (extractedThinking.isNotEmpty) {
+          _thinkingSteps
+            ..clear()
+            ..addAll(extractedThinking);
+        }
         _thinkCtrl.stop();
         _thinkCtrl.reset();
         if (resp.statusCode == 200) {
@@ -541,18 +915,24 @@ class _AutomationDemoState extends State<AutomationDemo>
             _executionNeedsAttention = true;
             _executionWidgetTitle = 'Execution complete';
             _executionWidgetSubtitle = _compactForWidget(_responseText);
+            _scheduleExecutionWidgetDismiss();
+            unawaited(_restoreAppAfterExecution());
           }
           _textCtrl.clear();
           _transcribedText = '';
           _playTTSAudio(_responseText);
         } else {
           _status = 'Error';
-          _responseText = data['error']?.toString() ?? 'Unknown error';
+          _responseText = _toUserFriendlyError(
+            data['error']?.toString() ?? 'Unknown error',
+            fallback: 'Task failed. Please try again.',
+          );
           _showExecutionWidget = true;
           _executionWidgetMinimized = false;
           _executionNeedsAttention = true;
           _executionWidgetTitle = 'Execution failed';
           _executionWidgetSubtitle = _compactForWidget(_responseText);
+          unawaited(_restoreAppAfterExecution());
         }
       });
     } catch (e) {
@@ -563,7 +943,10 @@ class _AutomationDemoState extends State<AutomationDemo>
         _thinkCtrl.stop();
         _thinkCtrl.reset();
         _status = 'Error';
-        _responseText = e.toString();
+        _responseText = _toUserFriendlyError(
+          e.toString(),
+          fallback: 'Something went wrong while processing your request.',
+        );
         _confirmationRequest = '';
         _draftedMessage = '';
         _needsConfirmation = false;
@@ -573,7 +956,21 @@ class _AutomationDemoState extends State<AutomationDemo>
         _executionWidgetTitle = 'Execution failed';
         _executionWidgetSubtitle = _compactForWidget(_responseText);
       });
+      unawaited(_restoreAppAfterExecution());
     }
+  }
+
+  void _scheduleExecutionWidgetDismiss() {
+    final token = ++_executionDismissToken;
+    Future.delayed(const Duration(milliseconds: 1600), () {
+      if (!mounted || token != _executionDismissToken) return;
+      if (_needsConfirmation || _isPaused) return;
+      setState(() {
+        _showExecutionWidget = false;
+        _executionWidgetMinimized = true;
+        _executionNeedsAttention = false;
+      });
+    });
   }
 
   // REQ 16: pause execution
@@ -624,61 +1021,47 @@ class _AutomationDemoState extends State<AutomationDemo>
     try {
       await _platform.invokeMethod('stopExecution');
     } catch (_) {}
+    unawaited(_restoreAppAfterExecution());
   }
 
   Future<void> _playTTSAudio(String text) async {
+    if (text.trim().isEmpty) return;
     try {
-      final r = await http.post(
-        Uri.parse('${DeviceManager.backendUrl}/text-to-speech'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'text': text}),
-      );
-      if (r.statusCode == 200) {
-        final data = jsonDecode(r.body) as Map<String, dynamic>;
-        final bytes = base64.decode(data['audio_data'] as String);
-        final fmt = data['format'] ?? 'mp3';
-        final tmp = File('${Directory.systemTemp.path}/tts.$fmt');
-        await tmp.writeAsBytes(bytes);
-        await _audioPlayer.play(DeviceFileSource(tmp.path));
-        _audioPlayer.onPlayerComplete.listen((_) => tmp.delete());
-      }
+      await _flutterTts.stop();
+      await _flutterTts.speak(text);
     } catch (_) {}
   }
 
   Future<void> _toggleRecording() async {
-    try {
-      if (_isRecording) {
-        _pulseCtrl.stop();
-        _pulseCtrl.reset();
-        setState(() => _status = 'Processing audio...');
-        final result = await _platform.invokeMethod('toggleRecording');
-        if (result is Map && result['status'] == 'success') {
-          final transcript = result['transcript'] ?? '';
-          setState(() {
-            _isRecording = false;
-            _transcribedText = transcript;
-            _status = 'Transcribed: $transcript';
-          });
-          if (transcript.isNotEmpty) await _sendTextToBackend(transcript);
-        }
-      } else {
-        _pulseCtrl.repeat(reverse: true);
-        final result = await _platform.invokeMethod('toggleRecording');
-        if (result is Map && result['status'] == 'recording') {
-          setState(() {
-            _isRecording = true;
-            _status = 'Recording...';
-            _transcribedText = '';
-          });
-        }
-      }
-    } catch (e) {
+    if (!_speechAvailable) {
       setState(() {
-        _isRecording = false;
-        _status = 'Mic error: $e';
+        _status = 'Speech recognition is unavailable on this device.';
       });
-      _pulseCtrl.stop();
-      _pulseCtrl.reset();
+      return;
+    }
+
+    if (_chatMode) {
+      setState(() {
+        _chatMode = false;
+        _manualListeningLatch = true;
+        _awaitingCommandAfterWake = true;
+        _status = 'Listening for your command...';
+      });
+      await _beginListening();
+      return;
+    }
+
+    setState(() {
+      _manualListeningLatch = !_manualListeningLatch;
+      _awaitingCommandAfterWake = _manualListeningLatch;
+      _status =
+          _manualListeningLatch
+              ? 'Listening for your command...'
+              : 'Voice control idle.';
+    });
+
+    if (_manualListeningLatch) {
+      await _beginListening();
     }
   }
 
@@ -842,17 +1225,78 @@ class _AutomationDemoState extends State<AutomationDemo>
     return '${oneLine.substring(0, 77)}...';
   }
 
+  List<String> _extractThinkingSteps(Map<String, dynamic> data) {
+    final raw =
+        data['thinking_steps'] ??
+        data['thinking'] ??
+        data['steps'] ??
+        data['reasoning_steps'] ??
+        (data['meta'] is Map<String, dynamic>
+            ? (data['meta'] as Map<String, dynamic>)['thinking_steps']
+            : null);
+
+    if (raw is List) {
+      return raw
+          .map((e) {
+            if (e is Map<String, dynamic>) {
+              return (e['step'] ?? e['text'] ?? '').toString().trim();
+            }
+            return e.toString().trim();
+          })
+          .where((s) => s.isNotEmpty)
+          .toList();
+    }
+
+    if (raw is String && raw.trim().isNotEmpty) {
+      return [raw.trim()];
+    }
+    return const [];
+  }
+
+  String _toUserFriendlyError(
+    String raw, {
+    String fallback = 'Something went wrong. Please try again.',
+  }) {
+    final message = raw.trim();
+    final lower = message.toLowerCase();
+
+    if (lower.contains('websocket') ||
+        lower.contains('socket') ||
+        lower.contains('connection refused') ||
+        lower.contains('failed host lookup') ||
+        lower.contains('network')) {
+      return 'Connection issue. Please check your network and try again.';
+    }
+    if (lower.contains('timeout')) {
+      return 'The request timed out. Please try again.';
+    }
+    if (lower.contains('permission') || lower.contains('denied')) {
+      return 'Permission is required to continue this action.';
+    }
+    if (lower.contains('exception:')) {
+      return fallback;
+    }
+    if (message.isEmpty) {
+      return fallback;
+    }
+    return message.length > 180 ? fallback : message;
+  }
+
   @override
   void dispose() {
+    _alwaysListening = false;
     _textCtrl.dispose();
     _usernameSettingsCtrl.dispose();
     _emailSettingsCtrl.dispose();
+    _wsSub?.cancel();
+    _wsChannel?.sink.close();
+    _speechToText.stop();
+    _flutterTts.stop();
     _actionServer?.close();
     _pulseCtrl.dispose();
     _thinkCtrl.dispose();
     _waveCtrl.dispose();
     _videoCtrl.dispose();
-    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -866,7 +1310,6 @@ class _AutomationDemoState extends State<AutomationDemo>
         backgroundColor: Colors.black,
         body: Stack(
           children: [
-            // REQ 3: aura_calm.webm background for main pages
             if (_videoCtrl.value.isInitialized)
               SizedBox.expand(
                 child: FittedBox(
@@ -879,31 +1322,97 @@ class _AutomationDemoState extends State<AutomationDemo>
                 ),
               ),
 
-            SafeArea(child: _chatMode ? _buildChatMode() : _buildVoiceMode()),
-            if (!_isSidebarOpen) _buildPinnedSidebarToggle(),
-            _buildSidebar(),
-            if (_showSettings) _buildSettingsModal(),
-            if (_viewingSessionId != null) _buildChatViewerModal(),
-            if (!_showSettings && _viewingSessionId == null)
-              ExecutionWidget(
-                visible: _showExecutionWidget,
-                minimized: _executionWidgetMinimized,
-                isExecuting: _isExecuting,
-                isPaused: _isPaused,
-                needsAttention: _executionNeedsAttention,
-                title: _executionWidgetTitle,
-                subtitle: _executionWidgetSubtitle,
-                animation: _waveCtrl,
-                onToggleMinimize:
-                    () => setState(
-                      () =>
-                          _executionWidgetMinimized =
-                              !_executionWidgetMinimized,
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withOpacity(0.16),
+                        Colors.black.withOpacity(0.44),
+                      ],
                     ),
-                onPauseResume:
-                    () => _isPaused ? _resumeExecution() : _pauseExecution(),
-                onStop: _stopExecution,
+                  ),
+                ),
               ),
+            ),
+
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Center(
+                  child: Opacity(
+                    opacity: 0.18,
+                    child: Image.asset(
+                      'assets/aura_icon_haze.png',
+                      width: 420,
+                      height: 420,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            SafeArea(
+              child: Stack(
+                children: [
+                  AnimatedScale(
+                    duration: const Duration(milliseconds: 220),
+                    scale: _showExecutionWidget ? 0.92 : 1,
+                    curve: Curves.easeOutCubic,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 180),
+                      opacity: _showExecutionWidget ? 0 : 1,
+                      curve: Curves.easeOut,
+                      child: IgnorePointer(
+                        ignoring: _showExecutionWidget,
+                        child: Column(
+                          children: [
+                            _buildHeader(),
+                            Expanded(
+                              child:
+                                  _chatMode
+                                      ? _buildChatMode()
+                                      : _buildVoiceMode(),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_showExecutionWidget)
+                    ExecutionWidget(
+                      visible: _showExecutionWidget,
+                      minimized: _executionWidgetMinimized,
+                      isExecuting: _isExecuting,
+                      isPaused: _isPaused,
+                      needsAttention: _executionNeedsAttention,
+                      title: _executionWidgetTitle,
+                      subtitle: _executionWidgetSubtitle,
+                      animation: _waveCtrl,
+                      onToggleMinimize:
+                          () => setState(
+                            () =>
+                                _executionWidgetMinimized =
+                                    !_executionWidgetMinimized,
+                          ),
+                      onPauseResume:
+                          () =>
+                              _isPaused
+                                  ? _resumeExecution()
+                                  : _pauseExecution(),
+                      onStop: _stopExecution,
+                    ),
+                ],
+              ),
+            ),
+
+            if (!_showExecutionWidget) _buildSidebar(),
+            if (!_showExecutionWidget && _showSettings) _buildSettingsModal(),
+            if (!_showExecutionWidget && _viewingSessionId != null)
+              _buildChatViewerModal(),
           ],
         ),
       ),
@@ -1053,9 +1562,6 @@ class _AutomationDemoState extends State<AutomationDemo>
   Widget _buildChatMode() {
     return Column(
       children: [
-        // REQ 13: HeaderContent-style header
-        _buildHeader(),
-
         // Chat content area with frosted glass
         Expanded(
           child: Container(
@@ -1072,11 +1578,25 @@ class _AutomationDemoState extends State<AutomationDemo>
               child: BackdropFilter(
                 filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
                 child: Container(
-                  color: AuraTheme.bgSurface.withOpacity(0.4),
+                  color: AuraTheme.bgSurface.withOpacity(0.28),
                   padding: const EdgeInsets.all(20),
                   child: ListView(
                     physics: const BouncingScrollPhysics(),
                     children: [
+                      if (_transcribedText.isEmpty &&
+                          _responseText.isEmpty &&
+                          !_isThinking) ...[
+                        Text(
+                          _greeting(),
+                          style: _f(
+                            AuraTheme.textSecondary,
+                            size: 12,
+                            weight: FontWeight.w600,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 10),
+                      ],
                       if (_transcribedText.isEmpty &&
                           _responseText.isEmpty) ...[
                         const SizedBox(height: 20),
@@ -1102,6 +1622,64 @@ class _AutomationDemoState extends State<AutomationDemo>
                         const SizedBox(height: 12),
                       ],
 
+                      if (_thinkingSteps.isNotEmpty) ...[
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.04),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.08),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Thinking steps',
+                                style: _f(
+                                  AuraTheme.pink300,
+                                  size: 11,
+                                  weight: FontWeight.w700,
+                                  spacing: 0.8,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              ..._thinkingSteps.map(
+                                (step) => Padding(
+                                  padding: const EdgeInsets.only(bottom: 6),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '• ',
+                                        style: _f(
+                                          AuraTheme.textSecondary,
+                                          size: 12,
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Text(
+                                          step,
+                                          style: _f(
+                                            AuraTheme.textSecondary,
+                                            size: 12,
+                                            height: 1.4,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+
                       if (_responseText.isNotEmpty && !_isThinking) ...[
                         _chatBubble(_responseText, isUser: false),
                       ],
@@ -1122,17 +1700,10 @@ class _AutomationDemoState extends State<AutomationDemo>
     );
   }
 
-  // REQ 13: contextual header like desktop
+  // Shared header for both voice and text modes.
   Widget _buildHeader() {
-    final hour = DateTime.now().hour;
-    final emoji =
-        hour < 12
-            ? '🌅'
-            : hour < 18
-            ? '☀️'
-            : '🌙';
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
       child: Row(
         children: [
           GestureDetector(
@@ -1142,10 +1713,6 @@ class _AutomationDemoState extends State<AutomationDemo>
           Expanded(
             child: Column(
               children: [
-                Text(
-                  '${_greeting()} $emoji',
-                  style: _f(AuraTheme.textSecondary, size: 13),
-                ),
                 Text(
                   'AURA',
                   style: _f(
@@ -1177,40 +1744,289 @@ class _AutomationDemoState extends State<AutomationDemo>
     child: Icon(icon, color: AuraTheme.textSecondary, size: 20),
   );
 
-  Widget _buildPinnedSidebarToggle() {
-    return Positioned(
-      left: 12,
-      top: 120,
-      child: GestureDetector(
-        onTap: () => setState(() => _isSidebarOpen = true),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 260),
-              curve: Curves.easeOutCubic,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.28),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white.withOpacity(0.22)),
-                boxShadow: [
-                  BoxShadow(
-                    color: AuraTheme.pink500.withOpacity(0.16),
-                    blurRadius: 14,
-                    offset: const Offset(0, 5),
+  Widget _buildVoiceMode() {
+    final liveText =
+        _needsConfirmation
+            ? _confirmationRequest.trim()
+            : (_isThinking
+                ? 'Processing the current task...'
+                : (_status.isNotEmpty
+                    ? _status
+                    : 'Ready for your next command.'));
+    final transcriptText =
+        _transcribedText.isNotEmpty
+            ? _transcribedText
+            : (_isRecording ? 'Listening for your request...' : '');
+    final resultText =
+        _responseText.isNotEmpty
+            ? _responseText
+            : (_draftedMessage.isNotEmpty ? _draftedMessage : '');
+    final wakeDetected = _transcribedText.toLowerCase().contains('hey aura');
+    final listening = _isRecording || wakeDetected;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 18),
+      child: Column(
+        children: [
+          Expanded(
+            flex: 3,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 28,
+              sigma: 10,
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        _isThinking
+                            ? Icons.auto_awesome_rounded
+                            : (_needsConfirmation
+                                ? Icons.fact_check_rounded
+                                : Icons.notes_rounded),
+                        color: AuraTheme.pink300,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _needsConfirmation ? 'Live Review' : 'Live Context',
+                        style: _f(
+                          AuraTheme.pink300,
+                          size: 11,
+                          weight: FontWeight.w700,
+                          spacing: 1,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      physics: const BouncingScrollPhysics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          TypewriterText(
+                            text: liveText,
+                            style: _f(
+                              AuraTheme.textPrimary,
+                              size: 19,
+                              height: 1.42,
+                            ),
+                            maxLines: 30,
+                          ),
+                          if (transcriptText.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Text(
+                              'Transcription',
+                              style: _f(
+                                AuraTheme.textSecondary,
+                                size: 10,
+                                weight: FontWeight.w700,
+                                spacing: 1,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            TypewriterText(
+                              text: transcriptText,
+                              style: _f(
+                                AuraTheme.textPrimary,
+                                size: 15,
+                                height: 1.5,
+                              ),
+                              maxLines: 30,
+                            ),
+                          ],
+                          if (resultText.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Text(
+                              'Result',
+                              style: _f(
+                                AuraTheme.textSecondary,
+                                size: 10,
+                                weight: FontWeight.w700,
+                                spacing: 1,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            TypewriterText(
+                              text: resultText,
+                              style: _f(
+                                AuraTheme.textPrimary,
+                                size: 15,
+                                height: 1.5,
+                              ),
+                              maxLines: 30,
+                            ),
+                          ],
+                          if (_thinkingSteps.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Text(
+                              'Thinking Steps',
+                              style: _f(
+                                AuraTheme.textSecondary,
+                                size: 10,
+                                weight: FontWeight.w700,
+                                spacing: 1,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            ..._thinkingSteps.map(
+                              (step) => Padding(
+                                padding: const EdgeInsets.only(bottom: 6),
+                                child: TypewriterText(
+                                  text: '• $step',
+                                  style: _f(
+                                    AuraTheme.textSecondary,
+                                    size: 13,
+                                    height: 1.45,
+                                  ),
+                                  maxLines: 4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ),
-              child: const Icon(
-                Icons.menu_rounded,
-                color: Colors.white,
-                size: 20,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            flex: 2,
+            child: _buildVoiceGlassContainer(
+              borderRadius: 34,
+              sigma: 9,
+              active: listening,
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    listening ? 'Listening' : 'Voice Control',
+                    style: _f(
+                      listening ? AuraTheme.pink300 : AuraTheme.textSecondary,
+                      size: 12,
+                      weight: FontWeight.w700,
+                      spacing: 1,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _voiceControlButton(
+                        icon: Icons.close_rounded,
+                        onTap: () {
+                          setState(() {
+                            _isRecording = false;
+                            _transcribedText = '';
+                            _chatMode = true;
+                            _isSidebarOpen = false;
+                          });
+                          _speechToText.stop();
+                          _lastListenStop = DateTime.now();
+                          _pulseCtrl.stop();
+                          _pulseCtrl.reset();
+                        },
+                        color: AuraTheme.textSecondary,
+                      ),
+                      AnimatedBuilder(
+                        animation: _pulseCtrl,
+                        builder: (_, __) {
+                          final glow =
+                              listening
+                                  ? (0.18 + (_pulseCtrl.value * 0.34))
+                                  : 0.0;
+                          return _voiceControlButton(
+                            icon:
+                                _isRecording
+                                    ? Icons.graphic_eq_rounded
+                                    : Icons.mic_rounded,
+                            onTap: _toggleRecording,
+                            size: 74,
+                            gradient:
+                                listening
+                                    ? const LinearGradient(
+                                      colors: [
+                                        AuraTheme.pink400,
+                                        AuraTheme.pink700,
+                                      ],
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                    )
+                                    : null,
+                            color:
+                                listening
+                                    ? Colors.white
+                                    : AuraTheme.textPrimary,
+                            borderColor:
+                                listening
+                                    ? AuraTheme.pink300.withOpacity(0.42)
+                                    : Colors.white.withOpacity(0.12),
+                            boxShadow: [
+                              if (listening)
+                                BoxShadow(
+                                  color: AuraTheme.pink400.withOpacity(glow),
+                                  blurRadius: 22,
+                                  spreadRadius: 6,
+                                ),
+                            ],
+                          );
+                        },
+                      ),
+                      _voiceControlButton(
+                        icon: Icons.settings_rounded,
+                        onTap: () => setState(() => _showSettings = true),
+                        color: AuraTheme.textSecondary,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    listening
+                        ? 'Listening for your command...'
+                        : 'Say "hey aura" or tap the mic.',
+                    style: _f(AuraTheme.textMuted, size: 11, height: 1.35),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _voiceControlButton({
+    required IconData icon,
+    required VoidCallback onTap,
+    double size = 52,
+    Color? color,
+    Color? borderColor,
+    Gradient? gradient,
+    List<BoxShadow>? boxShadow,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: gradient,
+          color: gradient == null ? Colors.white.withOpacity(0.05) : null,
+          border: Border.all(
+            color: borderColor ?? Colors.white.withOpacity(0.1),
+          ),
+          boxShadow: boxShadow,
         ),
+        child: Icon(icon, color: color ?? Colors.white, size: size * 0.44),
       ),
     );
   }
@@ -1380,6 +2196,8 @@ class _AutomationDemoState extends State<AutomationDemo>
   }
 
   Widget _buildTextInputBar() {
+    final voiceActive =
+        _isRecording || _manualListeningLatch || _awaitingCommandAfterWake;
     return ClipRRect(
       borderRadius: BorderRadius.circular(30),
       child: BackdropFilter(
@@ -1389,7 +2207,21 @@ class _AutomationDemoState extends State<AutomationDemo>
           decoration: BoxDecoration(
             color: Colors.black.withOpacity(0.45),
             borderRadius: BorderRadius.circular(30),
-            border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
+            border: Border.all(
+              color:
+                  voiceActive
+                      ? AuraTheme.pink400.withOpacity(0.65)
+                      : Colors.white.withOpacity(0.1),
+              width: voiceActive ? 1.4 : 1,
+            ),
+            boxShadow: [
+              if (voiceActive)
+                BoxShadow(
+                  color: AuraTheme.pink400.withOpacity(0.22),
+                  blurRadius: 20,
+                  spreadRadius: 1,
+                ),
+            ],
           ),
           child: Row(
             children: [
@@ -1399,68 +2231,64 @@ class _AutomationDemoState extends State<AutomationDemo>
                   controller: _textCtrl,
                   style: _f(AuraTheme.textPrimary, size: 15),
                   decoration: InputDecoration(
-                    hintText: 'Ask anything...',
-                    hintStyle: _f(AuraTheme.textMuted, size: 15),
+                    hintText: 'Type your command...',
+                    hintStyle: _f(AuraTheme.textMuted, size: 14),
                     border: InputBorder.none,
-                    isDense: true,
                   ),
-                  onSubmitted: (val) {
-                    if (val.isNotEmpty) {
-                      _sendTextToBackend(val);
-                      _textCtrl.clear();
-                    }
-                  },
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: _sendTextToBackend,
                 ),
               ),
-              const SizedBox(width: 8),
               GestureDetector(
-                onTap: () {
-                  if (_textCtrl.text.isNotEmpty) {
-                    _sendTextToBackend(_textCtrl.text);
-                    _textCtrl.clear();
-                  }
-                },
+                onTap: _toggleRecording,
                 child: Container(
+                  margin: const EdgeInsets.only(right: 8),
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
+                    color:
+                        voiceActive
+                            ? AuraTheme.pink500.withOpacity(0.85)
+                            : Colors.white.withOpacity(0.09),
                     shape: BoxShape.circle,
-                    gradient: const LinearGradient(
-                      colors: [AuraTheme.pink500, AuraTheme.pink700],
+                    border: Border.all(
+                      color:
+                          voiceActive
+                              ? AuraTheme.pink300.withOpacity(0.7)
+                              : Colors.white.withOpacity(0.15),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: AuraTheme.pink500.withOpacity(0.4),
-                        blurRadius: 12,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
                   ),
-                  child: const Icon(
-                    Icons.arrow_upward_rounded,
+                  child: Icon(
+                    voiceActive ? Icons.graphic_eq_rounded : Icons.mic_rounded,
                     color: Colors.white,
                     size: 18,
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
               GestureDetector(
                 onTap:
-                    () => setState(() {
-                      _chatMode = false;
-                      _toggleRecording();
-                    }),
+                    _isLoading
+                        ? null
+                        : () => _sendTextToBackend(_textCtrl.text),
                 child: Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: AuraTheme.pink400.withOpacity(0.15),
-                    border: Border.all(
-                      color: AuraTheme.pink400.withOpacity(0.3),
+                    color: AuraTheme.pink500.withOpacity(
+                      _isLoading ? 0.35 : 0.85,
                     ),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: AuraTheme.pink500.withOpacity(0.24),
+                        blurRadius: 12,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
                   ),
-                  child: const Icon(
-                    Icons.mic_rounded,
-                    color: AuraTheme.pink400,
+                  child: Icon(
+                    _isLoading
+                        ? Icons.hourglass_top_rounded
+                        : Icons.send_rounded,
+                    color: Colors.white,
                     size: 18,
                   ),
                 ),
@@ -1468,222 +2296,6 @@ class _AutomationDemoState extends State<AutomationDemo>
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildVoiceMode() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
-      child: Column(
-        children: [
-          // REQ 13: header on voice mode too
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              GestureDetector(
-                onTap: () => setState(() => _isSidebarOpen = true),
-                child: _iconBtn(Icons.menu_rounded),
-              ),
-              Column(
-                children: [
-                  Text(_greeting(), style: _f(AuraTheme.textMuted, size: 11)),
-                  Text(
-                    'AURA',
-                    style: _f(
-                      AuraTheme.textPrimary,
-                      size: 15,
-                      weight: FontWeight.w700,
-                      spacing: 2,
-                    ),
-                  ),
-                ],
-              ),
-              GestureDetector(
-                onTap: () => setState(() => _showSettings = true),
-                child: _iconBtn(Icons.settings_rounded),
-              ),
-            ],
-          ),
-
-          Expanded(
-            flex: 2,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                AnimatedBuilder(
-                  animation: _pulseCtrl,
-                  builder: (context, child) {
-                    return Transform.scale(
-                      scale: 0.9 + (_pulseCtrl.value * 0.1),
-                      child: Image.asset(
-                        'assets/aura_icon_haze.png',
-                        width: 72,
-                        height: 72,
-                        fit: BoxFit.contain,
-                      ),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 8),
-
-          _buildVoiceGlassContainer(
-            borderRadius: 28,
-            sigma: 18,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            child: SizedBox(height: 170, child: _buildMiddleContextPanel()),
-          ),
-
-          const SizedBox(height: 10),
-
-          // Controls pill
-          _buildVoiceGlassContainer(
-            borderRadius: 50,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                GestureDetector(
-                  onTap:
-                      () => setState(() {
-                        _chatMode = true;
-                        if (_isRecording) _toggleRecording();
-                      }),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    color: Colors.transparent,
-                    child: const Icon(
-                      Icons.close_rounded,
-                      color: AuraTheme.textSecondary,
-                      size: 22,
-                    ),
-                  ),
-                ),
-                AnimatedBuilder(
-                  animation: _pulseCtrl,
-                  builder: (context, child) {
-                    String status = 'Ready';
-                    if (_isRecording) status = 'Listening...';
-                    if (_isThinking) status = 'Processing...';
-                    return Text(
-                      status,
-                      style: _f(
-                        _isRecording
-                            ? AuraTheme.pink400
-                            : AuraTheme.textSecondary,
-                        size: 15,
-                        weight: FontWeight.w500,
-                      ),
-                    );
-                  },
-                ),
-                GestureDetector(
-                  onTap: () => setState(() => _showSettings = true),
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    color: Colors.transparent,
-                    child: const Icon(
-                      Icons.settings_rounded,
-                      color: AuraTheme.textSecondary,
-                      size: 22,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 12),
-
-          Expanded(
-            flex: 4,
-            child: _buildVoiceGlassContainer(
-              borderRadius: 32,
-              child: Column(
-                children: [
-                  Expanded(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                      alignment: Alignment.center,
-                      child: SingleChildScrollView(
-                        physics: const BouncingScrollPhysics(),
-                        child: Text(
-                          _transcribedText.isEmpty && _isRecording
-                              ? 'Speak now...'
-                              : (_transcribedText.isEmpty && !_isRecording
-                                  ? 'Ready'
-                                  : _transcribedText),
-                          style: _f(
-                            AuraTheme.textPrimary,
-                            size: 24,
-                            weight: FontWeight.w300,
-                            height: 1.4,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-
-                  // REQ 6: aesthetic wave visualizer
-                  _buildWaveVisualizer(),
-                  const SizedBox(height: 20),
-
-                  // Mic button
-                  GestureDetector(
-                    onTap: _toggleRecording,
-                    child: AnimatedBuilder(
-                      animation: _pulseCtrl,
-                      builder: (context, child) {
-                        return Container(
-                          padding: const EdgeInsets.all(18),
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient:
-                                _isRecording
-                                    ? const LinearGradient(
-                                      colors: [
-                                        AuraTheme.pink400,
-                                        AuraTheme.pink700,
-                                      ],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    )
-                                    : null,
-                            color: _isRecording ? null : AuraTheme.bgMuted,
-                            boxShadow: [
-                              BoxShadow(
-                                color: (_isRecording
-                                        ? AuraTheme.pink500
-                                        : Colors.transparent)
-                                    .withOpacity(0.4 * _pulseCtrl.value),
-                                blurRadius: 24,
-                                spreadRadius: 12,
-                              ),
-                            ],
-                          ),
-                          child: Icon(
-                            _isRecording
-                                ? Icons.stop_rounded
-                                : Icons.mic_rounded,
-                            color: AuraTheme.textPrimary,
-                            size: 30,
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1795,28 +2407,32 @@ class _AutomationDemoState extends State<AutomationDemo>
     );
   }
 
-  // REQ 6: VoiceControls.jsx-style wave visualizer
-  Widget _buildWaveVisualizer() {
-    return VoiceSpectrumVisualizer(
-      animation: _waveCtrl,
-      active: _isRecording || _isThinking,
-      bars: 22,
-      height: 52,
-      color: AuraTheme.pink400,
-    );
-  }
-
   Widget _buildVoiceGlassContainer({
     required Widget child,
     double borderRadius = 24,
-    double sigma = 20,
-    EdgeInsetsGeometry padding = const EdgeInsets.all(20),
+    double sigma = 9,
+    bool active = false,
+    EdgeInsetsGeometry padding = const EdgeInsets.all(18),
   }) {
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        border: Border.all(color: Colors.white.withOpacity(0.08), width: 1),
+        border: Border.all(
+          color:
+              active
+                  ? AuraTheme.pink400.withOpacity(0.58)
+                  : Colors.white.withOpacity(0.07),
+          width: active ? 1.3 : 1,
+        ),
         borderRadius: BorderRadius.circular(borderRadius),
+        boxShadow: [
+          if (active)
+            BoxShadow(
+              color: AuraTheme.pink400.withOpacity(0.22),
+              blurRadius: 24,
+              spreadRadius: 2,
+            ),
+        ],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(borderRadius),
@@ -1824,13 +2440,31 @@ class _AutomationDemoState extends State<AutomationDemo>
           filter: ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
           child: Container(
             padding: padding,
-            color: AuraTheme.bgSurface.withOpacity(0.4),
+            color: AuraTheme.bgSurface.withOpacity(0.16),
             child: child,
           ),
         ),
       ),
     );
   }
+
+  Widget _buildHeaderBadge(String label, {Color? color}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    decoration: BoxDecoration(
+      color: (color ?? Colors.white).withOpacity(0.06),
+      borderRadius: BorderRadius.circular(999),
+      border: Border.all(color: (color ?? Colors.white).withOpacity(0.08)),
+    ),
+    child: Text(
+      label,
+      style: _f(
+        (color ?? Colors.white).withOpacity(0.78),
+        size: 10,
+        weight: FontWeight.w700,
+        spacing: 0.9,
+      ),
+    ),
+  );
 
   Widget _glassButton({
     required IconData icon,
@@ -1965,6 +2599,9 @@ class _AutomationDemoState extends State<AutomationDemo>
                               _chatMode = true;
                               _isSidebarOpen = false;
                             });
+                            _speechToText.stop();
+                            _lastListenStop = DateTime.now();
+                            unawaited(_connectThinkingSocket());
                             _loadChats();
                           },
                           child: _sidebarRow(Icons.edit_square, 'New chat'),
@@ -2052,6 +2689,12 @@ class _AutomationDemoState extends State<AutomationDemo>
                                                   _chatMode = true;
                                                   _isSidebarOpen = false;
                                                 });
+                                                _speechToText.stop();
+                                                _lastListenStop =
+                                                    DateTime.now();
+                                                unawaited(
+                                                  _connectThinkingSocket(),
+                                                );
                                               },
                                               child: Padding(
                                                 padding:
@@ -2116,23 +2759,11 @@ class _AutomationDemoState extends State<AutomationDemo>
 
                       Divider(color: Colors.white.withOpacity(0.07)),
 
-                      // Settings + Logout
+                      // Sidebar actions
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                         child: Column(
                           children: [
-                            GestureDetector(
-                              onTap:
-                                  () => setState(() {
-                                    _showSettings = true;
-                                    _isSidebarOpen = false;
-                                  }),
-                              child: _sidebarRow(
-                                Icons.settings_rounded,
-                                'Settings',
-                              ),
-                            ),
-                            const SizedBox(height: 6),
                             // REQ 10: logout button
                             GestureDetector(
                               onTap: () {
@@ -2142,7 +2773,7 @@ class _AutomationDemoState extends State<AutomationDemo>
                               child: _sidebarRow(
                                 Icons.logout_rounded,
                                 'Log out',
-                                color: Colors.redAccent.withOpacity(0.8),
+                                color: Colors.redAccent,
                               ),
                             ),
                           ],
@@ -2267,17 +2898,25 @@ class _AutomationDemoState extends State<AutomationDemo>
   Widget _sidebarRow(IconData icon, String label, {Color? color}) => Container(
     padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 14),
     decoration: BoxDecoration(
-      color: Colors.white.withOpacity(0.03),
+      color: AuraTheme.pink900.withOpacity(0.14),
       borderRadius: BorderRadius.circular(12),
+      border: Border.all(
+        color: (color ?? AuraTheme.pink300).withOpacity(0.55),
+        width: 1,
+      ),
     ),
     child: Row(
       children: [
-        Icon(icon, color: (color ?? Colors.white).withOpacity(0.8), size: 16),
+        Icon(
+          icon,
+          color: (color ?? AuraTheme.pink300).withOpacity(0.9),
+          size: 16,
+        ),
         const SizedBox(width: 12),
         Text(
           label,
           style: _f(
-            (color ?? Colors.white).withOpacity(0.85),
+            (color ?? AuraTheme.pink300).withOpacity(0.95),
             size: 13,
             weight: FontWeight.w500,
           ),
@@ -2449,20 +3088,20 @@ class _AutomationDemoState extends State<AutomationDemo>
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                     colors: [
-                      Colors.white.withOpacity(0.08),
-                      Colors.white.withOpacity(0.02),
+                      const Color(0xFF1B212B).withOpacity(0.62),
+                      const Color(0xFF11161D).withOpacity(0.54),
                     ],
                   ),
                   borderRadius: BorderRadius.circular(28),
                   border: Border.all(
-                    color: Colors.white.withOpacity(0.2),
+                    color: Colors.white.withOpacity(0.12),
                     width: 1.2,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: AuraTheme.pink500.withOpacity(0.15),
-                      blurRadius: 26,
-                      spreadRadius: 2,
+                      color: Colors.black.withOpacity(0.28),
+                      blurRadius: 24,
+                      spreadRadius: 0,
                       offset: const Offset(0, 10),
                     ),
                   ],
@@ -2673,10 +3312,22 @@ class _AutomationDemoState extends State<AutomationDemo>
                 ),
               ),
             ),
-          _actionBtn(
-            _profileSaving ? 'Saving...' : 'Save Changes',
-            AuraTheme.pink500,
-            _profileSaving ? () {} : _saveProfile,
+          GestureDetector(
+            onTap: _profileSaving ? () {} : _saveProfile,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: AuraTheme.pink900.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AuraTheme.pink300.withOpacity(0.72)),
+              ),
+              child: Text(
+                _profileSaving ? 'Saving...' : 'Save Changes',
+                style: _f(AuraTheme.pink300, size: 14, weight: FontWeight.w700),
+              ),
+            ),
           ),
           const SizedBox(height: 20),
         ],
@@ -2787,22 +3438,22 @@ class _AutomationDemoState extends State<AutomationDemo>
             subtitle: 'Allows AURA to interact with other apps on your screen.',
             value: _accessibilityEnabled,
             onChanged: (val) => _saveAccessibilityPref(val),
-            accent: AuraTheme.pink400,
+            accent: const Color(0xFF7FA5C9),
           ),
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              color: AuraTheme.pink900.withOpacity(0.15),
+              color: Colors.white.withOpacity(0.04),
               borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AuraTheme.pink400.withOpacity(0.2)),
+              border: Border.all(color: Colors.white.withOpacity(0.1)),
             ),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Icon(
                   Icons.info_outline_rounded,
-                  color: AuraTheme.pink300,
+                  color: AuraTheme.textSecondary,
                   size: 16,
                 ),
                 const SizedBox(width: 10),
@@ -2821,7 +3472,7 @@ class _AutomationDemoState extends State<AutomationDemo>
               children: [
                 _actionBtn(
                   'Open Accessibility Settings',
-                  AuraTheme.pink500,
+                  const Color(0xFF4A5A70),
                   _openAccessibilitySettings,
                 ),
                 const SizedBox(height: 8),
@@ -2993,6 +3644,45 @@ class _AutomationDemoState extends State<AutomationDemo>
           style: _f(Colors.white, size: 14, weight: FontWeight.w600),
         ),
       ),
+    );
+  }
+}
+
+class TypewriterText extends StatelessWidget {
+  final String text;
+  final TextStyle style;
+  final Duration duration;
+  final int maxLines;
+  final TextAlign textAlign;
+
+  const TypewriterText({
+    super.key,
+    required this.text,
+    required this.style,
+    this.duration = const Duration(milliseconds: 700),
+    this.maxLines = 8,
+    this.textAlign = TextAlign.left,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final source = text.trim().isEmpty ? ' ' : text;
+    return TweenAnimationBuilder<double>(
+      key: ValueKey(source),
+      tween: Tween(begin: 0, end: 1),
+      duration: duration,
+      curve: Curves.easeOutCubic,
+      builder: (context, value, _) {
+        final length = (source.length * value).clamp(0, source.length).round();
+        final display = source.substring(0, length);
+        return Text(
+          display.isEmpty ? ' ' : display,
+          style: style,
+          maxLines: maxLines,
+          textAlign: textAlign,
+          overflow: TextOverflow.ellipsis,
+        );
+      },
     );
   }
 }

@@ -40,44 +40,47 @@ class ExecutionWidget extends StatelessWidget {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
 
     return Positioned(
-      right: 12,
+      left: 0,
+      right: 0,
       bottom: max(12, bottomInset + 12),
       child: SafeArea(
-        child: AnimatedSwitcher(
-          duration: const Duration(milliseconds: 220),
-          switchInCurve: Curves.easeOutCubic,
-          switchOutCurve: Curves.easeInCubic,
-          child:
-              minimized
-                  ? _buildPill(context, key: const ValueKey('pill'))
-                  : _buildCard(context, key: const ValueKey('card')),
+        child: Center(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 220),
+            switchInCurve: Curves.easeOutCubic,
+            switchOutCurve: Curves.easeInCubic,
+            child:
+                minimized
+                    ? _buildPill(context, key: const ValueKey('pill'))
+                    : _buildCard(context, key: const ValueKey('card')),
+          ),
         ),
       ),
     );
   }
 
   Widget _buildPill(BuildContext context, {required Key key}) {
-    final accent = needsAttention ? Colors.amberAccent : AuraTheme.pink400;
+    final accent = needsAttention ? Colors.amberAccent : AuraTheme.pink300;
 
     return GestureDetector(
       key: key,
       onTap: onToggleMinimize,
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(22),
         child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
           child: Container(
-            constraints: const BoxConstraints(minWidth: 132),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            constraints: const BoxConstraints(minWidth: 106),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.48),
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: accent.withOpacity(0.42), width: 1),
+              color: AuraTheme.bgSurface.withOpacity(0.42),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: accent.withOpacity(0.24), width: 1),
               boxShadow: [
                 BoxShadow(
-                  color: accent.withOpacity(0.2),
-                  blurRadius: 14,
-                  offset: const Offset(0, 4),
+                  color: accent.withOpacity(0.12),
+                  blurRadius: 10,
+                  offset: const Offset(0, 3),
                 ),
               ],
             ),
@@ -93,7 +96,7 @@ class ExecutionWidget extends StatelessWidget {
                   style: TextStyle(
                     fontFamily: 'PlusJakartaSans',
                     color: Colors.white,
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 0.2,
                   ),
@@ -108,21 +111,21 @@ class ExecutionWidget extends StatelessWidget {
 
   Widget _buildCard(BuildContext context, {required Key key}) {
     final w = MediaQuery.of(context).size.width;
-    final cardWidth = w.clamp(220.0, 300.0) * 0.78;
-    final accent = needsAttention ? Colors.amberAccent : AuraTheme.pink400;
+    final cardWidth = w.clamp(200.0, 260.0) * 0.64;
+    final accent = needsAttention ? Colors.amberAccent : AuraTheme.pink300;
 
     return ClipRRect(
       key: key,
-      borderRadius: BorderRadius.circular(18),
+      borderRadius: BorderRadius.circular(16),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
         child: Container(
           width: cardWidth,
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
           decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.56),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: accent.withOpacity(0.36), width: 1),
+            color: AuraTheme.bgSurface.withOpacity(0.46),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: accent.withOpacity(0.22), width: 1),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -140,7 +143,7 @@ class ExecutionWidget extends StatelessWidget {
                       style: const TextStyle(
                         fontFamily: 'PlusJakartaSans',
                         color: Colors.white,
-                        fontSize: 12,
+                        fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -163,7 +166,7 @@ class ExecutionWidget extends StatelessWidget {
                 style: TextStyle(
                   fontFamily: 'PlusJakartaSans',
                   color: Colors.white.withOpacity(0.8),
-                  fontSize: 11,
+                  fontSize: 10,
                   height: 1.35,
                 ),
               ),

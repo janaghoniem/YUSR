@@ -11,6 +11,7 @@ import '../services/session_store.dart';
 import 'face_scan_screen.dart';
 import 'android_onboarding_flow.dart';
 import 'startup_screen.dart';
+import 'dart:async';
 
 TextStyle _f(
   Color color, {
@@ -106,6 +107,14 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
     }
   }
 
+  Future<void> _safeSpeakTTS(String text) async {
+    try {
+      await _speakTTS(text).timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Keep auth UI responsive even if native TTS channel hangs.
+    }
+  }
+
   Future<void> _goBack() async {
     if (Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
@@ -169,7 +178,7 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
         language: language,
       );
       if (mounted) {
-        await _speakTTS('Welcome back, $uname!');
+        unawaited(_safeSpeakTTS('Welcome back, $uname!'));
         widget.onLoginSuccess(userId, uname, sessionId, language);
       }
     } catch (e) {
@@ -178,7 +187,13 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
           _loading = false;
           _error = e.toString().replaceFirst('Exception: ', '');
         });
-        await _speakTTS('Sign in failed. ${_error ?? 'Please try again.'}');
+        unawaited(
+          _safeSpeakTTS('Sign in failed. ${_error ?? 'Please try again.'}'),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loading = false);
       }
     }
   }
@@ -224,7 +239,7 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
       );
 
       if (mounted) {
-        await _speakTTS('Welcome back, $username!');
+        unawaited(_safeSpeakTTS('Welcome back, $username!'));
         widget.onLoginSuccess(userId, username, sessionId, language);
       }
     } catch (e) {
@@ -233,7 +248,13 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
           _loading = false;
           _error = e.toString().replaceFirst('Exception: ', '');
         });
-        await _speakTTS('Sign in failed. ${_error ?? 'Please try again.'}');
+        unawaited(
+          _safeSpeakTTS('Sign in failed. ${_error ?? 'Please try again.'}'),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loading = false);
       }
     }
   }
@@ -428,7 +449,7 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
                                               ? 'Verifying...'
                                               : 'Tap to sign in with Face ID',
                                           style: _f(
-                                            AuraTheme.pink400,
+                                            AuraTheme.pink300,
                                             size: 13,
                                           ),
                                         ),
@@ -459,111 +480,174 @@ class _AndroidLoginScreenState extends State<AndroidLoginScreen>
                             ),
                             const SizedBox(height: 20),
 
-// ── Password fallback ──────────────────────────
+                            // ── Password fallback ──────────────────────────
                             AnimatedSize(
                               duration: const Duration(milliseconds: 320),
                               curve: Curves.easeOut,
-                              child: _showPasswordForm
-                                  ? Column(
-                                      children: [
-                                        const SizedBox(height: 20),
-                                        // username field
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(16),
-                                          child: BackdropFilter(
-                                            filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withOpacity(0.05),
-                                                borderRadius: BorderRadius.circular(16),
-                                                border: Border.all(color: Colors.white.withOpacity(0.12)),
+                              child:
+                                  _showPasswordForm
+                                      ? Column(
+                                        children: [
+                                          const SizedBox(height: 20),
+                                          // username field
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            child: BackdropFilter(
+                                              filter: ui.ImageFilter.blur(
+                                                sigmaX: 12,
+                                                sigmaY: 12,
                                               ),
-                                              child: TextField(
-                                                controller: _usernameCtrl,
-                                                style: _f(AuraTheme.textPrimary, size: 15),
-                                                decoration: InputDecoration(
-                                                  hintText: 'Username',
-                                                  hintStyle: _f(AuraTheme.textMuted, size: 14),
-                                                  contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                                                  border: InputBorder.none,
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white
+                                                      .withOpacity(0.05),
+                                                  borderRadius:
+                                                      BorderRadius.circular(16),
+                                                  border: Border.all(
+                                                    color: Colors.white
+                                                        .withOpacity(0.12),
+                                                  ),
+                                                ),
+                                                child: TextField(
+                                                  controller: _usernameCtrl,
+                                                  style: _f(
+                                                    AuraTheme.textPrimary,
+                                                    size: 15,
+                                                  ),
+                                                  decoration: InputDecoration(
+                                                    hintText: 'Username',
+                                                    hintStyle: _f(
+                                                      AuraTheme.textMuted,
+                                                      size: 14,
+                                                    ),
+                                                    contentPadding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 18,
+                                                          vertical: 14,
+                                                        ),
+                                                    border: InputBorder.none,
+                                                  ),
                                                 ),
                                               ),
                                             ),
                                           ),
-                                        ),
-                                        const SizedBox(height: 12),
-                                        // password field
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(16),
-                                          child: BackdropFilter(
-                                            filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                                            child: Container(
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withOpacity(0.05),
-                                                borderRadius: BorderRadius.circular(16),
-                                                border: Border.all(color: Colors.white.withOpacity(0.12)),
+                                          const SizedBox(height: 12),
+                                          // password field
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            child: BackdropFilter(
+                                              filter: ui.ImageFilter.blur(
+                                                sigmaX: 12,
+                                                sigmaY: 12,
                                               ),
-                                              child: TextField(
-                                                controller: _passwordCtrl,
-                                                obscureText: _obscurePassword,
-                                                style: _f(AuraTheme.textPrimary, size: 15),
-                                                onSubmitted: (_) => _loginWithPassword(),
-                                                decoration: InputDecoration(
-                                                  hintText: 'Password',
-                                                  hintStyle: _f(AuraTheme.textMuted, size: 14),
-                                                  contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-                                                  border: InputBorder.none,
-                                                  suffixIcon: GestureDetector(
-                                                    onTap: () => setState(() => _obscurePassword = !_obscurePassword),
-                                                    child: Icon(
-                                                      _obscurePassword ? Icons.visibility_off_rounded : Icons.visibility_rounded,
-                                                      color: Colors.white.withOpacity(0.45),
-                                                      size: 20,
+                                              child: Container(
+                                                decoration: BoxDecoration(
+                                                  color: Colors.white
+                                                      .withOpacity(0.05),
+                                                  borderRadius:
+                                                      BorderRadius.circular(16),
+                                                  border: Border.all(
+                                                    color: Colors.white
+                                                        .withOpacity(0.12),
+                                                  ),
+                                                ),
+                                                child: TextField(
+                                                  controller: _passwordCtrl,
+                                                  obscureText: _obscurePassword,
+                                                  style: _f(
+                                                    AuraTheme.textPrimary,
+                                                    size: 15,
+                                                  ),
+                                                  onSubmitted:
+                                                      (_) =>
+                                                          _loginWithPassword(),
+                                                  decoration: InputDecoration(
+                                                    hintText: 'Password',
+                                                    hintStyle: _f(
+                                                      AuraTheme.textMuted,
+                                                      size: 14,
+                                                    ),
+                                                    contentPadding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 18,
+                                                          vertical: 14,
+                                                        ),
+                                                    border: InputBorder.none,
+                                                    suffixIcon: GestureDetector(
+                                                      onTap:
+                                                          () => setState(
+                                                            () =>
+                                                                _obscurePassword =
+                                                                    !_obscurePassword,
+                                                          ),
+                                                      child: Icon(
+                                                        _obscurePassword
+                                                            ? Icons
+                                                                .visibility_off_rounded
+                                                            : Icons
+                                                                .visibility_rounded,
+                                                        color: Colors.white
+                                                            .withOpacity(0.45),
+                                                        size: 20,
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
                                               ),
                                             ),
                                           ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        _AuraButton(
-                                          label: 'Sign In →',
-                                          icon: Icons.login_rounded,
-                                          onTap: _loading ? null : _loginWithPassword,
-                                          loading: _loading,
-                                          isPrimary: true,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        GestureDetector(
-                                          onTap: () => setState(() {
-                                            _showPasswordForm = false;
-                                            _error = null;
-                                          }),
-                                          child: Text(
-                                            '← Back to Face ID',
-                                            style: _f(AuraTheme.textSecondary, size: 13),
+                                          const SizedBox(height: 16),
+                                          _AuraButton(
+                                            label: 'Sign In →',
+                                            icon: Icons.login_rounded,
+                                            onTap:
+                                                _loading
+                                                    ? null
+                                                    : _loginWithPassword,
+                                            loading: _loading,
+                                            isPrimary: true,
                                           ),
-                                        ),
-                                      ],
-                                    )
-                                  : GestureDetector(
-                                      onTap: () => setState(() {
-                                        _showPasswordForm = true;
-                                        _error = null;
-                                      }),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(vertical: 6),
-                                        child: Text(
-                                          'Use password instead',
-                                          style: _f(
-                                            AuraTheme.textSecondary,
-                                            size: 13,
-                                            weight: FontWeight.w500,
+                                          const SizedBox(height: 12),
+                                          GestureDetector(
+                                            onTap:
+                                                () => setState(() {
+                                                  _showPasswordForm = false;
+                                                  _error = null;
+                                                }),
+                                            child: Text(
+                                              '← Back to Face ID',
+                                              style: _f(
+                                                AuraTheme.textSecondary,
+                                                size: 13,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      )
+                                      : GestureDetector(
+                                        onTap:
+                                            () => setState(() {
+                                              _showPasswordForm = true;
+                                              _error = null;
+                                            }),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 6,
+                                          ),
+                                          child: Text(
+                                            'Use password instead',
+                                            style: _f(
+                                              AuraTheme.textSecondary,
+                                              size: 13,
+                                              weight: FontWeight.w500,
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ),
                             ),
                             const SizedBox(height: 12),
                             GestureDetector(

@@ -1,4 +1,5 @@
 // lib/screens/android_onboarding_flow.dart
+import 'dart:async';
 import 'dart:ui';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -230,6 +231,14 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
         await _fallbackTts.setPitch(1.0);
         await _fallbackTts.speak(text);
       } catch (_) {}
+    }
+  }
+
+  Future<void> _safeSpeak(String text) async {
+    try {
+      await _speak(text).timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Keep onboarding flow responsive even if native TTS hangs.
     }
   }
 
@@ -685,10 +694,11 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
                       onTap: () async {
                         final img = await Navigator.of(context).push<String?>(
                           MaterialPageRoute(
-                            builder: (_) => const FaceScanScreen(
-                              title: 'Re-scan',
-                              subtitle: 'Retake your face scan',
-                            ),
+                            builder:
+                                (_) => const FaceScanScreen(
+                                  title: 'Re-scan',
+                                  subtitle: 'Retake your face scan',
+                                ),
                           ),
                         );
                         if (img != null && mounted)
@@ -709,15 +719,20 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
                   onTap: () async {
                     final img = await Navigator.of(context).push<String?>(
                       MaterialPageRoute(
-                        builder: (_) => const FaceScanScreen(
-                          title: 'Register Face',
-                          subtitle: 'Look directly at the camera',
-                        ),
+                        builder:
+                            (_) => const FaceScanScreen(
+                              title: 'Register Face',
+                              subtitle: 'Look directly at the camera',
+                            ),
                       ),
                     );
                     if (img != null && mounted) {
                       setState(() => _faceBase64 = img);
-                      await _speak('Face captured! You can also add a password below.');
+                      unawaited(
+                        _safeSpeak(
+                          'Face captured! You can also add a password below.',
+                        ),
+                      );
                     }
                   },
                 ),
@@ -740,8 +755,8 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
                 hint: 'Password (min 6 characters)',
                 isPassword: true,
                 obscureText: !_showPassword,
-                onToggleObscure: () =>
-                    setState(() => _showPassword = !_showPassword),
+                onToggleObscure:
+                    () => setState(() => _showPassword = !_showPassword),
                 isValid: _passwordCtrl.text.length >= 6,
                 hasError: !passwordLongEnough,
                 onChanged: (_) => setState(() {}),
@@ -760,10 +775,13 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
                 hint: 'Confirm password',
                 isPassword: true,
                 obscureText: !_showPasswordConfirm,
-                onToggleObscure: () =>
-                    setState(() => _showPasswordConfirm = !_showPasswordConfirm),
+                onToggleObscure:
+                    () => setState(
+                      () => _showPasswordConfirm = !_showPasswordConfirm,
+                    ),
                 isValid: _passwordCtrl.text.isNotEmpty && passwordsMatch,
-                hasError: _passwordConfirmCtrl.text.isNotEmpty && !passwordsMatch,
+                hasError:
+                    _passwordConfirmCtrl.text.isNotEmpty && !passwordsMatch,
                 onChanged: (_) => setState(() {}),
               ),
               if (_passwordConfirmCtrl.text.isNotEmpty && !passwordsMatch)
@@ -810,9 +828,13 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
 
               AuraButton(
                 label: 'Create Account →',
-                onTap: (hasAuth && passwordsMatch && passwordLongEnough && !_creatingAccount)
-                    ? _createAccount
-                    : null,
+                onTap:
+                    (hasAuth &&
+                            passwordsMatch &&
+                            passwordLongEnough &&
+                            !_creatingAccount)
+                        ? _createAccount
+                        : null,
                 loading: _creatingAccount,
               ),
               const SizedBox(height: 16),
@@ -823,7 +845,7 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
     );
   }
 
-// ── Account creation ───────────────────────────────────────────────────────
+  // ── Account creation ───────────────────────────────────────────────────────
 
   Future<void> _createAccount() async {
     setState(() {
@@ -831,7 +853,7 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
       _creationError = null;
     });
 
-    await _speak('Creating your account. Please wait.');
+    unawaited(_safeSpeak('Creating your account. Please wait.'));
 
     try {
       final username = _usernameCtrl.text.trim();
@@ -877,7 +899,7 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
       );
 
       if (mounted) {
-        await _speak("Welcome to AURA, $username! Let's get started.");
+        unawaited(_safeSpeak("Welcome to AURA, $username! Let's get started."));
         widget.onComplete(_userId, username, sessionId, _language);
       }
     } catch (e) {
@@ -886,7 +908,9 @@ class _AndroidOnboardingFlowState extends State<AndroidOnboardingFlow>
           _creatingAccount = false;
           _creationError = e.toString().replaceFirst('Exception: ', '');
         });
-        await _speak('Account creation failed. ${_creationError ?? ''}');
+        unawaited(
+          _safeSpeak('Account creation failed. ${_creationError ?? ''}'),
+        );
       }
     }
   }
@@ -1275,6 +1299,9 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
   bool _speechAvailable = false;
   bool _autoListen = false;
   bool _speechInitInProgress = false;
+  bool _restartScheduled = false;
+  DateTime _lastListenStart = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastListenStop = DateTime.fromMillisecondsSinceEpoch(0);
   static final RegExp _navCommands = RegExp(
     r'\b(next|done|continue|go|submit|ok|okay)\b|التالي|تالي|تم|اكمل|استمر|كمل',
     caseSensitive: false,
@@ -1290,21 +1317,37 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
   Future<void> _initSpeech() async {
     _speechAvailable = await _speech.initialize(
       onStatus: (s) {
-        if (s == 'done' || s == 'notListening') {
+        final lower = s.toLowerCase();
+        if (lower.contains('done') || lower.contains('notlistening')) {
           if (mounted) setState(() => _isListening = false);
-          if (_autoListen && mounted && _step >= 0 && _step < _keys.length) {
-            Future.delayed(const Duration(milliseconds: 240), _startListening);
-          }
+          _lastListenStop = DateTime.now();
+          _scheduleListeningRestart(delayMs: 320);
         }
       },
-      onError: (_) {
+      onError: (err) {
         if (mounted) setState(() => _isListening = false);
-        if (_autoListen && mounted && _step >= 0 && _step < _keys.length) {
-          Future.delayed(const Duration(milliseconds: 500), _startListening);
+        _lastListenStop = DateTime.now();
+        if (err.permanent) {
+          _speechAvailable = false;
+          _scheduleListeningRestart(delayMs: 900);
+        } else {
+          _scheduleListeningRestart(delayMs: 500);
         }
       },
       debugLogging: false,
     );
+  }
+
+  void _scheduleListeningRestart({int delayMs = 420}) {
+    if (_restartScheduled || !_autoListen) return;
+    if (_step < 0 || _step >= _keys.length) return;
+    _restartScheduled = true;
+    Future.delayed(Duration(milliseconds: delayMs), () async {
+      _restartScheduled = false;
+      if (!mounted || !_autoListen) return;
+      if (_step < 0 || _step >= _keys.length) return;
+      await _startListening();
+    });
   }
 
   Future<void> _ensureSpeechReady() async {
@@ -1312,7 +1355,7 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
     _speechInitInProgress = true;
     try {
       final status = await Permission.microphone.request();
-      if (!status.isGranted) {
+      if (!status.isGranted && !status.isLimited) {
         if (mounted) setState(() => _speechAvailable = false);
         return;
       }
@@ -1323,37 +1366,47 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
   }
 
   Future<void> _startListening() async {
-    if (_isListening) return;
+    if (_isListening || _speech.isListening) return;
     if (!_speechAvailable) {
       await _ensureSpeechReady();
     }
     if (!_speechAvailable) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastListenStart).inMilliseconds < 450) return;
+    if (now.difference(_lastListenStop).inMilliseconds < 900) return;
+
     _autoListen = true;
-    await _speech.listen(
-      onResult: (val) {
-        if (mounted) {
-          final raw = val.recognizedWords;
-          final cleaned = raw.replaceAll(_navCommands, '').trim();
-          setState(() => _ctrl.text = cleaned);
-          if (_navCommands.hasMatch(raw) && !_isHandlingAdvance) {
-            _isHandlingAdvance = true;
-            _stopListening(manual: true);
-            Future.delayed(const Duration(milliseconds: 260), () {
-              _next();
-              _isHandlingAdvance = false;
-            });
-            return;
+    try {
+      _lastListenStart = now;
+      await _speech.listen(
+        onResult: (val) {
+          if (mounted) {
+            final raw = val.recognizedWords;
+            final cleaned = raw.replaceAll(_navCommands, '').trim();
+            setState(() => _ctrl.text = cleaned);
+            if (_navCommands.hasMatch(raw) && !_isHandlingAdvance) {
+              _isHandlingAdvance = true;
+              _stopListening(manual: true);
+              Future.delayed(const Duration(milliseconds: 260), () {
+                _next();
+                _isHandlingAdvance = false;
+              });
+              return;
+            }
           }
-        }
-      },
-      localeId: _language == 'ar' ? 'ar_SA' : 'en_US',
-      listenMode: stt.ListenMode.dictation,
-      partialResults: true,
-      cancelOnError: false,
-      listenFor: const Duration(minutes: 5),
-      pauseFor: const Duration(seconds: 15),
-    );
-    if (mounted) setState(() => _isListening = true);
+        },
+        localeId: _language == 'ar' ? 'ar_SA' : 'en_US',
+        listenMode: stt.ListenMode.dictation,
+        partialResults: true,
+        cancelOnError: false,
+        listenFor: const Duration(minutes: 5),
+        pauseFor: const Duration(seconds: 15),
+      );
+      if (mounted) setState(() => _isListening = true);
+    } catch (_) {
+      _scheduleListeningRestart(delayMs: 700);
+    }
   }
 
   bool _isHandlingAdvance = false;
@@ -1361,6 +1414,7 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
   void _stopListening({bool manual = false}) {
     if (manual) _autoListen = false;
     _speech.stop();
+    _lastListenStop = DateTime.now();
     if (mounted) setState(() => _isListening = false);
   }
 
@@ -1369,6 +1423,7 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
       _language = lang;
       _step = 0;
     });
+    _autoListen = true;
     await widget.onSpeak(_currentQ[0]);
     Future.delayed(const Duration(milliseconds: 600), _startListening);
   }
@@ -1385,6 +1440,7 @@ class _VoiceQuestionFlowState extends State<_VoiceQuestionFlow> {
       widget.onComplete(_language, Map.from(_answers));
     } else {
       setState(() => _step++);
+      _autoListen = true;
       await widget.onSpeak(_currentQ[_step]);
       Future.delayed(const Duration(milliseconds: 600), _startListening);
     }
@@ -1897,18 +1953,19 @@ class _GlassTextField extends StatelessWidget {
                 vertical: 14,
               ),
               border: InputBorder.none,
-              suffixIcon: isPassword
-                  ? GestureDetector(
-                      onTap: onToggleObscure,
-                      child: Icon(
-                        obscureText
-                            ? Icons.visibility_off_rounded
-                            : Icons.visibility_rounded,
-                        color: Colors.white.withOpacity(0.45),
-                        size: 20,
-                      ),
-                    )
-                  : suffix,
+              suffixIcon:
+                  isPassword
+                      ? GestureDetector(
+                        onTap: onToggleObscure,
+                        child: Icon(
+                          obscureText
+                              ? Icons.visibility_off_rounded
+                              : Icons.visibility_rounded,
+                          color: Colors.white.withOpacity(0.45),
+                          size: 20,
+                        ),
+                      )
+                      : suffix,
             ),
           ),
         ),

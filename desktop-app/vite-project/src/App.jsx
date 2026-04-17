@@ -79,6 +79,7 @@ function App() {
   });
   const [thinkingSteps, setThinkingSteps] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [coordinatorActive, setCoordinatorActive] = useState(false);
   const [auraStatus, setAuraStatus] = useState("starting");
   const [wakePulse, setWakePulse] = useState(false);
   // True when server-provided SSE thinking stream is connected
@@ -506,13 +507,80 @@ function App() {
           case 'thinking_step':
           case 'thinking': // server alias
           {
+            const stepKey = (msg.step_key || "").toString();
+            const coordinatorSteps = new Set([
+              "preparing_for_coordinator",
+              "preparing_tasks",
+              "queued_request",
+              "creating_execution_plan",
+              "executing_task",
+              "finalizing",
+            ]);
+            if (!coordinatorSteps.has(stepKey)) {
+              break;
+            }
             const localizedStep = translateThinkingStep(msg.step);
             setThinkingSteps(prev => {
-              if (prev.includes(localizedStep)) return prev;
+              if (prev[prev.length - 1] === localizedStep) return prev;
+              if (prev.includes(localizedStep) && stepKey !== "executing_task") {
+                return prev;
+              }
               return [...prev, localizedStep];
             });
+
+            // Enter widget as soon as Language hands off to Coordinator.
+            if (stepKey === 'preparing_for_coordinator') {
+              setCoordinatorActive(true);
+              setOrbState("processing");
+              if (!autoWidgetTriggeredRef.current) {
+                window.electronAPI?.enterWidgetMode?.();
+                setExecutionMode("widget");
+                autoWidgetTriggeredRef.current = true;
+              }
+            }
+
             if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
             setIsThinking(true);
+            break;
+          }
+
+          case 'task_progress': {
+            if (msg.stage && msg.stage !== 'coordinator') {
+              break;
+            }
+
+            const phase = (msg.phase || '').toString().toLowerCase();
+            const terminalPhases = new Set([
+              'execution_finished',
+              'execution_stopped',
+              'finished',
+              'stopped',
+              'done',
+            ]);
+            const active =
+              typeof msg.active === 'boolean'
+                ? msg.active
+                : !terminalPhases.has(phase);
+            setCoordinatorActive(active);
+
+            if (active) {
+              setOrbState("processing");
+              setIsThinking(true);
+              if (!autoWidgetTriggeredRef.current) {
+                window.electronAPI?.enterWidgetMode?.();
+                setExecutionMode("widget");
+                autoWidgetTriggeredRef.current = true;
+              }
+            } else {
+              setIsThinking(false);
+              setThinkingSteps([]);
+              setOrbState((prev) => (prev === "speaking" ? prev : "idle"));
+              if (autoWidgetTriggeredRef.current) {
+                window.electronAPI?.exitWidgetMode?.();
+                setExecutionMode("normal");
+                autoWidgetTriggeredRef.current = false;
+              }
+            }
             break;
           }
 
@@ -527,16 +595,19 @@ function App() {
           case 'confirmation_needed':
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setClarificationResponseToId(msg.response_id);
-            setAssistantMessage(msg.question);
+            setAssistantMessage(msg.question || msg.full_content || msg.draft_content || "");
             if (msg.user_language) {
               setUserLanguage(msg.user_language);
               localStorage.setItem("userLanguage", msg.user_language);
             }
-            rememberUserLanguageFromText(msg.question);
+            if (msg.question) {
+              rememberUserLanguageFromText(msg.question);
+            }
             if (msg.type === 'confirmation_needed') {
               setOrbState("speaking");
-              screenReader.speak(msg.question || "", {
+              screenReader.speak((msg.question || msg.full_content || ""), {
                 onComplete: () => setOrbState("idle"),
               });
             } else {
@@ -545,8 +616,9 @@ function App() {
             break;
 
           case 'processing':
-            setOrbState("processing");
-            setIsThinking(true);
+            // Language-agent processing acknowledgements should not trigger coordinator visuals.
+            setOrbState("idle");
+            setIsThinking(false);
             if (msg.text) setAssistantMessage(msg.text);
             break;
 
@@ -556,6 +628,7 @@ function App() {
           {
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setClarificationResponseToId(null);
             
             const responseText = msg.spoken_text || msg.response || msg.text || t("Task completed", "تم تنفيذ المهمة بنجاح");
@@ -585,6 +658,7 @@ function App() {
               screenReader.stop();
               setOrbState("idle");
               setIsThinking(false);
+              setCoordinatorActive(false);
               setThinkingSteps([]);
               setAssistantMessage(t("Stopped. Task cancelled.", "تم الإيقاف. تم إلغاء المهمة."));
               // Exit widget if auto-triggered
@@ -618,6 +692,7 @@ function App() {
           case 'error':
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setAssistantMessage(msg.detail || t("An error occurred", "حدث خطأ"));
             setOrbState("idle");
             break;
@@ -641,7 +716,7 @@ function App() {
       console.warn('[WS] Error:', err);
       ws.close();
     };
-  }, [sessionId]); // Do NOT include executionMode — it would tear down the WS connection on mode change
+  }, [sessionId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, detectLanguageFromText, offerReadAloud, structuredResponse]);
 
   useEffect(() => {
     connectWebSocket();
@@ -661,6 +736,15 @@ function App() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        const stepKey = (data.step_key || data?.step?.step_key || "").toString();
+        const coordinatorSteps = new Set([
+          "preparing_for_coordinator",
+          "preparing_tasks",
+          "queued_request",
+          "creating_execution_plan",
+          "executing_task",
+          "finalizing",
+        ]);
         // Handle explicit clear events from server
         if (data.action === 'thinking_clear') {
           setThinkingSteps([]);
@@ -671,13 +755,34 @@ function App() {
 
         // Server sends { step: { action, step, session_id } }
         if (data.step) {
+          if (!coordinatorSteps.has(stepKey)) {
+            return;
+          }
           const localizedStep = translateThinkingStep(data.step);
-          setThinkingSteps(prev => [...prev, localizedStep]);
+          setThinkingSteps(prev => {
+            if (prev[prev.length - 1] === localizedStep) return prev;
+            return [...prev, localizedStep];
+          });
           setIsThinking(true);
+          if (stepKey === 'preparing_for_coordinator') {
+            setCoordinatorActive(true);
+            setOrbState("processing");
+            if (!autoWidgetTriggeredRef.current) {
+              window.electronAPI?.enterWidgetMode?.();
+              setExecutionMode("widget");
+              autoWidgetTriggeredRef.current = true;
+            }
+          }
           if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         } else if (Array.isArray(data.steps)) {
           const localizedSteps = data.steps.map(translateThinkingStep);
-          setThinkingSteps(localizedSteps);
+          setThinkingSteps((prev) => {
+            const merged = [...prev];
+            for (const s of localizedSteps) {
+              if (!merged.includes(s)) merged.push(s);
+            }
+            return merged;
+          });
           setIsThinking(localizedSteps.length > 0);
           // Speak only the last step from batch
           if (localizedSteps.length > 0 && vocalizeStepRef.current) vocalizeStepRef.current(localizedSteps[localizedSteps.length - 1]);
@@ -685,9 +790,12 @@ function App() {
       } catch (err) {
         // Fallback: plain text from server
         console.warn("[UI] Non-JSON SSE payload:", event.data);
-        if (event.data && typeof event.data === 'string' && event.data.trim().length > 0) {
+        if (event.data && typeof event.data === 'string' && event.data.trim().length > 0 && coordinatorActive) {
           const localizedStep = translateThinkingStep(event.data);
-          setThinkingSteps(prev => [...prev, localizedStep]);
+          setThinkingSteps(prev => {
+            if (prev[prev.length - 1] === localizedStep) return prev;
+            return [...prev, localizedStep];
+          });
           setIsThinking(true);
           if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         }
@@ -704,7 +812,7 @@ function App() {
       setSseConnected(false);
       eventSource.close();
     };
-  }, [sessionId, wsConnected]);
+  }, [sessionId, wsConnected, coordinatorActive, stopThinkingSpeech, translateThinkingStep]);
 
   /* ---------- VOCALIZE THINKING STEP (local TTS) ---------- */
   const vocalizeStep = useCallback((text) => {
@@ -1243,7 +1351,8 @@ function App() {
       }
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
       setOrbState("processing");
-      setIsThinking(true);
+      // coordinatorActive and task_progress events control thinking/widget visuals.
+      setIsThinking(false);
 
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1265,7 +1374,8 @@ function App() {
       } else {
         // HTTP fallback
         console.log("[Agent] Using HTTP fallback (WS not connected)");
-        if (!sseConnected) await startThinkingSequence();
+        setThinkingSteps([]);
+        setIsThinking(false);
 
         const res = await fetch("http://localhost:8000/process", {
           method: "POST",
@@ -1315,6 +1425,7 @@ function App() {
 
         setThinkingSteps([]);
         setIsThinking(false);
+        setCoordinatorActive(false);
 
         if (data.status === "clarification_needed") {
           const questionText = extractReadableText(data.question) || t("Could you clarify?", "هل يمكنك التوضيح؟");
@@ -1361,6 +1472,7 @@ function App() {
       setAssistantMessage(t("Backend error", "خطأ في الخادم"));
       setThinkingSteps([]);
       setIsThinking(false);
+      setCoordinatorActive(false);
       setExecutionMode("normal");
     }
   };
@@ -1440,31 +1552,19 @@ function App() {
   const autoWidgetTriggeredRef = useRef(false);
 
   useEffect(() => {
-    const prevState = prevOrbStateRef.current;
     prevOrbStateRef.current = orbState;
-
-    const wasIdle = prevState === "idle" || prevState === "listening";
-    const isNowExecuting = orbState === "processing";
-
-    // Auto-enter widget when execution starts (only from idle/listening)
-    if (wasIdle && isNowExecuting && executionMode === "normal") {
-      console.log("[Auto-Widget] Execution started → entering widget mode");
-      window.electronAPI?.enterWidgetMode?.();
-      setExecutionMode("widget");
-      autoWidgetTriggeredRef.current = true;
-    }
-  }, [orbState, executionMode]);
+  }, [orbState]);
 
   // Auto-exit widget when execution finishes (only if we auto-entered)
   useEffect(() => {
-    const isNowIdle = orbState === "idle" && !isThinking;
-    if (isNowIdle && executionMode === "widget" && autoWidgetTriggeredRef.current) {
+    const isCoordinatorDone = !coordinatorActive;
+    if (isCoordinatorDone && executionMode === "widget" && autoWidgetTriggeredRef.current) {
       console.log("[Auto-Widget] Execution done → exiting widget mode");
       window.electronAPI?.exitWidgetMode?.();
       setExecutionMode("normal");
       autoWidgetTriggeredRef.current = false;
     }
-  }, [orbState, isThinking, executionMode]);
+  }, [coordinatorActive, executionMode]);
 
   /* ---------- RENDER ---------- */
 
@@ -1512,6 +1612,14 @@ function App() {
     executionMode === "transparent" && isExecuting ? "transparent-mode" : "",
     executionMode === "widget" ? "widget-mode" : "",
   ].filter(Boolean).join(" ");
+  const liveCaptionText =
+    (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
+      ? userMessage
+      : (assistantMessage || (isThinking
+          ? t("Thinking...", "بفكر...")
+          : (listening
+              ? t("Say hey aura", "قول يا أورا")
+              : t("Wake service connecting", "جاري توصيل خدمة التنبيه"))));
 
   return (
     <>
@@ -1680,12 +1788,8 @@ function App() {
                 </div>
                 <div className="mini-live-caption-text">
                   <SplitText
-                    key={`${orbState}-${userMessage}-${assistantMessage}-${isThinking}`}
-                    text={
-                      (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
-                        ? userMessage
-                        : (assistantMessage || (isThinking ? t("Thinking...", "بفكر...") : (listening ? t("Say hey aura", "قول يا أورا") : t("Wake service connecting", "جاري توصيل خدمة التنبيه"))))
-                    }
+                    key={liveCaptionText}
+                    text={liveCaptionText}
                     delay={22}
                   />
                 </div>

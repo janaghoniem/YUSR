@@ -115,6 +115,23 @@ class MainActivity: FlutterActivity() {
                             result.error("ERROR", e.message, null)
                         }
                     }
+
+                    "bringToFront" -> {
+                        try {
+                            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+                            if (launchIntent != null) {
+                                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                launchIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                startActivity(launchIntent)
+                                result.success(true)
+                            } else {
+                                result.error("NO_LAUNCH_INTENT", "Cannot relaunch app", null)
+                            }
+                        } catch (e: Exception) {
+                            result.error("ERROR", e.message, null)
+                        }
+                    }
                     
                     "getAccessibilityTree" -> {
                         val service = AutomationService.instance

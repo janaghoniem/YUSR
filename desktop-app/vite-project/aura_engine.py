@@ -102,6 +102,10 @@ class AuraEngine:
         self.stop_event = threading.Event()
         self.last_partial_emit_at = 0.0
         self.last_partial_text = ""
+        self.command_fragments = []
+        self.last_command_activity_at = 0.0
+        self.last_command_partial = ""
+        self.command_silence_seconds = 5.0
 
     def emit_partial_throttled(self, text: str, lang: str, min_interval: float = 0.25):
         text = (text or "").strip()
@@ -154,6 +158,9 @@ class AuraEngine:
         model = self.models[self.command_lang]
         self.command_recognizer = KaldiRecognizer(model, SAMPLE_RATE)
         self.command_recognizer.SetWords(True)
+        self.command_fragments = []
+        self.last_command_activity_at = time.monotonic()
+        self.last_command_partial = ""
 
     def reset_wake_recognizers(self):
         self.wake_recognizers = self._build_wake_recognizers()
@@ -177,6 +184,24 @@ class AuraEngine:
         self.reset_wake_recognizers()
         emit({"type": "status", "state": "listening", "lang": self.command_lang})
 
+    def _flush_command_on_silence(self):
+        if not self.armed:
+            return
+
+        now = time.monotonic()
+        if self.last_command_activity_at <= 0:
+            return
+
+        if (now - self.last_command_activity_at) < self.command_silence_seconds:
+            return
+
+        combined = " ".join(self.command_fragments).strip()
+        if not combined and self.last_command_partial:
+            combined = self.last_command_partial.strip()
+
+        if combined:
+            self.handle_command_result(combined)
+
     def callback(self, indata, frames, time_info, status):
         if status and not getattr(status, "input_overflow", False):
             print(status, file=sys.stderr)
@@ -190,11 +215,20 @@ class AuraEngine:
 
                 if self.command_recognizer.AcceptWaveform(audio_bytes):
                     result = json.loads(self.command_recognizer.Result())
-                    self.handle_command_result(result.get("text", ""))
+                    final_text = (result.get("text") or "").strip()
+                    if final_text:
+                        self.command_fragments.append(final_text)
+                        self.last_command_partial = ""
+                        self.last_command_activity_at = time.monotonic()
                 else:
                     partial = json.loads(self.command_recognizer.PartialResult())
-                    if partial.get("partial"):
-                        self.emit_partial_throttled(partial["partial"], self.command_lang)
+                    partial_text = (partial.get("partial") or "").strip()
+                    if partial_text:
+                        self.last_command_partial = partial_text
+                        self.last_command_activity_at = time.monotonic()
+                        self.emit_partial_throttled(partial_text, self.command_lang)
+
+                self._flush_command_on_silence()
             else:
                 best_partial = None
                 for lang, recognizer in self.wake_recognizers.items():

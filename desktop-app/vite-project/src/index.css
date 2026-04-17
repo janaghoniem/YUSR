@@ -104,7 +104,7 @@ body {
   100% { background-position: -200% center; }
 }
 
-.app-root { display: flex; height: 100vh; width: 100vw; position: relative; z-index: 1; overflow-y: auto; overflow-x: hidden; }
+.app-root { display: flex; height: 100vh; width: 100vw; position: relative; z-index: 1; overflow: hidden; }
 
 /* ── Title Bar ── */
 .titlebar {
@@ -328,21 +328,11 @@ body {
   display: flex; flex-direction: column; gap: 0px;
   padding: 58px 68px 32px;
   overflow-y: auto; overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 61, 154, 0.45) transparent;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.main-overlay::-webkit-scrollbar { width: 10px; }
-.main-overlay::-webkit-scrollbar-track { background: transparent; }
-.main-overlay::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(255, 61, 154, 0.55), rgba(255, 154, 77, 0.35));
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-.main-overlay::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, rgba(255, 61, 154, 0.75), rgba(255, 154, 77, 0.5));
-}
+.main-overlay::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
 /* ── Central Identity Halo ── */
 .blossom-halo {
@@ -528,6 +518,7 @@ body {
   background: rgba(25,20,15,0.72); backdrop-filter: blur(28px);
   border: 1px solid rgba(255,61,154,0.1);
   box-shadow: 0 2px 24px rgba(0,0,0,0.35);
+  overflow: visible;
   align-self: center; width: fit-content; margin-top: auto;
 }
 .voice-controls.recording {
@@ -567,7 +558,25 @@ body {
 }
 .mic-btn:hover { background: var(--pink-500); transform: scale(1.04); }
 .mic-btn.recording { background: var(--pink-500); box-shadow: 0 0 0 6px rgba(255,61,154,0.2), 0 2px 20px rgba(255,61,154,0.4); }
-.interrupt-controls { display: flex; gap: 8px; align-items: center; margin-top: 12px; animation: fadeUp var(--dur-base) var(--ease-out); }
+.interrupt-controls {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 0;
+  padding: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(18, 14, 20, 0.78);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  z-index: 5;
+  animation: fadeUp var(--dur-base) var(--ease-out);
+}
+.interrupt-controls-floating { pointer-events: auto; }
 .interrupt-controls-inline { display: flex; gap: 8px; align-items: center; }
 .interrupt-btn {
   padding: 7px 16px; border-radius: var(--r-pill); font-size: 12.5px;
@@ -613,8 +622,14 @@ body {
   max-height: 280px;
   resize: none;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 61, 154, 0.38) transparent;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.chat-input::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .chat-input::placeholder { color: var(--text-disabled); }
@@ -818,11 +833,12 @@ body {
   border-top: 1px solid rgba(255,255,255,0.05); justify-content: flex-end; align-items: center;
 }
 .settings-btn-save {
-  padding: 10px 24px; border-radius: var(--r-sm); font-size: 14px; font-weight: 500;
-  font-family: inherit; cursor: pointer; background: var(--pink-400); border: none; color: #fff;
-  transition: background var(--dur-fast), transform var(--dur-fast);
+  padding: 10px 24px; border-radius: var(--r-sm); font-size: 14px; font-weight: 600;
+  font-family: inherit; cursor: pointer; background: rgba(255, 61, 154, 0.10);
+  border: 1px solid rgba(255, 128, 192, 0.72); color: var(--pink-300);
+  transition: background var(--dur-fast), transform var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
 }
-.settings-btn-save:hover { background: var(--pink-500); }
+.settings-btn-save:hover { background: rgba(255, 61, 154, 0.18); border-color: rgba(255, 128, 192, 0.95); color: #ffc0e1; }
 .settings-btn-save:active { transform: scale(0.98); }
 .settings-btn-logout {
   margin-right: auto;
@@ -831,15 +847,15 @@ body {
   font-size: 14px;
   font-family: inherit;
   cursor: pointer;
-  border: 1px solid rgba(255, 107, 107, 0.35);
-  background: rgba(255, 107, 107, 0.10);
-  color: #ffb0b0;
+  border: 1px solid rgba(255, 72, 72, 0.62);
+  background: rgba(255, 48, 48, 0.18);
+  color: #ff6f6f;
   transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
 }
 .settings-btn-logout:hover {
-  background: rgba(255, 107, 107, 0.18);
-  border-color: rgba(255, 107, 107, 0.55);
-  color: #ffd0d0;
+  background: rgba(255, 48, 48, 0.28);
+  border-color: rgba(255, 72, 72, 0.9);
+  color: #ffd3d3;
 }
 .settings-btn-cancel {
   padding: 10px 24px; border-radius: var(--r-sm); font-size: 14px; font-family: inherit;

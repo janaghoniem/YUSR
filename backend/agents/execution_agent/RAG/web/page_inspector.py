@@ -46,7 +46,10 @@ async def get_page_semantics_fallback(page) -> str:
                 
         // Strategy 1: Standard interactive elements
                 const buttons = Array.from(document.querySelectorAll('button, [role="button"], [type="button"], [type="submit"]')).concat(gmailSendButtons);
-                const links = Array.from(document.querySelectorAll('a[href]'));
+                // Prioritize search result links (h3 a) and external links so they appear before nav links
+                const h3Links = Array.from(document.querySelectorAll('h3 a[href]'));
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                const links = [...h3Links, ...allLinks.filter(l => !h3Links.includes(l))];
                 const inputs = Array.from(document.querySelectorAll('input, textarea, select')).concat(gmailRecipientFields);
                 
                 // Strategy 2: Media controls (video, audio)
@@ -95,7 +98,7 @@ async def get_page_semantics_fallback(page) -> str:
                             role: el.getAttribute('role') || '',
                         };
                     }),
-                    links: links.slice(0, 20).map(el => {
+                    links: links.slice(0, 30).map(el => {
                         const s = getComputedStyle(el);
                         return {
                             text: el.textContent?.trim() || el.ariaLabel || el.title || 'Unnamed link',
@@ -218,7 +221,12 @@ async def get_page_semantics_fallback(page) -> str:
         if elements_info.get('links'):
             descriptions.append("\nLINKS:")
             for link in elements_info['links']:
-                descriptions.append(f"  - '{link['text']}'")
+                href = link.get('href', '')
+                # Show href for external/result links so LLM can navigate directly if click fails
+                if href and not href.startswith('javascript:') and '/search?q=' not in href:
+                    descriptions.append(f"  - '{link['text']}' [{href[:100]}]")
+                else:
+                    descriptions.append(f"  - '{link['text']}'")
         
         # ✅ NEW: Format video elements
         if elements_info.get('videos'):

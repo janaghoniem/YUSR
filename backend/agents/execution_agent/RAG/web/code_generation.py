@@ -32,7 +32,7 @@ class PlaywrightRAGConfig:
     
     # LLM settings (MATCHED TO DESKTOP RAG)
     llm_provider: str = "groq"
-    llm_model: str = "moonshotai/kimi-k2-instruct-0905"  # ✅ Same as desktop RAG
+    llm_model: str = "llama-3.3-70b-versatile"  # ✅ Same as desktop RAG
     temperature: float = 0.4  # ✅ Same as desktop RAG
     max_tokens: int = 1024  # ✅ Same as desktop RAG
     
@@ -639,7 +639,7 @@ COLOR-BASED FINDING:
 TITLE ATTRIBUTE FINDING:
   # PDF reader button with title
   pdf_btn = page.locator('button[title*="PDF"], button[title*="pdf"], [title*="Read PDF"]').first
-  await pdf_btn.scroll_into_view()
+  await pdf_btn.scroll_into_view_if_needed()
   await pdf_btn.click()
 
 DATA-* ATTRIBUTE FINDING:
@@ -688,7 +688,7 @@ CORRECT PATTERN:
   locator = page.locator('a:has-text("View PDF")')
   
   # IMPORTANT: Scroll into view FIRST
-  await locator.first.scroll_into_view()
+  await locator.first.scroll_into_view_if_needed()
   await page.wait_for_timeout(300)
   
   # Then click
@@ -700,7 +700,7 @@ If Locator.click: Timeout exceeds 30s, the element likely needs scrolling or wai
 
   # Alternative: Wait for visibility explicitly
   await page.wait_for_selector('a:has-text("View PDF")', state='visible', timeout=10000)
-  await page.locator('a:has-text("View PDF")').first.scroll_into_view()
+  await page.locator('a:has-text("View PDF")').first.scroll_into_view_if_needed()
   await page.locator('a:has-text("View PDF")').first.click()
 
 ================================================================

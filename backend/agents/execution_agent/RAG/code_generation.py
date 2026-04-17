@@ -71,7 +71,7 @@ class RAGConfig:
     
     # LLM settings
     llm_provider: str = "groq"  # Options: "anthropic", "openai", "ollama", "huggingface"
-    llm_model: str = "moonshotai/kimi-k2-instruct-0905"  # or "gpt-4", "gpt-3.5-turbo"
+    llm_model: str = "llama-3.3-70b-versatile"  # or "gpt-4", "gpt-3.5-turbo"
     temperature: float = 0.4  # Lower = more deterministic
     max_tokens: int = 1024
     

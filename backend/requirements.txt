@@ -22,6 +22,8 @@ langchain-google-genai>=4.2.0
 google-generativeai>=0.8.3
 # ADDED BY JANA FOR GROQ SUPPORT IN THE COORDINATOR AGENT
 langchain_groq
+# Cerebras API (replaces Groq for main LLM calls)
+cerebras-cloud-sdk
 # google-ai-generativelanguage is now handled by the consolidated genai SDK
 
 # Google API dependencies
@@ -95,5 +97,12 @@ pyautogui
 pytesseract
 pillow
 playwright
+playwright-stealth
 docker
 chromadb
+
+# Bot evasion and verification
+bezier>=2024.1.1
+scikit-image>=0.21.0
+cryptography>=41.0.0
+2captcha-python>=1.2.0

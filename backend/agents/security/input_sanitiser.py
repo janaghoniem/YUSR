@@ -61,6 +61,12 @@ OVERRIDE_PATTERNS = [
     "format drive",
     "rm -rf",
     "del /f /q",
+    # TC54/TC55: Block explicit library-based destructive operations
+    "using shutil",
+    "delete empty folders",
+    "delete empty files",
+    "copy all files",
+    "move all files",
     
     # OS-critical path deletion (system destruction)
     "delete windows",

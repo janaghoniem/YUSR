@@ -212,6 +212,12 @@ class IntentClassifier:
             r"new system prompt",
             r"system override",
             r"important system note",
+            # TC54/TC55: Bulk file operations using blocked libraries
+            r"using shutil",
+            r"copy all files",
+            r"move all files",
+            r"delete empty folders",
+            r"delete empty files",
 
             # Shutdown / reboot / power-off commands (any phrasing)
             r"shutdown\s+/s",

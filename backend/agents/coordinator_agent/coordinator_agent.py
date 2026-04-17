@@ -436,10 +436,22 @@ class TaskQueue:
     def add_to_current(self, tasks: List[ActionTask]):
         self.current_queue.extend(tasks)
         
-    def add_to_global(self, task_plan: Dict):
+    def add_to_global(self, task_plan: Any):
         self.global_queue.append(task_plan)
         
     def get_next_task(self) -> Optional[ActionTask]:
+        if not self.current_queue and self.global_queue and not self.is_paused and not self.is_stopped:
+            next_plan = self.global_queue.popleft()
+            if isinstance(next_plan, dict):
+                queued_tasks = next_plan.get("tasks", [])
+            elif isinstance(next_plan, list):
+                queued_tasks = next_plan
+            else:
+                queued_tasks = []
+            if queued_tasks:
+                logger.info(f"📦 Loading queued plan with {len(queued_tasks)} tasks into current queue")
+                self.current_queue.extend(queued_tasks)
+
         if self.current_queue and not self.is_paused and not self.is_stopped:
             task = self.current_queue.popleft()
             self.current_task_id = task.task_id
@@ -447,7 +459,7 @@ class TaskQueue:
         return None
     
     def has_tasks(self) -> bool:
-        return len(self.current_queue) > 0
+        return len(self.current_queue) > 0 or len(self.global_queue) > 0
     
     def pause(self):
         self.is_paused = True
@@ -1393,6 +1405,93 @@ async def decompose_task_to_actions_with_icrl(
         conversation_history, session_id, http_request_id, current_page_url
     )
 
+
+async def split_independent_user_requests(raw_task: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Split a single user utterance into independent top-level requests for global queueing.
+    Returns one item when the request is singular or tightly coupled.
+    """
+    base_text = str(raw_task.get("original_input") or raw_task.get("confirmation") or "").strip()
+    if not base_text:
+        return [raw_task]
+
+    split_prompt = f"""You are an intent splitting classifier for an automation coordinator.
+Decide whether the request contains MULTIPLE INDEPENDENT top-level goals that should run as separate queued plans.
+
+USER REQUEST:
+{base_text}
+
+Rules:
+1. Split only when goals are unrelated and can be planned independently.
+2. Do NOT split tightly coupled flows (e.g. "open Gmail and send an email").
+3. Keep each split goal executable and concise.
+4. If uncertain, do not split.
+
+Return strict JSON only:
+{{
+  "split": true/false,
+  "goals": ["goal 1", "goal 2"]
+}}"""
+
+    try:
+        llm_resp = await llm.ainvoke(split_prompt)
+        llm_text = llm_resp.content if hasattr(llm_resp, "content") else str(llm_resp)
+        payload = extract_json_payload(llm_text, {"split": False, "goals": []})
+    except Exception as e:
+        logger.warning(f"⚠️ Independent-intent split failed, using single-plan fallback: {e}")
+        payload = {"split": False, "goals": []}
+
+    goals = payload.get("goals") if isinstance(payload, dict) else []
+    should_split = bool(isinstance(payload, dict) and payload.get("split") and isinstance(goals, list))
+
+    cleaned_goals: List[str] = []
+    if should_split:
+        for g in goals:
+            g_text = str(g).strip()
+            if g_text:
+                cleaned_goals.append(g_text)
+
+    if len(cleaned_goals) <= 1:
+        return [raw_task]
+
+    split_requests: List[Dict[str, Any]] = []
+    for goal in cleaned_goals[:4]:
+        sub = dict(raw_task)
+        sub["original_input"] = goal
+        sub["confirmation"] = goal
+        split_requests.append(sub)
+
+    logger.info(
+        f"🧩 Split request into {len(split_requests)} independent plans: "
+        + " | ".join(r.get("original_input", "") for r in split_requests)
+    )
+    return split_requests
+
+
+def namespace_task_plan(tasks: List[ActionTask], namespace: str) -> List[ActionTask]:
+    """Prefix task IDs/dependencies to avoid collisions across global queued plans."""
+    id_map = {t.task_id: f"{namespace}{t.task_id}" for t in tasks}
+    namespaced: List[ActionTask] = []
+    for task in tasks:
+        deps = task.depends_on or []
+        mapped_deps = [id_map.get(dep, f"{namespace}{dep}") for dep in deps] if deps else None
+        cloned = ActionTask(
+            task_id=id_map.get(task.task_id, f"{namespace}{task.task_id}"),
+            goal=task.goal,
+            ai_prompt=task.ai_prompt,
+            device=task.device,
+            context=task.context,
+            extra_params=dict(task.extra_params or {}),
+            web_params=dict(task.web_params or {}),
+            target_agent=task.target_agent,
+            depends_on=mapped_deps,
+        )
+        input_from = cloned.extra_params.get("input_from")
+        if input_from:
+            cloned.extra_params["input_from"] = id_map.get(input_from, f"{namespace}{input_from}")
+        namespaced.append(cloned)
+    return namespaced
+
 def create_coordinator_graph():
     """Create the coordinator orchestration graph"""
     graph = StateGraph(dict)
@@ -1499,40 +1598,56 @@ def create_coordinator_graph():
                 logger.debug(f"⚠️ conversation_history load failed (non-fatal): {_load_err}")
         # ─────────────────────────────────────────────────────────────────────
         
-        # ✅ FIX 3: Pass conversation history to decomposition
-        plan_result = await decompose_task_to_actions(
-            raw_task, 
-            preferences_context, 
-            device_type,
-            conversation_history=loaded_history,
-            session_id=session_id,
-            http_request_id=original_message_id,
-            current_page_url=current_page_url
-        )
-        
-        # Save the plan execution error if there was one
-        plan_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
-        
-        # Surface decomposition errors when present
-        if plan_error:
-            logger.error(f"❌ Decomposition returned error: {plan_error}")
-            tasks = []
-        else:
-            tasks = plan_result.get("tasks", [])
+        split_requests = await split_independent_user_requests(raw_task)
+        all_plans: List[List[ActionTask]] = []
+        plan_error = ""
+
+        for idx, sub_request in enumerate(split_requests):
+            plan_result = await decompose_task_to_actions(
+                sub_request,
+                preferences_context,
+                device_type,
+                conversation_history=loaded_history,
+                session_id=session_id,
+                http_request_id=original_message_id,
+                current_page_url=current_page_url
+            )
+
+            this_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
+            if this_error:
+                plan_error = this_error
+                logger.error(f"❌ Decomposition returned error for plan {idx + 1}: {this_error}")
+                all_plans = []
+                break
+
+            plan_tasks: List[ActionTask] = plan_result.get("tasks", [])
+            if idx > 0:
+                plan_tasks = namespace_task_plan(plan_tasks, namespace=f"g{idx + 1}_")
+
+            for task in plan_tasks:
+                if getattr(task, "device", None) is None:
+                    task.device = device_type
+
+            all_plans.append(plan_tasks)
+
             try:
-                tasks_dump = [t.model_dump() if hasattr(t, 'model_dump') else t for t in tasks]
-                logger.info(f"📋 Decomposition result ({len(tasks_dump)} tasks): {json.dumps(tasks_dump, indent=2)}")
+                tasks_dump = [t.model_dump() if hasattr(t, "model_dump") else t for t in plan_tasks]
+                logger.info(
+                    f"📋 Decomposition result for plan {idx + 1} ({len(tasks_dump)} tasks): "
+                    f"{json.dumps(tasks_dump, indent=2)}"
+                )
             except Exception as e:
-                logger.info(f"📋 Decomposed into {len(tasks)} tasks (failed to serialize tasks: {e})")
-        
-        # Set device in all tasks if not already set
-        for task in tasks:
-            if getattr(task, "device", None) is None:
-                task.device = device_type
+                logger.info(f"📋 Decomposed plan {idx + 1} into {len(plan_tasks)} tasks (serialize failed: {e})")
+
+        primary_tasks: List[ActionTask] = all_plans[0] if all_plans else []
+        queued_task_plans: List[List[ActionTask]] = all_plans[1:] if len(all_plans) > 1 else []
+        tasks = [t for plan in all_plans for t in plan]
         
         return {
             "input": state["input"],
             "tasks": tasks,
+            "primary_tasks": primary_tasks,
+            "queued_task_plans": queued_task_plans,
             "status": "ready",
             "session_id": session_id,
             "original_message_id": original_message_id,
@@ -1543,7 +1658,8 @@ def create_coordinator_graph():
 
     async def execute_tasks(state: Dict) -> Dict:
         """STEP 2: Execute tasks sequentially"""
-        tasks = state["tasks"]
+        tasks = state.get("primary_tasks") or state["tasks"]
+        queued_task_plans = state.get("queued_task_plans") or []
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
         user_language = state.get("input", {}).get("user_language", "en")
@@ -1553,8 +1669,151 @@ def create_coordinator_graph():
         user_profile = state.get("input", {}).get("user_profile") or {}
         user_id = state.get("input", {}).get("user_id", "default_user")
 
+        async def handle_confirmation_revision_loop(current_task: ActionTask, initial_result: TaskResult) -> TaskResult:
+            """
+            If language confirmation returns critique, regenerate draft via reasoning,
+            then re-ask confirmation. Loop with a safe retry cap.
+            """
+            if current_task.target_agent != "language":
+                return initial_result
+
+            result = initial_result
+            max_revision_rounds = 3
+            revision_round = 0
+
+            while (
+                result.status == "awaiting_confirmation"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "critique"
+                and revision_round < max_revision_rounds
+            ):
+                revision_round += 1
+                critique_text = str(
+                    result.metadata.get("user_critique")
+                    or result.content
+                    or ""
+                ).strip()
+
+                input_from = (current_task.extra_params or {}).get("input_from")
+                prior_content = (
+                    (current_task.extra_params or {}).get("input_content")
+                    or result.metadata.get("draft_content")
+                    or (task_outputs.get(input_from) if input_from else "")
+                )
+
+                if not prior_content:
+                    logger.error(
+                        f"❌ Cannot revise confirmation task {current_task.task_id}: missing prior draft content"
+                    )
+                    return TaskResult(
+                        task_id=current_task.task_id,
+                        status="failed",
+                        error="Missing prior draft content for critique revision",
+                    )
+
+                revision_prompt = (
+                    "Revise the previously drafted content using the user critique. "
+                    "Preserve the same structure/format as the previous content.\n\n"
+                    f"USER CRITIQUE:\n{critique_text}\n\n"
+                    f"PREVIOUS CONTENT:\n{prior_content}\n\n"
+                    "Return only the revised final content."
+                )
+
+                revision_task = ActionTask(
+                    task_id=f"{current_task.task_id}_revise_{revision_round}",
+                    goal=current_task.goal,
+                    ai_prompt=revision_prompt,
+                    device=current_task.device,
+                    context="local",
+                    extra_params={
+                        "overall_goal": (current_task.extra_params or {}).get("overall_goal", current_task.goal),
+                        "goal": (current_task.extra_params or {}).get("goal", current_task.goal),
+                        "input_content": prior_content,
+                    },
+                    web_params={},
+                    target_agent="reasoning",
+                    depends_on=None,
+                )
+
+                logger.info(
+                    f"🔁 Confirmation critique detected for {current_task.task_id}; "
+                    f"starting revision round {revision_round}/{max_revision_rounds}"
+                )
+                revision_result = await execute_single_task(
+                    revision_task,
+                    session_id,
+                    original_message_id,
+                    user_language,
+                    output_language,
+                    user_profile,
+                    user_id,
+                )
+                results[revision_task.task_id] = revision_result
+                task_queue.log_execution(revision_task, revision_result)
+
+                if revision_result.status != "success" or not (revision_result.content or "").strip():
+                    logger.error(
+                        f"❌ Revision failed for {current_task.task_id} on round {revision_round}: "
+                        f"{revision_result.error or 'empty content'}"
+                    )
+                    return TaskResult(
+                        task_id=current_task.task_id,
+                        status="failed",
+                        error=revision_result.error or "Failed to regenerate revised content",
+                        metadata={"source": "confirmation_revision"},
+                    )
+
+                revised_content = revision_result.content.strip()
+                if input_from:
+                    task_outputs[input_from] = revised_content
+                current_task.extra_params = dict(current_task.extra_params or {})
+                current_task.extra_params["input_content"] = revised_content
+
+                result = await execute_single_task(
+                    current_task,
+                    session_id,
+                    original_message_id,
+                    user_language,
+                    output_language,
+                    user_profile,
+                    user_id,
+                )
+
+            if (
+                result.status == "awaiting_confirmation"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "critique"
+            ):
+                return TaskResult(
+                    task_id=current_task.task_id,
+                    status="failed",
+                    error="Maximum revision attempts reached without approval",
+                    metadata={"source": "confirmation_revision", "max_rounds": max_revision_rounds},
+                )
+
+            if (
+                result.status == "failed"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "rejected"
+            ):
+                return TaskResult(
+                    task_id=current_task.task_id,
+                    status="failed",
+                    error="User rejected the drafted content",
+                    metadata={"source": "confirmation", "decision": "rejected"},
+                )
+
+            return result
+
         task_queue.reset()
         task_queue.add_to_current(tasks)
+        for queued_plan in queued_task_plans:
+            if queued_plan:
+                task_queue.add_to_global({"tasks": queued_plan})
+        if queued_task_plans:
+            logger.info(
+                f"📚 Added {len(queued_task_plans)} independent plan(s) to global queue"
+            )
         
         results = {}
         task_outputs = {}
@@ -1741,6 +2000,7 @@ def create_coordinator_graph():
                 user_language, output_language, user_profile,
                 user_id
             )
+            result = await handle_confirmation_revision_loop(current_task, result)
             
             results[current_task.task_id] = result
             task_queue.log_execution(current_task, result)

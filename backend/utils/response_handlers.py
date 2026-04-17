@@ -62,7 +62,10 @@ async def handle_language_output(message):
             else:
                 log.warning(f"⚠️ Pending request already resolved: {target_id}")
         else:
-            log.error(f"❌ NO PENDING RESPONSE FOUND for: {target_id}")
+            log.warning(
+                f"⚠️ No pending request found for confirmation target_id={target_id}. "
+                "This can happen when the original HTTP request timed out before confirmation arrived."
+            )
 
     elif message.message_type == MessageType.TASK_RESPONSE:
         response_content = {

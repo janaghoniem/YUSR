@@ -86,6 +86,40 @@ def detect_language_from_text(text: str) -> str:
     ratio = arabic_chars / max(len(text.replace(" ", "")), 1)
     return "ar" if ratio > 0.15 else "en"
 
+
+def classify_task_confirmation_reply(user_reply: str) -> str:
+    """Classify user reply to a task confirmation as approved/critique/rejected."""
+    normalized = normalize_arabic(user_reply or "")
+    text = (user_reply or "").strip().lower()
+
+    approvals_en = {
+        "yes", "y", "ok", "okay", "sure", "proceed", "go ahead", "do it",
+        "send", "looks good", "approved", "approve", "confirm", "continue",
+    }
+    approvals_ar = {
+        "نعم", "اه", "آه", "ايوه", "ايوا", "تمام", "موافق", "اكمل", "استمر", "ارسله",
+    }
+    rejects_en = {
+        "no", "n", "cancel", "stop", "don't", "do not", "not now", "abort",
+    }
+    rejects_ar = {
+        "لا", "الغاء", "إلغاء", "الغيه", "وقف", "مش دلوقتي", "لا ترسل",
+    }
+
+    if normalized in approvals_en or normalized in approvals_ar:
+        return "approved"
+    if normalized in rejects_en or normalized in rejects_ar:
+        return "rejected"
+
+    short_tokens = text.split()
+    if 1 <= len(short_tokens) <= 3:
+        if all(tok in {"yes", "ok", "okay", "sure", "نعم", "تمام", "موافق"} for tok in short_tokens):
+            return "approved"
+        if all(tok in {"no", "cancel", "stop", "لا", "الغاء", "إلغاء", "وقف"} for tok in short_tokens):
+            return "rejected"
+
+    return "critique"
+
 # -----------------------
 # Groq API Call
 # -----------------------
@@ -1304,10 +1338,19 @@ async def start_language_agent(broker):
         if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
             if agent.awaiting_user_response.get("type") == "task_confirmation":
                 task_id = agent.awaiting_user_response.get("task_id")
-                orig_request = agent.awaiting_user_response.get("original_request")
+                draft_content = agent.awaiting_user_response.get("draft_content", "")
+                input_from = agent.awaiting_user_response.get("input_from")
                 agent.awaiting_user_response = None
                 
                 logger.info(f"✅ User answered task confirmation for {task_id}: {input_text}")
+
+                decision = classify_task_confirmation_reply(input_text)
+                if decision == "approved":
+                    exec_status = "success"
+                elif decision == "rejected":
+                    exec_status = "failed"
+                else:
+                    exec_status = "awaiting_confirmation"
                 
                 # Clear thinking step immediately
                 try:
@@ -1324,14 +1367,27 @@ async def start_language_agent(broker):
                     task_id=task_id,
                     response_to=http_request_id,
                     payload={
-                        "status": "success",
+                        "status": exec_status,
                         "content": input_text,
-                        "details": f"User replied: {input_text}"
+                        "details": f"User replied: {input_text}",
+                        "metadata": {
+                            "confirmation_decision": decision,
+                            "user_critique": input_text if decision == "critique" else "",
+                            "draft_content": draft_content,
+                            "input_from": input_from,
+                        },
                     }
                 )
                 await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
 
                 # Resolve the WebSocket pending request for the user's confirmation input
+                if decision == "approved":
+                    ack_text = "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding..."
+                elif decision == "rejected":
+                    ack_text = "تم إيقاف المهمة بناءً على طلبك." if agent.preferred_language == "ar" else "Understood, I will stop this task."
+                else:
+                    ack_text = "ممتاز، سأعيد صياغتها بناءً على ملاحظتك." if agent.preferred_language == "ar" else "Got it, I will revise the draft based on your feedback."
+
                 ws_resolve_msg = AgentMessage(
                     message_type=MessageType.TASK_RESPONSE,
                     sender=AgentType.LANGUAGE,
@@ -1340,7 +1396,7 @@ async def start_language_agent(broker):
                     response_to=message.message_id,
                     payload={
                         "status": "processing",
-                        "response": "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding...",
+                        "response": ack_text,
                         "user_language": agent.preferred_language
                     }
                 )
@@ -1616,7 +1672,9 @@ async def start_language_agent(broker):
         agent.awaiting_user_response = {
             "type": "task_confirmation",
             "task_id": task_id,
-            "original_request": message.response_to
+            "original_request": message.response_to,
+            "draft_content": input_content,
+            "input_from": extra_params.get("input_from"),
         }
         # If the mobile app recreates sessions, save immediately so a new session on the next turn can recover this via the DB
         agent.save_memory()

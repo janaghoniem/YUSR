@@ -32,15 +32,70 @@ from typing import Any, Dict, List, Optional, Tuple
 # Try rapidfuzz first (faster), fall back to difflib
 try:
     from rapidfuzz import fuzz as _fuzz
+
+    def _numeric_penalty(a: str, b: str) -> float:
+        """
+        Return a penalty multiplier (0.0–1.0) based on mismatched numeric tokens.
+
+        If the query contains numbers (e.g. "3", "7") that are absent from the
+        filename, the match is almost certainly wrong.  Each missing query number
+        that appears in the filename as a *different* number applies a 0.30
+        reduction so that "session 7" can never win over "session 1" just because
+        partial_ratio sees "session" overlapping.
+
+        Rules
+        -----
+        * Extract digit-only tokens from both normalised strings.
+        * For every number in the query that is NOT in the filename numbers,
+          check whether *any* number IS present in the filename — if so, this is
+          a numeric mismatch (e.g. query has "7", file has "1"): penalise 0.70×.
+        * If query has numbers and file has NONE at all, penalise lightly (0.85×)
+          because the file might just omit the number in its name.
+        * No numbers in query → no penalty (1.0).
+        """
+        import re
+        q_nums = set(re.findall(r'\b\d+\b', a))
+        f_nums = set(re.findall(r'\b\d+\b', b))
+
+        if not q_nums:
+            return 1.0  # Query has no numbers — nothing to check
+
+        missing = q_nums - f_nums          # Numbers in query but not in filename
+        if not missing:
+            return 1.0  # All query numbers present in filename — perfect
+
+        # Filename has numbers but they differ from the query numbers
+        if f_nums:
+            # Each mismatched number applies a 0.70× factor
+            return 0.70 ** len(missing)
+
+        # Filename has no numbers at all — mild penalty
+        return 0.85
+
     def _score(a: str, b: str) -> float:
         """
-        Combine token_sort_ratio (order-insensitive) and partial_ratio
-        (substring-aware) for robust voice-input matching.
+        Robust filename match combining:
+          - token_sort_ratio  : order-insensitive full-token comparison
+          - token_set_ratio   : handles extra tokens in filename gracefully
+          - partial_ratio     : substring awareness (weighted down to avoid
+                                false positives like "Lab 3 SWE" beating "Lab 3 KR")
+          - numeric penalty   : punishes mismatched numbers (session 1 vs session 7)
+
         Returns 0.0–1.0.
         """
-        token  = _fuzz.token_sort_ratio(a, b)   # "q4 report earnings" == "earnings report q4"
-        partial = _fuzz.partial_ratio(a, b)      # "report" matches inside "Q4_Report_Final_v2"
-        return max(token, partial) / 100.0
+        token_sort = _fuzz.token_sort_ratio(a, b)   # order-insensitive
+        token_set  = _fuzz.token_set_ratio(a, b)    # handles extra tokens in filename
+        partial    = _fuzz.partial_ratio(a, b)       # substring (weighted down)
+
+        # Weighted combination — partial gets less weight to stop it crowning
+        # wrong matches just because they share a short substring
+        raw = (token_sort * 0.45 + token_set * 0.35 + partial * 0.20) / 100.0
+
+        # Apply numeric penalty AFTER combining so a number mismatch always
+        # drags down the final score even when substring similarity is high
+        penalty = _numeric_penalty(a, b)
+        return raw * penalty
+
     FUZZY_BACKEND = "rapidfuzz"
 except ImportError:
     from difflib import SequenceMatcher
@@ -62,7 +117,13 @@ SKIP_DIRS = {
     # Windows system
     "Windows", "System32", "SysWOW64", "Program Files", "Program Files (x86)",
     "AppData", "ProgramData", "$Recycle.Bin", "Recovery",
+    # Python / package managers (LOW PRIORITY - system-generated)
+    "site-packages", "dist-info", "miniconda", "anaconda", ".egg-info",
+    "pip-cache", ".pyenv", ".gem", "node_modules",
 }
+
+# User-priority directories - files here get boosted in ranking
+USER_PRIORITY_DIRS = {"Desktop", "Downloads", "Documents", "OneDrive", "Google Drive"}
 
 FILLER_WORDS = {"the", "a", "my", "your", "and", "or", "is", "are", "of", "for", "in"}
 
@@ -70,7 +131,7 @@ FILLER_WORDS = {"the", "a", "my", "your", "and", "or", "is", "are", "of", "for",
 def _cache_path() -> str:
     """Cache path under %LOCALAPPDATA%\\yusr\\."""
     base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(base, "yusr", "file_index_cache.json")
+    return os.path.join(base, "aura", "file_index_cache.json")
 
 CACHE_PATH    = _cache_path()
 CACHE_VERSION = 3          # Bump when index schema changes
@@ -94,17 +155,20 @@ class Normalizer:
         1. Lowercase
         2. Replace separators (_, -, .) with spaces
         3. Strip non-alphanumeric characters
-        4. Remove filler words and single chars
+        4. Remove filler words; keep tokens of len > 1 OR that are purely numeric
+           (so single-digit numbers like "1", "3", "7" survive the length filter)
         5. Collapse whitespace
 
         Example:
             "My-Report_Q4.2024 (FINAL).pdf" → "report q4 2024 final pdf"
+            "Session 7 DEPI.pdf"            → "session 7 depi pdf"
         """
         s = text.lower()
         for ch in ("_", "-", ".", "(", ")", "[", "]"):
             s = s.replace(ch, " ")
         s = "".join(c if c.isalnum() or c.isspace() else " " for c in s)
-        words = [w for w in s.split() if w not in FILLER_WORDS and len(w) > 1]
+        # Keep a word if it's purely numeric (any length) OR non-numeric and > 1 char
+        words = [w for w in s.split() if w not in FILLER_WORDS and (w.isdigit() or len(w) > 1)]
         return " ".join(words).strip()
 
 
@@ -355,16 +419,117 @@ class FuzzyMatcher:
     def __init__(self, index: List[Dict[str, Any]]) -> None:
         self.index = index
 
+    def _is_user_file(self, path: str) -> tuple[bool, float]:
+        """
+        Check if file is in user-priority directory.
+        Returns: (is_user_priority, boost_factor)
+
+        User-priority (boost 1.2x): Desktop, Downloads, Documents, OneDrive
+        System-file (penalize 0.4x): site-packages, miniconda, Windows system
+        """
+        path_lower = path.lower()
+
+        # Check user-priority directories
+        for user_dir in USER_PRIORITY_DIRS:
+            if user_dir.lower() in path_lower:
+                return (True, 1.2)  # Boost user files
+
+        # Check system directories
+        system_markers = ["site-packages", "miniconda", "anaconda", "appdata", "program files",
+                         "windows\\system", "\\lib\\", "\\.egg-info"]
+        for marker in system_markers:
+            if marker in path_lower:
+                return (False, 0.4)  # Penalize system files
+
+        return (False, 1.0)  # Neutral
+
+    def _count_matching_tokens(self, query_tokens: set, filename_tokens: set) -> tuple[int, int]:
+        """
+        Count how many tokens from query are in filename.
+        Returns: (matching_count, total_query_tokens)
+        """
+        matching = len(query_tokens & filename_tokens)
+        return (matching, len(query_tokens))
+
     def _best_candidates(
         self, normalized_query: str, threshold: float
     ) -> List[Dict[str, Any]]:
-        """Return all index entries scoring >= threshold, sorted desc."""
+        """
+        Return all index entries scoring >= threshold, sorted by:
+        1. Combined score (fuzzy × location × token_coverage × path_context)
+        2. Exact-number-match bonus
+        3. Location priority (user dirs > neutral > system dirs)
+        4. Token coverage (full matches > partial matches)
+
+        Changes vs original
+        -------------------
+        * path_context_score: also score the query against the *parent directory
+          path*, normalised the same way.  This means "Lab 3 KR" correctly
+          prefers the file inside a "Knowledge Representation" folder over one
+          inside an "SWE110" folder, even when filename fuzzy scores are similar.
+        * number_match_bonus: if ALL numeric tokens in the query appear in the
+          filename, add a 15 % bonus so "Lecture 3" conclusively beats "Lecture 1"
+          when the file name literally contains the right number.
+        * combined_score formula updated to include path_context and number bonus.
+        """
+        import re
+        query_tokens = set(normalized_query.split())
+        q_nums = set(re.findall(r'\b\d+\b', normalized_query))
         results = []
+
         for entry in self.index:
-            score = _score(normalized_query, entry["normalized_name"])
-            if score >= threshold:
-                results.append({**entry, "_score": score})
-        results.sort(key=lambda x: x["_score"], reverse=True)
+            # ── Base fuzzy score (filename only) ──────────────────────────────
+            fuzzy_score = _score(normalized_query, entry["normalized_name"])
+            if fuzzy_score < threshold:
+                continue
+
+            # ── Path-context score ────────────────────────────────────────────
+            # Normalise the parent directory path and fuzzy-score it against
+            # the query.  This lifts "KR" folder matches when the filename
+            # alone is ambiguous (e.g. "Lab 3 - Group 5 - SWE110" vs "Lab 3 - KR").
+            parent_dir = os.path.dirname(entry["path"])
+            norm_parent = Normalizer.normalize(os.path.basename(parent_dir))
+            # Score query against the immediate parent folder name
+            path_score = _score(normalized_query, norm_parent)
+            # Blend: 85 % filename, 15 % folder context
+            blended_score = fuzzy_score * 0.85 + path_score * 0.15
+
+            # ── Location boost / penalty ──────────────────────────────────────
+            is_user, location_boost = self._is_user_file(entry["path"])
+
+            # ── Token coverage ────────────────────────────────────────────────
+            filename_tokens = set(entry["normalized_name"].split())
+            matching_tokens, total_tokens = self._count_matching_tokens(query_tokens, filename_tokens)
+            token_coverage = matching_tokens / max(total_tokens, 1) if total_tokens > 0 else 0
+
+            # ── Exact-number-match bonus ──────────────────────────────────────
+            # If the query has numeric tokens and ALL of them appear verbatim in
+            # the filename tokens, reward the file with a 15 % boost.
+            f_nums = set(re.findall(r'\b\d+\b', entry["normalized_name"]))
+            if q_nums and q_nums.issubset(f_nums):
+                number_bonus = 0.15
+            elif q_nums and not (q_nums & f_nums):
+                number_bonus = -0.10   # slight nudge down for complete number miss
+            else:
+                number_bonus = 0.0
+
+            # ── Combined score ────────────────────────────────────────────────
+            combined_score = (
+                blended_score
+                * location_boost
+                * (1 + token_coverage * 0.8)
+                * (1 + number_bonus)
+            )
+
+            results.append({
+                **entry,
+                "_score": fuzzy_score,
+                "_combined_score": combined_score,
+                "_location_boost": location_boost,
+                "_token_coverage": token_coverage,
+            })
+
+        results.sort(key=lambda x: x["_combined_score"], reverse=True)
         return results
 
     def match(self, query: str) -> Dict[str, Any]:
@@ -384,8 +549,12 @@ class FuzzyMatcher:
 
         if valid:
             best = valid[0]
-            # If top match is clearly better than second, return it directly
-            if len(valid) == 1 or (valid[0]["_score"] - valid[1]["_score"]) >= 0.12:
+            # Use combined_score gap (which includes number bonus + path context)
+            # so that "Lecture 3" clearly beats "Lecture 1" even at similar raw
+            # fuzzy scores.  Threshold lowered to 0.08 so a number-match bonus
+            # of 0.15 is sufficient to resolve ambiguity.
+            gap = valid[0]["_combined_score"] - (valid[1]["_combined_score"] if len(valid) > 1 else 0)
+            if len(valid) == 1 or gap >= 0.08:
                 return {
                     "status": "found",
                     "path": best["path"],
@@ -588,6 +757,54 @@ def find_file(filename: str, force_refresh: bool = False) -> Dict[str, Any]:
     return _get_engine().find(filename, force_refresh=force_refresh)
 
 
+def find_all_matches(filename: str) -> Dict[str, Any]:
+    """
+    Find ALL matching files with confidence scores.
+    Perfect for showing users all options when multiple matches exist.
+
+    Returns:
+        {
+          "status": "found" | "multiple" | "not_found",
+          "matches": [{"path": str, "confidence": float, "name": str}, ...],
+          "total": int,
+          "suggestions": [str, ...]  # if not_found
+        }
+
+    Example:
+        >>> result = find_all_matches("lecture")
+        >>> for match in result["matches"]:
+        ...     print(f"{match['name']} ({match['confidence']:.0%}) → {match['path']}")
+    """
+    result = _get_engine().find(filename)
+
+    if result["status"] == "found":
+        return {
+            "status": "found",
+            "matches": [{"path": result["path"], "confidence": result["confidence"], "name": os.path.basename(result["path"])}],
+            "total": 1
+        }
+    elif result["status"] == "multiple":
+        matches = []
+        for m in result.get("paths", []):
+            matches.append({
+                "path": m["path"],
+                "confidence": m["confidence"],
+                "name": os.path.basename(m["path"])
+            })
+        return {
+            "status": "multiple",
+            "matches": matches,
+            "total": len(matches)
+        }
+    else:
+        return {
+            "status": "not_found",
+            "matches": [],
+            "total": 0,
+            "suggestions": result.get("suggestions", [])
+        }
+
+
 def find_all_files(filename: str) -> List[str]:
     """Return all matching paths (backward-compatible)."""
     result = find_file(filename)
@@ -632,6 +849,19 @@ def open_file(filename: str) -> bool:
     logger.info("Opening: %s", path)
     print(f"[FILE]: {path}")
     return _open_file(path)
+
+
+def preload_index() -> None:
+    """
+    Pre-load and warm up the file index BEFORE any file searches.
+    Call this during agent startup/initialization to avoid timeout on first find_file() call.
+
+    If cache exists and is valid, loads instantly (~100ms).
+    If cache missing/expired, builds from scratch (~5-15s depending on drive).
+    """
+    logger.info("📂 Preloading file index...")
+    _get_engine()._ensure_index()
+    logger.info("✅ File index preloaded and ready")
 
 
 def refresh_index() -> None:

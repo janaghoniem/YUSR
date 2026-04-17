@@ -79,8 +79,9 @@ class TaskResult:
 class RAGTaskAdapter:
     @staticmethod
     def build_rag_query(task: ActionTask) -> str:
+        """Build RAG query WITHOUT routing suffix (used for LLM prompt)"""
         query_parts = [task.ai_prompt]
-        
+
         if task.extra_params:
             if 'app_name' in task.extra_params:
                 query_parts.append(f"Application: {task.extra_params['app_name']}")
@@ -97,15 +98,14 @@ class RAGTaskAdapter:
                     query_parts.append(f"Input data: {content[:4900]}...\n[TRUNCATED - Content too large]")
                 else:
                     query_parts.append(f"Input data: {content}")
-        
-        if task.context == "local":
-            query_parts.append("(desktop automation)")
-        elif task.context == "web":
-            query_parts.append("(Playwright web automation)")
-        
-        enhanced_query = " | ".join(query_parts)
-        logger.debug(f"🔍 Enhanced query: {enhanced_query[:100]}...")
-        return enhanced_query
+
+        # ⚠️ REMOVED routing suffix "(desktop automation)" / "(Playwright web automation)"
+        # Routing suffix was causing file_agent to receive wrong file names
+        # e.g., find_file("GKE | (desktop automation)") instead of find_file("GKE")
+
+        query = " | ".join(query_parts)
+        logger.debug(f"🔍 RAG Query: {query[:100]}...")
+        return query
     
     @staticmethod
     def execution_result_to_task_result(task: ActionTask, execution_result) -> TaskResult:
@@ -148,6 +148,18 @@ class CoordinatorRAGBridge:
         from agents.execution_agent.RAG.task_validator import TaskValidator, WindowState
         self.validator = TaskValidator()
         self.window_state_class = WindowState
+
+        # 🔥 PRE-LOAD FILE INDEX to avoid timeout on first find_file() call
+        # This is critical - builds cache on first agent run (~5-15s), instant on subsequent runs
+        try:
+            logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
+            from agents.execution_agent.RAG.file_agent import preload_index
+            preload_index()
+            logger.info("✅ [INIT] File index ready")
+        except Exception as e:
+            logger.warning(f"⚠️ [INIT] Could not pre-load file index: {e}")
+            logger.info("   (Index will be loaded on first find_file() call)")
+
 
     #added by shahd for omniparser
     def _detect_element_coordinates(self, element_description: str) -> Optional[tuple]:

@@ -1104,8 +1104,9 @@ class SandboxExecutionPipeline:
             logger.warning(f"🔒 Layer 3 (code scan): {len(code_scan.violations)} violation(s)")
             for v in code_scan.violations:
                 logger.warning(f"   - {v}")
-            # Block execution if code contains credential extraction patterns
-            if any("password" in v.lower() or "credential" in v.lower() for v in code_scan.violations):
+        # Block execution if code contains credential extraction or destructive OS patterns
+        BLOCK_KEYWORDS = ("password", "credential", "shutdown", "poweroff", "netsh")
+        if any(any(kw in v.lower() for kw in BLOCK_KEYWORDS) for v in code_scan.violations):
                 return ExecutionResult(
                     status=ExecutionStatus.SECURITY_VIOLATION,
                     exit_code=-1,

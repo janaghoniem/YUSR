@@ -159,7 +159,16 @@ _CODE_BLOCK_PATTERNS = [
     
     # netsh commands (WiFi password extraction)
     re.compile(r'netsh\s+wlan', re.IGNORECASE),
-    
+
+    # Shutdown / power-off commands typed via pyautogui or any write() call
+    re.compile(r'shutdown\s*/[srph]', re.IGNORECASE),
+    re.compile(r'shutdown\s+/s', re.IGNORECASE),
+    re.compile(r'shutdown\s+now\b', re.IGNORECASE),
+    re.compile(r'pyautogui\.write\s*\(\s*["\'].*shutdown', re.IGNORECASE),
+    re.compile(r'pyautogui\.typewrite\s*\(\s*["\'].*shutdown', re.IGNORECASE),
+    re.compile(r'\.write\s*\(\s*["\']shutdown', re.IGNORECASE),
+    re.compile(r'poweroff\b', re.IGNORECASE),
+
     # Registry reads targeting credential stores
     re.compile(r'OpenKey.*(?:SAM|Security|Credentials)', re.IGNORECASE),
     

@@ -3186,6 +3186,47 @@ async def execute_single_task(
     # DESKTOP TASK ROUTING (ORIGINAL)
     # ════════════════════════════════════════════════════════════════
     
+    # ── Destructive OS command gate ───────────────────────────────────────────
+    # Blocks any action task whose prompt contains OS-level destructive commands
+    # that should never be executed regardless of how the plan was generated.
+    # This catches cases where the LLM decomposer produced a shutdown/delete plan
+    # from ambiguous input that slipped past the intent classifier.
+    _BLOCKED_TASK_PATTERNS = [
+        r"shutdown\s*/[srph]",
+        r"shutdown\s+/s",
+        r"shutdown\s+now\b",
+        r"shutdown\s+the\s+(?:computer|pc|desktop|system)",
+        r"shut\s*down\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"power\s*off\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"turn\s+off\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"(?:type|write|enter)\s+.*shutdown\s*/s",
+        r"poweroff\b",
+        r"rm\s+-rf\s+/",
+        r"del\s+/f\s+/s\s+[Cc]:\\\\[Ww]indows",
+        r"format\s+[Cc]:",
+    ]
+    if task.target_agent == "action":
+        _prompt_lower = (task.ai_prompt or "").lower()
+        _ep_lower = str(task.extra_params or "").lower()
+        _combined = _prompt_lower + " " + _ep_lower
+        for _pat in _BLOCKED_TASK_PATTERNS:
+            if re.search(_pat, _combined, re.IGNORECASE):
+                logger.error(
+                    f"🚫 DESTRUCTIVE TASK BLOCKED: task={task.task_id}, "
+                    f"matched pattern='{_pat}', prompt='{task.ai_prompt[:100]}'"
+                )
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=(
+                        f"Task blocked by safety gate: destructive OS command detected "
+                        f"in task prompt (pattern: {_pat}). "
+                        f"This action requires explicit confirmation and cannot be executed "
+                        f"from an automated plan."
+                    ),
+                )
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Route to appropriate agent
     if task.target_agent == "action":
         channel = Channels.COORDINATOR_TO_EXECUTION

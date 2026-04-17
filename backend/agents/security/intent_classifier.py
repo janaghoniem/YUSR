@@ -96,6 +96,12 @@ class IntentClassifier:
             (r"cmd.*delete", 7.0, "system_manipulation"),
             (r"powershell.*delete", 7.0, "system_manipulation"),
             (r"command prompt.*delete", 7.0, "system_manipulation"),
+            (r"shut\s*down", 7.0, "system_manipulation"),
+            (r"shutdown", 7.0, "system_manipulation"),
+            (r"power\s*off", 7.0, "system_manipulation"),
+            (r"turn\s+off\s+(?:the\s+)?(?:computer|pc|desktop|system)", 7.0, "system_manipulation"),
+            (r"reboot", 5.0, "system_manipulation"),
+            (r"restart\s+(?:the\s+)?(?:computer|pc|desktop|system)", 5.0, "system_manipulation"),
             
             # ================================================================
             # MEDIUM WEIGHT (5.0) — Dangerous libraries (BLOCK)
@@ -206,14 +212,26 @@ class IntentClassifier:
             r"new system prompt",
             r"system override",
             r"important system note",
-            
-            # Destructive shell invocations
+
+            # Shutdown / reboot / power-off commands (any phrasing)
+            r"shutdown\s+/s",
+            r"shutdown\s+/r",
+            r"shutdown\s+/h",
+            r"shutdown\s+/p",
+            r"shutdown\s+-h",
+            r"shutdown\s+-r",
+            r"shutdown\s+now",
+            r"poweroff\b",
+            r"halt\b",
+            r"reboot\b",
+            r"(?:shut\s*down|power\s*off|turn\s*off)\s+(?:the\s+)?(?:computer|pc|desktop|system|machine|device)",
+            r"(?:cmd|powershell|terminal|bash).*shutdown",
             r"(?:cmd|powershell|terminal|bash).*(?:del\s+/f|rm\s+-rf|rmdir\s+/s|format\s+[a-z]:)",
             r"(?:cmd|powershell).*(?:reg\s+delete|reg\s+add.*system)",
             r"(?:cmd|powershell).*(?:net\s+user|net\s+localgroup)",
             r"(?:cmd|powershell).*(?:attrib|cacls|icacls|takeown).*system32",
-            r"(?:cmd|powershell).*(?:shutdown|taskkill.*system|sc\s+delete)",
-            
+            r"(?:cmd|powershell).*(?:taskkill.*system|sc\s+delete)",
+
             # System-critical path deletion
             r"rm -rf /",
             r"rm -rf /\*",

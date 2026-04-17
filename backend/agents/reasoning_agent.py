@@ -5,8 +5,9 @@ import json
 from typing import Dict, Any
 from dotenv import load_dotenv
 
-# Groq & LangChain Imports
+# Model & LangChain Imports
 from langchain_groq import ChatGroq
+from mistralai.client import Mistral
 
 # Project Utilities
 from agents.utils.protocol import Channels, AgentMessage, MessageType, AgentType
@@ -17,7 +18,9 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 REASONING_MODEL = "llama-3.3-70b-versatile"
+MISTRAL_REASONING_MODEL = os.getenv("MISTRAL_MODEL", "mistral-medium-latest")
 
 
 def _build_personalization_instruction(user_profile: Dict[str, Any], target_lang: str) -> str:
@@ -90,7 +93,8 @@ class ReasoningAgent:
             model=REASONING_MODEL,
             temperature=0.2,
             groq_api_key=GROQ_API_KEY
-        )
+        ) if GROQ_API_KEY else None
+        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
 
         self.base_system_prompt = """You are the REASONING AGENT – the cognitive brain of the AURA multi-agent system.
 
@@ -136,6 +140,55 @@ STRICT OPERATIONAL RULES:
 
 You are an internal reasoning component, not a user-facing assistant.
 Your goal is correctness, clarity, and usefulness to the system."""
+
+    @staticmethod
+    def _extract_mistral_text(response_obj: Any) -> str:
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return str(response_obj)
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", "") if message is not None else ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(getattr(item, "text", item)))
+                content = "".join(parts)
+            return str(content or "")
+        except Exception:
+            return ""
+
+    async def _invoke_with_fallback(self, prompt: str) -> str:
+        if self.llm:
+            try:
+                response = await self.llm.ainvoke(prompt)
+                return response.content if hasattr(response, "content") else str(response)
+            except Exception as groq_err:
+                logger.warning(f"⚠️ Groq reasoning call failed, trying Mistral fallback: {groq_err}")
+        else:
+            logger.warning("⚠️ GROQ_API_KEY missing for reasoning agent; trying Mistral fallback")
+
+        if not self.mistral_client:
+            logger.error("❌ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+            return ""
+
+        try:
+            response = await asyncio.to_thread(
+                self.mistral_client.chat.complete,
+                model=MISTRAL_REASONING_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            text = self._extract_mistral_text(response)
+            if text:
+                logger.info(f"✅ Reasoning fallback succeeded with Mistral ({MISTRAL_REASONING_MODEL})")
+            return text
+        except Exception as mistral_err:
+            logger.error(f"❌ Mistral reasoning fallback failed: {mistral_err}")
+            return ""
 
     def _build_system_prompt(self, user_profile: Dict[str, Any], target_lang: str) -> str:
         """Combine base system prompt with dynamic personalization instruction."""
@@ -226,8 +279,14 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     f"\n\nPlease respond with valid JSON only."
                 )
 
-            response = await self.llm.ainvoke(full_prompt)
-            response_text = response.content if hasattr(response, 'content') else str(response)
+            response_text = await self._invoke_with_fallback(full_prompt)
+            if not response_text:
+                return {
+                    "task_id": task_payload.get("task_id"),
+                    "status": "failed",
+                    "error": "Both Groq and Mistral reasoning calls failed",
+                    "content": "",
+                }
             logger.info(f"🤖 REASONING RESPONSE ({len(response_text)} chars): {response_text[:200]}...")
 
             # ── Strip markdown code fences before parsing ──────────────────────────
@@ -286,7 +345,7 @@ Your goal is correctness, clarity, and usefulness to the system."""
 
 async def start_reasoning_agent():
     agent = ReasoningAgent()
-    logger.info(f"✅ Reasoning Agent (Groq) started using {REASONING_MODEL}")
+    logger.info(f"✅ Reasoning Agent started (Groq primary: {REASONING_MODEL}, Mistral fallback: {MISTRAL_REASONING_MODEL})")
 
     async def handle_reasoning_request(message: AgentMessage):
         """

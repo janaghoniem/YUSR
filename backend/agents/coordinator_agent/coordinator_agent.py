@@ -32,13 +32,70 @@ load_dotenv()
 # --- Initialize Groq LLM ---
 from .config.settings import LLM_MODEL, GROQ_API_KEY, MONGODB_URI
 from langchain_groq import ChatGroq
+from mistralai.client import Mistral
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-medium-latest")
 
 llm = ChatGroq(
     model=LLM_MODEL,
     temperature=0.05,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
-) 
+) if GROQ_API_KEY else None
+
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
+
+
+def _extract_mistral_text(response_obj: Any) -> str:
+    try:
+        choices = getattr(response_obj, "choices", None) or []
+        if not choices:
+            return str(response_obj)
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(str(getattr(item, "text", item)))
+            content = "".join(parts)
+        return str(content or "")
+    except Exception:
+        return ""
+
+
+async def llm_invoke_with_fallback(prompt: str) -> str:
+    if llm:
+        try:
+            response = await llm.ainvoke(prompt)
+            return response.content if hasattr(response, "content") else str(response)
+        except Exception as groq_err:
+            logger.warning(f"⚠️ Coordinator Groq call failed, trying Mistral fallback: {groq_err}")
+    else:
+        logger.warning("⚠️ Coordinator Groq client unavailable: GROQ_API_KEY is not set")
+
+    if not mistral_client:
+        logger.error("❌ Coordinator Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+        return ""
+
+    try:
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model=MISTRAL_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.05,
+            max_tokens=2048,
+        )
+        text = _extract_mistral_text(response)
+        if text:
+            logger.info(f"✅ Coordinator fallback succeeded with Mistral ({MISTRAL_MODEL})")
+        return text
+    except Exception as mistral_err:
+        logger.error(f"❌ Coordinator Mistral fallback failed: {mistral_err}")
+        return ""
 
 
 # Initialize MongoDB checkpointer
@@ -1083,8 +1140,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
 Generate the task decomposition now:"""
 
     try:
-        response = await llm.ainvoke(prompt)
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        response_text = await llm_invoke_with_fallback(prompt)
         response_text = response_text.strip()
 
         # ── ROBUST JSON EXTRACTION ─────────────────────────────────────────────
@@ -1250,8 +1306,7 @@ If the plan violates this common‑sense device logic, you MAY add missing steps
 Return ONLY a valid JSON array of tasks (same format as input). Do not include markdown or explanations.
 """
         try:
-            val_response = await llm.ainvoke(validation_prompt)
-            val_text = val_response.content if hasattr(val_response, 'content') else str(val_response)
+            val_text = await llm_invoke_with_fallback(validation_prompt)
             val_text = val_text.strip()
             
             # Step A: strip markdown fences
@@ -1434,8 +1489,7 @@ Return strict JSON only:
 }}"""
 
     try:
-        llm_resp = await llm.ainvoke(split_prompt)
-        llm_text = llm_resp.content if hasattr(llm_resp, "content") else str(llm_resp)
+        llm_text = await llm_invoke_with_fallback(split_prompt)
         payload = extract_json_payload(llm_text, {"split": False, "goals": []})
     except Exception as e:
         logger.warning(f"⚠️ Independent-intent split failed, using single-plan fallback: {e}")
@@ -2573,8 +2627,7 @@ If truly nothing useful (e.g. task was just opening notepad with no user data), 
 
 Extract now:"""
                 
-                extraction_response = await llm.ainvoke(extraction_prompt)
-                extraction_text = extraction_response.content if hasattr(extraction_response, 'content') else str(extraction_response)
+                extraction_text = await llm_invoke_with_fallback(extraction_prompt)
                 preferences_to_store = extract_json_payload(extraction_text, [])
                 
                 if preferences_to_store and isinstance(preferences_to_store, list):
@@ -3085,8 +3138,10 @@ async def execute_single_task(
     await broker.publish(channel, task_msg)
     
     # Wait for result
+    # Language confirmation tasks depend on human response and need a longer SLA.
+    wait_timeout = 180 if task.target_agent == "language" else 60
     try:
-        result_payload = await asyncio.wait_for(future, timeout=60)
+        result_payload = await asyncio.wait_for(future, timeout=wait_timeout)
         payload_status = result_payload.get("status", "failed")
         if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
             payload_status = "failed"
@@ -3158,7 +3213,7 @@ async def execute_single_task(
         return result
 
     except asyncio.TimeoutError:
-        logger.error(f"⏰ Task {task.task_id} timeout after 60 seconds")
+        logger.error(f"⏰ Task {task.task_id} timeout after {wait_timeout} seconds")
         # Record timeout as near-zero reward in ICRL buffer
         if session_id and task.target_agent == "action":
             try:
@@ -3168,14 +3223,14 @@ async def execute_single_task(
                 icrl_buffer.add(
                     attempt_summary=f"Task: {task.ai_prompt[:100]} | Status: timeout",
                     reward=0.05,
-                    result_snippet="Task timed out after 60 seconds",
+                    result_snippet=f"Task timed out after {wait_timeout} seconds",
                 )
             except Exception:
                 pass
         return TaskResult(
             task_id=task.task_id,
             status="failed",
-            error="Task timeout"
+            error=f"Task timeout after {wait_timeout}s"
         )
     finally:
         pending_results.pop(task.task_id, None)

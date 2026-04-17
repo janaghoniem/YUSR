@@ -14,6 +14,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import asyncio
 import logging
 from groq import Groq
+from mistralai.client import Mistral
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from agents.utils.protocol import AgentMessage, MessageType, AgentType, ClarificationMessage
@@ -28,8 +29,11 @@ logger = logging.getLogger(__name__)
 # CONFIG - GROQ API
 # -----------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 MODEL_NAME = "llama-3.3-70b-versatile"
-client = Groq(api_key=GROQ_API_KEY)
+MISTRAL_MODEL_NAME = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
 
 CONV_SAVE_PATH = "conversations.jsonl"
 TASKS_SAVE_PATH = "tasks.jsonl"
@@ -91,6 +95,8 @@ def classify_task_confirmation_reply(user_reply: str) -> str:
     """Classify user reply to a task confirmation as approved/critique/rejected."""
     normalized = normalize_arabic(user_reply or "")
     text = (user_reply or "").strip().lower()
+    compact = re.sub(r"[^a-z\u0600-\u06FF\s]", " ", text)
+    compact = re.sub(r"\s+", " ", compact).strip()
 
     approvals_en = {
         "yes", "y", "ok", "okay", "sure", "proceed", "go ahead", "do it",
@@ -106,10 +112,29 @@ def classify_task_confirmation_reply(user_reply: str) -> str:
         "لا", "الغاء", "إلغاء", "الغيه", "وقف", "مش دلوقتي", "لا ترسل",
     }
 
+    approval_phrases_en = [
+        "go ahead", "go for it", "send it", "proceed", "continue", "looks good",
+        "sounds good", "all good", "you can send", "yes go ahead",
+    ]
+    rejection_phrases_en = [
+        "do not send", "don't send", "cancel", "stop", "abort", "not now",
+    ]
+    approval_phrases_ar = [
+        "ارسله", "ارسلي", "كملي", "اكمل", "استمر", "موافق", "تمام كمل",
+    ]
+    rejection_phrases_ar = [
+        "لا ترسل", "لا تبعت", "الغاء", "إلغاء", "وقف",
+    ]
+
     if normalized in approvals_en or normalized in approvals_ar:
         return "approved"
     if normalized in rejects_en or normalized in rejects_ar:
         return "rejected"
+
+    if any(p in compact for p in rejection_phrases_en) or any(p in normalized for p in rejection_phrases_ar):
+        return "rejected"
+    if any(p in compact for p in approval_phrases_en) or any(p in normalized for p in approval_phrases_ar):
+        return "approved"
 
     short_tokens = text.split()
     if 1 <= len(short_tokens) <= 3:
@@ -118,15 +143,69 @@ def classify_task_confirmation_reply(user_reply: str) -> str:
         if all(tok in {"no", "cancel", "stop", "لا", "الغاء", "إلغاء", "وقف"} for tok in short_tokens):
             return "rejected"
 
+    # If it begins with an explicit affirmative cue and contains no revision cue,
+    # treat as approval even when phrased as a longer sentence.
+    revision_markers = {
+        "make it", "revise", "rewrite", "edit", "change", "shorter", "longer", "friendlier",
+        "more formal", "less formal", "tone", "rephrase", "modify", "اجعل", "غيّر", "عدل",
+    }
+    affirmative_prefixes = (
+        "yes", "ok", "okay", "sure", "go ahead", "send it", "proceed", "continue",
+        "نعم", "تمام", "موافق", "اكمل", "استمر", "ارسله",
+    )
+    if compact.startswith(affirmative_prefixes) and not any(m in compact for m in revision_markers):
+        return "approved"
+
     return "critique"
 
 # -----------------------
 # Groq API Call
 # -----------------------
 def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
-    if not GROQ_API_KEY:
-        raise ValueError("⚠️  GROQ_API_KEY not set in .env!")
+    def _extract_mistral_text(response_obj: Any) -> str:
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return sanitize_text(str(response_obj))
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", "") if message is not None else ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(getattr(item, "text", item)))
+                content = "".join(parts)
+            return sanitize_text(str(content or ""))
+        except Exception:
+            return ""
+
+    def _call_mistral_fallback() -> str:
+        if not mistral_client:
+            logger.warning("⚠️ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+            return ""
+        try:
+            # Keep message structure unchanged so prompt behavior matches Groq path.
+            completion = mistral_client.chat.complete(
+                model=MISTRAL_MODEL_NAME,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0.1,
+            )
+            text = _extract_mistral_text(completion)
+            if text:
+                logger.info(f"✅ Language model fallback succeeded with Mistral ({MISTRAL_MODEL_NAME})")
+            return text
+        except Exception as mistral_err:
+            logger.error(f"❌ Mistral fallback failed: {mistral_err}")
+            return ""
+
     try:
+        if not client:
+            logger.warning("⚠️ Groq unavailable: GROQ_API_KEY is not set. Trying Mistral fallback.")
+            return _call_mistral_fallback()
+
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
@@ -138,8 +217,8 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
         text = completion.choices[0].message.content
         return sanitize_text(text)
     except Exception as e:
-        print(f"⚠️  Groq API Error: {e}")
-        return ""
+        logger.warning(f"⚠️ Groq API Error, trying Mistral fallback: {e}")
+        return _call_mistral_fallback()
 
 # ===========================================================================
 # DUAL-MODE PROMPTS

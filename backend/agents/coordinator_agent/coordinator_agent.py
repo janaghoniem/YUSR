@@ -17,6 +17,7 @@ from agents.utils.protocol import (
     StructuredResponse, ResponseType, ContextSnapshot
 )
 from agents.utils.broker import broker
+from agents.coordinator_agent.utils.intent_classifier import ExecutionMode  # kept for backward compat
 from ThinkingStepManager import ThinkingStepManager
 
 logger = logging.getLogger(__name__)
@@ -181,8 +182,36 @@ def _get_user_request_text(user_request: Dict[str, Any]) -> str:
 
 
 def _looks_like_email_send_intent(text: str) -> bool:
+    """
+    Detect if user is asking to send/compose an email.
+    Uses both strict regex and fuzzy matching to handle typos.
+    """
     t = (text or "").lower()
-    return bool(re.search(r"\b(send|compose|draft|write)\s+(an?\s+)?(email|mail|gmail|message)\b", t))
+    
+    # Strict regex match (fast path for common cases)
+    if re.search(r"\b(send|compose|draft|write)\s+(an?\s+)?(email|mail|gmail|message)\b", t):
+        return True
+    
+    # Fuzzy match for typos (slow path, only if strict match fails)
+    # Common typos: "sedn", "sned", "snd", "sen", etc.
+    from difflib import SequenceMatcher
+    
+    # Extract verbs and nouns from text
+    words = re.findall(r'\b\w+\b', t)
+    send_variants = ['send', 'compose', 'draft', 'write']
+    email_variants = ['email', 'mail', 'gmail', 'message']
+    
+    # Check if any word is a close match to send/compose/draft/write
+    for word in words:
+        for send_word in send_variants:
+            similarity = SequenceMatcher(None, word, send_word).ratio()
+            if similarity > 0.75:  # 75% match threshold
+                # If we found a close match to a send verb, check for email noun
+                for email_word in email_variants:
+                    if email_word in t:
+                        return True
+    
+    return False
 
 
 def _clean_email_field_value(value: str) -> str:
@@ -394,6 +423,11 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
             "metadata": result.metadata or {},
             "error": result.error,
         }
+
+    # Keyword-based popup/dialog detection only applies to execution tasks,
+    # NOT to API results (email agent) where content may contain false positives.
+    if getattr(task, 'target_agent', '') == 'email':
+        return None
 
     # Safely access details field (may not exist for MobileTaskResult)
     details = getattr(result, 'details', '')
@@ -689,6 +723,9 @@ pending_results: Dict[str, asyncio.Future] = {}
 #hala edit ashan el web 
 _session_browser_state: Dict[str, Dict] = {}
 
+# Cache last YouTube/search API results per session for "open the first result" follow-ups
+_session_youtube_results: Dict[str, List[Dict]] = {}
+
 
 # Helper function for guarded futures
 def create_guarded_future(task_id: str) -> asyncio.Future:
@@ -729,13 +766,64 @@ async def decompose_task_to_actions(
     user_request: Dict[str, Any],
     preferences_context: str,
     device_type: str = "desktop",
-    conversation_history: List[Dict] = None,  # ✅ FIX 3: Add history parameter
-    session_id: str = None,  # ✅ FIX 5: Add this
-    http_request_id: str = None,  # ✅ FIX 5: Add this
-    current_page_url: str = None  # ✅ BROWSER STATE: current browser URL hala edit ll web
+    conversation_history: List[Dict] = None,
+    session_id: str = None,
+    http_request_id: str = None,
+    current_page_url: str = None
 ) -> Dict[str, Any]:
     """Decompose user request into ActionTask queue - URLs resolved by execution layer"""
     request_text = _get_user_request_text(user_request)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # PRE-CHECK: "open the first/second result" from cached YouTube results
+    # This needs session state and can't be deferred to the LLM.
+    # ─────────────────────────────────────────────────────────────────────
+    _NTH_RESULT_RE = re.compile(
+        r'\b(?:open|play|watch|click|go\s+to)\s+(?:the\s+)?'
+        r'(?:(\d+)(?:st|nd|rd|th)?|first|second|third|fourth|fifth|last)\s+'
+        r'(?:result|video|one|link|item)',
+        re.I,
+    )
+    nth_match = _NTH_RESULT_RE.search(request_text)
+    if nth_match and session_id:
+        cached_videos = _session_youtube_results.get(session_id, [])
+        if cached_videos:
+            _ORDINAL_MAP = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4, "last": -1}
+            matched_text = nth_match.group(0).lower()
+            idx = None
+            if nth_match.group(1):  # numeric like "3rd"
+                idx = int(nth_match.group(1)) - 1
+            else:
+                for word, val in _ORDINAL_MAP.items():
+                    if word in matched_text:
+                        idx = val
+                        break
+            if idx is not None:
+                if idx == -1:
+                    idx = len(cached_videos) - 1
+                if 0 <= idx < len(cached_videos):
+                    video = cached_videos[idx]
+                    vid_id = video.get("video_id", "")
+                    title = video.get("title", "Unknown")
+                    direct_url = f"https://www.youtube.com/watch?v={vid_id}" if vid_id else None
+                    if direct_url:
+                        logger.info(f"📹 Opening cached YouTube result #{idx + 1}: {title} → {direct_url}")
+                        browser_task = ActionTask(
+                            task_id="task_1",
+                            goal=f"Open YouTube video: {title}",
+                            ai_prompt=f"Navigate to {direct_url} and play the video",
+                            device=device_type,
+                            context="web",
+                            target_agent="action",
+                            extra_params={"action": "navigate", "url": direct_url},
+                            web_params={"action": "navigate", "url": direct_url},
+                            depends_on=None,
+                        )
+                        return {"tasks": [browser_task]}
+                else:
+                    logger.warning(f"⚠️ Requested result #{idx + 1} but only {len(cached_videos)} cached results")
+        else:
+            logger.warning(f"⚠️ No cached YouTube results for session {session_id}")
 
     # Direct email API short-circuit: avoid unnecessary Gmail UI/login automation.
     direct_email_payload = _extract_email_send_payload(user_request)
@@ -812,14 +900,22 @@ async def decompose_task_to_actions(
     # Adding another one here just doubles the indicator on screen.
     
     device_hint = f"The user is on a {device_type} device. Tailor task recommendations accordingly.\n\n"
-    #hala edit ashan el web
     if current_page_url:
-         device_hint += f"The browser is currently open on: {current_page_url}\n"
+         device_hint += f"🌐 The browser is currently open on: {current_page_url}\n"
          device_hint += (
-             "If the user refers to content on the current page "
-             "(e.g. 'open first video', 'click the button', 'play it', 'play the first one'), "
-             "do NOT add a navigate task — act directly on the current page using context: \"web\".\n\n"
+             "⚠️ CRITICAL — CURRENT PAGE AWARENESS:\n"
+             "The user may be referring to content VISIBLE on this page (links, buttons, videos, text).\n"
+             "If the user says things like:\n"
+             "  - 'open the link named X' / 'click on X' / 'open X' (where X is text on the page)\n"
+             "  - 'open first video' / 'click the button' / 'play it' / 'play the first one'\n"
+             "  - 'open the third result' / 'click the one about Y'\n"
+             "Then you MUST generate a CLICK task on the current page, NOT a navigate task to a guessed URL.\n"
+             "Use web_params: {\"action\": \"click\"} and put the link text in ai_prompt.\n"
+             "Do NOT fabricate/guess URLs — the link's actual href is unknown; let the execution layer find and click it.\n"
+             "Only generate a navigate task if the user explicitly names a website or asks to go somewhere NEW.\n\n"
          )
+    else:
+         device_hint += "No browser page is currently open.\n\n"
     
     # ✅ FIX 3: Build conversation history context
     history_context = ""
@@ -899,6 +995,60 @@ b) ALWAYS generate a reasoning task FIRST that produces the email content fields
 c) The action tasks that fill Subject and Body MUST depend on the reasoning task, if present, and
    will receive the generated JSON in extra_params["input_content"].
 
+⚠️ EMAIL ROUTING FALLBACK (Critical for typos):
+If the user request contains any variation of "email", "send", "compose", "draft", or related keywords,
+ALWAYS route to target_agent: "email" with operation: "send" REGARDLESS of what mail app is mentioned.
+DO NOT generate desktop UI automation tasks like pyautogui or keyboard control for email send operations.
+Email sending ALWAYS uses the Gmail API endpoint which is atomic and reliable.
+
+REASON: Desktop UI automation for email is fragile (login screens, multi-step forms, permissions).
+The email API is 100% reliable and handles all Gmail/OAuth edge cases.
+
+TYPO HANDLING: Input like "sedn email", "sned mail", "compose mesage" should STILL route to email agent.
+
+✅ GOOGLE API ROUTING (YouTube, Calendar, Drive, Cookies):
+If the user request contains keywords for Google API operations, route to target_agent: "email" with the appropriate operation:
+
+YOUTUBE OPERATIONS:
+- Keywords: "youtube search", "search on youtube", "find videos", "youtube video", "video on youtube"
+  → operation: "youtube_search" with query in extra_params
+- Keywords: "youtube info", "video info", "how many views", "video details", "video statistics"
+  → operation: "youtube_video_info" with video_url in extra_params
+
+GOOGLE CALENDAR OPERATIONS:
+- Keywords: "create event", "add event", "schedule", "calendar", "meeting", "appointment"
+  → operation: "calendar_create" with title/start_time/end_time/description in extra_params
+- Keywords: "list events", "show calendar", "upcoming events", "my calendar", "upcoming meetings"
+  → operation: "calendar_list" with max_results in extra_params
+
+GOOGLE DRIVE OPERATIONS:
+- Keywords: "upload file", "upload to drive", "save to drive", "drive upload"
+  → operation: "drive_upload" with file_path/parent_folder_id in extra_params
+- Keywords: "list files", "my drive files", "files on drive", "drive list", "show my files"
+  → operation: "drive_list" with max_results in extra_params
+
+BROWSER COOKIE INJECTION (for Google web automation):
+- Keywords: "access google", "login to google", "google credentials", "browser login"
+  → operation: "get_browser_cookies" (enables seamless Google property access without UI login)
+
+ROUTING RULES:
+1. ALWAYS prefer API operations (YouTube, Calendar, Drive) over browser automation
+2. API operations are ATOMIC, RELIABLE, and FASTER than UI automation
+3. Only use browser automation if user explicitly asks to "watch" a video, "see" calendar UI, etc.
+4. For API operations, set: target_agent: "email", context: "web", web_params: {{}}
+5. Example: User says "Search YouTube for cat videos" → 
+   {{
+     "target_agent": "email",
+     "operation": "youtube_search",
+     "ai_prompt": "Search YouTube for cat videos and return results",
+     "extra_params": {{"operation": "youtube_search", "query": "cat videos"}},
+     "web_params": {{}}
+   }}
+
+HYBRID WORKFLOWS:
+- Search YouTube (API) → Extract results (reasoning) → Watch in browser (action) is a valid 3-task flow
+- But never duplicate: don't search YouTube both via API AND browser automation in same task plan
+
 ❌ INVALID tasks include:
 - "Confirm receipt of the request"
 - "Prepare to execute the task"
@@ -938,8 +1088,10 @@ A COMPOSITE request:
 
 # TARGET AGENTS
 
-- **action**: UI automation (click, type, navigate)
-- **reasoning**: Logic tasks (summarize, analyze)
+- **action**: UI automation (click, type, navigate, fill forms, extract text)
+- **reasoning**: Logic tasks (summarize, analyze, write, translate, generate content)
+- **language**: Confirmation/read-aloud tasks (read generated content to user, ask for confirmation)
+- **email**: Google API operations (YouTube search, Calendar, Drive, Gmail send). ALWAYS use this for API calls.
 
 # TASK STRUCTURE
 
@@ -948,25 +1100,62 @@ Each task must have:
 - **goal**: The SAME high-level goal string for the entire task plan (must be identical in all tasks)
 - **device**: "desktop" or "mobile"
 - **context**: "local" or "web"
-- **target_agent**: "action" or "reasoning"
-- **extra_params**: Additional data (app_name, file_path, etc.)
-- **web_params**: Web-specific parameters (action type only - NO URLs!)
+- **target_agent**: "action" or "reasoning" or "language" or "email"
+- **extra_params**: Additional data (app_name, file_path, operation, url, etc.)
+- **web_params**: Web-specific parameters
 - **depends_on**: task_id of prerequisite task
 
 # WEB_PARAMS STRUCTURE (for context: "web")
 
-🚨 CRITICAL: Do NOT hardcode URLs, selectors, or wait strategies!
-The execution layer will use RAG to determine these from the ai_prompt.
+🚨 CRITICAL: Do NOT hardcode CSS selectors or wait strategies!
+The execution layer uses RAG to determine selectors and interaction strategies from ai_prompt.
+You SHOULD construct full URLs for well-known sites (see table below) — this is a fast path.
+For unknown sites, put enough detail in ai_prompt and let RAG resolve navigation.
 
-For navigation tasks:
+For **well-known sites**, include the full URL in both web_params AND extra_params.
+This enables direct fast-path navigation. You are the smart routing layer — construct the correct URL.
+
+**URL CONSTRUCTION RULES:**
+
+| User intent | URL to construct |
+|---|---|
+| "open google and search for X" | https://www.google.com/search?q=X (replace spaces with +) |
+| "search for X" / "look up X" / "find X" | https://www.google.com/search?q=X |
+| "go to google" / "open google" | https://www.google.com |
+| "play X" / "watch X" | https://www.youtube.com/results?search_query=X |
+| "search youtube for X" | https://www.youtube.com/results?search_query=X |
+| "go to youtube" | https://www.youtube.com |
+| "open facebook" | https://www.facebook.com |
+| "go to reddit" | https://www.reddit.com |
+| "open gmail" | https://mail.google.com |
+| "go to <any_known_site>" | https://www.<site>.com |
+| "go to <explicit URL>" | Use the URL as-is |
+
+⚠️ CRITICAL DISTINCTIONS:
+- "open google and search for X" → Google search (google.com/search?q=X), NOT YouTube
+- "play X" / "watch X" → YouTube search (youtube.com/results?search_query=X), NOT Google
+- "search for X" without mentioning a specific site → default to Google search
+- "search youtube for X" → YouTube search
+- "open the link named X" / "click on X" / "open the X result" WHEN A PAGE IS ALREADY OPEN → CLICK on the current page (action: "click"), do NOT guess a URL. The user is referring to visible content on the current page.
+- Only construct navigation URLs when the user explicitly asks to go to a NEW site or search engine
+
+For navigation tasks WITH a known URL:
+{{
+  "action": "navigate",
+  "url": "<constructed URL>"
+}}
+extra_params must ALSO include: {{"action": "navigate", "url": "<same URL>"}}
+
+For navigation tasks WITHOUT a known URL (unknown/unfamiliar sites):
 {{
   "action": "navigate"
 }}
+Put the site name or description in ai_prompt — RAG will resolve the URL.
 
 For interaction tasks (click, fill):
 {{
   "action": "fill",
-  "text": "search query"  // Only include text for fill actions
+  "text": "search query"
 }}
 
 For extraction tasks:
@@ -974,9 +1163,100 @@ For extraction tasks:
   "action": "extract"
 }}
 
+Summary:
+- ✅ DO construct URLs for well-known sites (Google, YouTube, Gmail, etc.)
+- ✅ DO put descriptive text in ai_prompt for RAG to use
+- ❌ Do NOT hardcode CSS selectors — RAG finds them from the live page
+- ❌ Do NOT hardcode wait strategies — the execution layer handles timing
+- ❌ Do NOT guess URLs for unknown sites — let RAG resolve from ai_prompt
+
 ============================
 EXAMPLES (YAML format for brevity, output must be JSON)
 ============================
+
+## Example 0: Browser Navigation — Google Search
+
+User: "open google and search for web automation"
+
+- task_id: task_1
+  goal: open google and search for web automation
+  ai_prompt: Navigate to Google and search for web automation
+  device: desktop
+  context: web
+  target_agent: action
+  extra_params:
+    action: navigate
+    url: "https://www.google.com/search?q=web+automation"
+  web_params:
+    action: navigate
+    url: "https://www.google.com/search?q=web+automation"
+  depends_on: null
+
+EXPLANATION: The user wants Google search, NOT YouTube. Construct the Google search URL
+with the query. This is a SINGLE task — just navigate to the search results page.
+
+## Example 0b: Browser Navigation — Play/Watch Video
+
+User: "play relaxing music"
+
+- task_id: task_1
+  goal: play relaxing music
+  ai_prompt: Search YouTube for relaxing music
+  device: desktop
+  context: web
+  target_agent: action
+  extra_params:
+    action: navigate
+    url: "https://www.youtube.com/results?search_query=relaxing+music"
+  web_params:
+    action: navigate
+    url: "https://www.youtube.com/results?search_query=relaxing+music"
+  depends_on: null
+
+EXPLANATION: "play" implies video/music → route to YouTube search.
+
+## Example 0c: YouTube API Search (get structured results)
+
+User: "search youtube for cat videos and give me the top 5 results"
+
+- task_id: task_1
+  goal: search youtube for cat videos and give me the top 5 results
+  ai_prompt: Search YouTube for cat videos and return top 5 results
+  device: desktop
+  context: web
+  target_agent: email
+  extra_params:
+    operation: youtube_search
+    query: "cat videos"
+    max_results: 5
+  web_params: {{}}
+  depends_on: null
+
+EXPLANATION: When the user wants structured results (list of videos, titles, etc.) use
+target_agent: "email" with operation: "youtube_search". When they just want to watch/play,
+use target_agent: "action" with a YouTube URL (see Example 0b).
+
+## Example 0d: Click a Link on the Current Page
+
+Browser is currently open on: https://www.google.com/search?q=web+automation+papers
+User: "open the link named Cybernaut"
+
+- task_id: task_1
+  goal: open the link named Cybernaut
+  ai_prompt: Click on the link with text "Cybernaut" on the current page
+  device: desktop
+  context: web
+  target_agent: action
+  extra_params: {{}}
+  web_params:
+    action: click
+  depends_on: null
+
+EXPLANATION: The user is referring to a link VISIBLE on the current Google search results page.
+Do NOT guess a URL like "https://www.cybernaut.com" — the actual href is unknown.
+Instead, generate a CLICK task and let the execution layer find the link by its text.
+This applies whenever the user says "open the link named X", "click on X", "open the X result", etc.
+while a page is already open.
 
 ## Example 1: Simple Desktop Task
 
@@ -1229,8 +1509,8 @@ Examples of ACTION tasks:
 3. **Descriptive prompts** - ai_prompt should be detailed enough for RAG to understand
 4. **Correct context** - web tasks get context: "web", desktop tasks get "local"
 5. **Minimal extra_params** - ONLY include action type and text (for fill), nothing else
-6. **NO URLs** - NEVER hardcode URLs, let RAG resolve them from ai_prompt
-7. **NO selectors** - NEVER hardcode selectors, let RAG find them from ai_prompt
+6. **Include URLs for known sites** - For well-known sites (Google, YouTube, Facebook, etc.), construct and include the URL in web_params and extra_params. For unknown sites, let RAG resolve them from ai_prompt.
+7. **NO selectors** - NEVER hardcode CSS selectors, let RAG find them from ai_prompt
 8. **Empty web_params** - For local tasks, set web_params: {{}}
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
@@ -1915,9 +2195,22 @@ def create_coordinator_graph():
             task_queue.log_execution(current_task, result)
             
             if current_task.context == "web" and current_task.target_agent == "action" and session_id:
+                extracted_url = None
                 url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
                 if url_match:
                     extracted_url = url_match.group(1).strip()
+                # Also capture URLs from fast-path navigation results like "Navigated to <url>"
+                if not extracted_url:
+                    nav_match = re.search(r'Navigated to (https?://[^\s\n]+)', result.content or "")
+                    if nav_match:
+                        extracted_url = nav_match.group(1).strip()
+                # Also capture from web_params/extra_params URL (task carried explicit URL)
+                if not extracted_url:
+                    wp_url = (getattr(current_task, 'web_params', None) or {}).get('url') or \
+                             (getattr(current_task, 'extra_params', None) or {}).get('url')
+                    if wp_url and result.status == "success":
+                        extracted_url = wp_url
+                if extracted_url:
                     _state = _session_browser_state.get(session_id, {})
                     _state.update({
                         "current_page_url": extracted_url,
@@ -1952,6 +2245,21 @@ def create_coordinator_graph():
                 logger.info(f"💾 Stored output for {current_task.task_id}")
                 logger.info(f"   Length: {len(output_to_store)} chars")
                 logger.info(f"   Preview: {output_to_store[:200]}...")
+                
+                # Cache YouTube results for "open the first/second result" follow-ups
+                if (
+                    session_id
+                    and getattr(current_task, 'target_agent', '') == 'email'
+                    and (getattr(current_task, 'extra_params', {}) or {}).get('operation') == 'youtube_search'
+                ):
+                    try:
+                        parsed = json.loads(output_to_store) if isinstance(output_to_store, str) else output_to_store
+                        videos = parsed.get("videos", []) if isinstance(parsed, dict) else []
+                        if videos:
+                            _session_youtube_results[session_id] = videos
+                            logger.info(f"📹 Cached {len(videos)} YouTube results for session {session_id}")
+                    except Exception:
+                        pass
             else:
                 logger.warning(f"⚠️ Task {current_task.task_id} produced empty output")
 
@@ -2054,6 +2362,29 @@ def create_coordinator_graph():
             if isinstance(raw, list):
                 return "\n\n".join([_extract_readable_text(item) for item in raw if _extract_readable_text(item)])
             if isinstance(raw, dict):
+                # Handle YouTube/API structured results first
+                if "videos" in raw and isinstance(raw["videos"], list):
+                    lines = []
+                    for i, v in enumerate(raw["videos"], 1):
+                        title = v.get("title", "Unknown")
+                        channel = v.get("channel", "Unknown")
+                        vid_id = v.get("video_id", "")
+                        url = f"https://www.youtube.com/watch?v={vid_id}" if vid_id else ""
+                        lines.append(f"{i}. {title} — by {channel}\n   {url}")
+                    return "\n".join(lines) if lines else "No results found."
+                if "events" in raw and isinstance(raw["events"], list):
+                    lines = []
+                    for i, e in enumerate(raw["events"], 1):
+                        summary = e.get("summary", "No title")
+                        start = e.get("start", "")
+                        lines.append(f"{i}. {summary} — {start}")
+                    return "\n".join(lines) if lines else "No events found."
+                if "files" in raw and isinstance(raw["files"], list):
+                    lines = []
+                    for i, f_item in enumerate(raw["files"], 1):
+                        name = f_item.get("name", "Unknown")
+                        lines.append(f"{i}. {name}")
+                    return "\n".join(lines) if lines else "No files found."
                 for key in ["content", "text", "response", "message", "summary", "full_content", "result"]:
                     if raw.get(key):
                         extracted = _extract_readable_text(raw.get(key))
@@ -2275,7 +2606,7 @@ def create_coordinator_graph():
         structured = StructuredResponse(
             type=resp_type,
             spoken_text=response_text,
-            full_content=full_content if full_content != response_text else None,
+            full_content=full_content if full_content and full_content != response_text else "",
             offer_read_aloud=has_reasoning_content and len(full_content) > 200,
             offer_actions=(follow_ups if follow_ups else []) + (["undo", "retry"] if success_count > 0 else ["retry"]),
             context_for_undo={"original_request": original_request, "completed_tasks": [t.task_id for t in state.get("tasks", [])]}
@@ -2332,13 +2663,17 @@ def create_coordinator_graph():
         )
         await broker.publish(Channels.WEBSOCKET_OUTPUT, ws_msg)
         
-        if success_count == total_count and total_count > 0:
+        # ── Background memory storage (non-blocking) ────────────────────────
+        # Run preference extraction + storage in a background task so the
+        # event loop is free to deliver the WebSocket response immediately.
+        async def _store_preferences_background():
             try:
+                if not (success_count == total_count and total_count > 0):
+                    return
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
                 pref_mgr = get_preference_manager(user_id)
                 
                 task_summary = {
-                    # Prefer confirmation from Language Agent for a faithful representation of the user's intent
                     "original_request": state['input'].get('original_input', state['input'].get('confirmation', state['input'].get('action', ''))),
                     "completed_steps": [t.ai_prompt for t in state['tasks']],
                     "total_steps": total_count
@@ -2379,7 +2714,6 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            # Store as zero-token preference
                             pref_mgr.add_preference_zero_token(
                                 pref_obj["preference"],
                                 metadata={
@@ -2390,7 +2724,6 @@ Extract now:"""
                             )
                             logger.info(f"💾 Stored preference: {pref_obj['preference']}")
                             
-                            # Also store with regular method in try-except for redundancy
                             try:
                                 pref_mgr.add_preference(
                                     pref_obj["preference"],
@@ -2415,7 +2748,6 @@ Extract now:"""
                 ))
                 apps_used_str = ", ".join(filter(None, apps_used)) if apps_used else "none recorded"
                 
-                # Store comprehensive conversation context with zero-token method
                 conversation_context = (
                     f"User completed task: {task_summary['original_request']}. "
                     f"Apps used: {apps_used_str}. "
@@ -2435,7 +2767,6 @@ Extract now:"""
                     }
                 )
                 
-                # Also store simpler version with regular method in try-except
                 try:
                     conversation_context_simple = f"User requested: {task_summary['original_request']}. "
                     conversation_context_simple += f"Successfully completed {success_count} steps."
@@ -2454,6 +2785,8 @@ Extract now:"""
                 
             except Exception as e:
                 logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
+        
+        asyncio.ensure_future(_store_preferences_background())
         
         if task_queue.global_queue:
             logger.info(f"📋 Processing next task from global queue")
@@ -2565,7 +2898,9 @@ async def execute_single_task(
     task_payload["extra_params"] = extra_params
 
     if task.target_agent == "email":
-        for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query"]:
+        for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query",
+                     "search_query", "video_url", "title", "start_time", "end_time",
+                     "description", "file_path", "parent_folder_id"]:
             if key not in task_payload and key in extra_params:
                 task_payload[key] = extra_params[key]
         if "operation" not in task_payload:

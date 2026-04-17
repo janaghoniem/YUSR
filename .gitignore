@@ -17,6 +17,7 @@ google_accounts.py
 *_accounts.py
 google_state.json
 browser_state*.json
+chrome_profile*/
 
 # Electron
 /out

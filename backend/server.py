@@ -2114,16 +2114,22 @@ async def email_oauth_authorize(user_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/email/oauth/callback")
-async def email_oauth_callback(user_id: str, code: str):
+@app.get("/api/email/oauth/callback")
+async def email_oauth_callback(code: str, state: str):
     """
-    Handle Gmail OAuth callback
+    Handle Gmail OAuth callback (GET request from Google's redirect)
     Exchange authorization code for access token
+    State is used to look up the user_id from the global cache
     """
     try:
-        from agents.email_agent import EmailAgent
-        agent = EmailAgent()
+        from agents.email_agent import EmailAgent, _oauth_state_cache
         
+        # Look up user_id from state cache
+        user_id = _oauth_state_cache.get(state)
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Invalid or expired state parameter")
+        
+        agent = EmailAgent()
         success = await agent.handle_oauth_callback(user_id, code)
         
         if not success:
@@ -2131,12 +2137,17 @@ async def email_oauth_callback(user_id: str, code: str):
         
         logger.info(f"✅ OAuth callback processed for user {user_id}")
         
+        # Clean up state cache
+        _oauth_state_cache.pop(state, None)
+        
         return {
             "status": "success",
             "message": "Gmail access granted successfully",
             "user_id": user_id
         }
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ OAuth callback failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2321,6 +2332,82 @@ async def disconnect_email(user_id: str):
     except Exception as e:
         logger.error(f"❌ Disconnect failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Google OAuth Endpoints (Aliases for broader Google API access)
+# ============================================================================
+
+@app.get("/api/auth/google/start")
+async def google_oauth_start(user_id: str):
+    """
+    Start Google OAuth flow for user
+    Initiates consent screen for Google APIs (Gmail, YouTube, Calendar, Drive, etc.)
+    Returns authorization URL
+    """
+    try:
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Missing user_id")
+        
+        from agents.email_agent import EmailAgent
+        agent = EmailAgent()
+        
+        auth_url, state = await agent.initiate_oauth_flow(user_id)
+        
+        if not auth_url:
+            raise HTTPException(status_code=500, detail="Failed to initiate OAuth flow")
+        
+        logger.info(f"✅ Google OAuth flow started for user {user_id}")
+        
+        return {
+            "status": "success",
+            "auth_url": auth_url,
+            "state": state,
+            "message": "Visit the authorization URL to grant Google access"
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Google OAuth start failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/auth/google/callback")
+async def google_oauth_callback(code: str, state: str):
+    """
+    Handle Google OAuth callback after user grants consent
+    Exchanges authorization code for access token and stores credentials
+    """
+    try:
+        from agents.email_agent import EmailAgent, _oauth_state_cache
+        
+        # Look up user_id from state cache
+        user_id = _oauth_state_cache.get(state)
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Invalid or expired state parameter")
+        
+        agent = EmailAgent()
+        success = await agent.handle_oauth_callback(user_id, code)
+        
+        if not success:
+            raise HTTPException(status_code=400, detail="Failed to process OAuth callback")
+        
+        logger.info(f"✅ Google OAuth callback processed for user {user_id}")
+        
+        # Clean up state cache
+        _oauth_state_cache.pop(state, None)
+        
+        return {
+            "status": "success",
+            "message": "Google access granted successfully. You can now use Gmail, YouTube, Calendar, Drive and other Google APIs.",
+            "user_id": user_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Google OAuth callback failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
     
 if __name__ == "__main__":

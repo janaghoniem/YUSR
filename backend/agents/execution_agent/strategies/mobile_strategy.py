@@ -1617,6 +1617,11 @@ class MobileReActStrategy:
         if not ui_tree or not ui_tree.elements:
             return None
 
+        # Clock time entry owns the entire interaction in Android Clock.
+        clock_time = self._tier1_clock_time_entry(task, ui_tree)
+        if clock_time:
+            return clock_time
+
         # Search suggestion clicker — highest priority
         suggestion_click = self._find_and_click_first_suggestion(ui_tree)
         if suggestion_click:
@@ -1626,6 +1631,11 @@ class MobileReActStrategy:
         click_type = self._detect_click_to_type_pattern(task, ui_tree)
         if click_type:
             return click_type
+
+        # Search results visible → complete before any ENTER fallback can loop.
+        results_complete = self._detect_search_results_screen(task, ui_tree)
+        if results_complete:
+            return results_complete
 
         # ── T1: Post-type ENTER press ─────────────────────────────────────────
         # If the last action was a type on a search/URL field and no IME fired,
@@ -1644,12 +1654,43 @@ class MobileReActStrategy:
                     "action_type": "complete",
                 }
 
+            # Generic navigation requests like "navigate to the search engine"
+            # are no-ops when the search affordance is already visible.
+            task_lower = (task.ai_prompt or "").lower().strip()
+            redundant_nav_phrases = {
+                "navigate to the search engine",
+                "navigate to google",
+                "navigate to the google search page",
+                "go to the search bar",
+                "open the search bar",
+                "navigate to search",
+                "go to google",
+                "navigate to google.com",
+                "open google search",
+            }
+            if task_lower in redundant_nav_phrases and device_state.startswith("in_app_"):
+                has_search_bar = any(
+                    e.focusable and any(
+                        kw in (e.hint_text or e.content_description or e.resource_id or "").lower()
+                        for kw in ("search", "url", "address", "omnibox")
+                    )
+                    for e in ui_tree.elements
+                )
+                if has_search_bar:
+                    logger.info("[T1] Redundant navigation task — search bar already visible → complete")
+                    return {
+                        "thought": "search bar is already visible and accessible — no navigation needed",
+                        "action_type": "complete",
+                    }
+
         # AM/PM correction in time picker
         if self._is_in_time_picker(ui_tree):
             extra = task.extra_params or {}
             goal_text = f"{task.ai_prompt} {extra.get('overall_goal', '')} {extra.get('goal', '')}".lower()
-            wants_am = "am" in goal_text
-            wants_pm = "pm" in goal_text
+            wants_am = bool(re.search(r"\bam\b", goal_text))
+            wants_pm = bool(re.search(r"\bpm\b", goal_text))
+            if wants_pm:
+                wants_am = False
             if not wants_am and not wants_pm:
                 hm = re.search(r"\b([1-9]|1[01])\s*:", goal_text)
                 if hm:
@@ -2121,14 +2162,25 @@ Action: {{"action_type": "complete"}}"""
                 continue
 
             label_words = set(label_lower.split())
-            overlap_ratio = len(query_words & label_words) / max(len(query_words), 1)
+            query_word_count = max(len(query_words), 1)
+            label_word_count = max(len(label_words), 1)
+            overlap_ratio = len(query_words & label_words) / query_word_count
             is_prefix_completion = label_lower.startswith(typed_query[:max(4, len(typed_query) - 3)])
             is_full_contain = typed_query in label_lower
-            is_good_match = is_full_contain or is_prefix_completion or overlap_ratio >= 0.5
+            length_ratio = label_word_count / query_word_count
+            is_too_long = length_ratio > 1.6
+            is_near_exact = label_lower == typed_query or (typed_query in label_lower and length_ratio <= 1.3)
+            is_good_match = (
+                is_near_exact
+                or (is_prefix_completion and not is_too_long)
+                or (overlap_ratio >= 0.5 and not is_too_long)
+                or is_full_contain and not is_too_long
+            )
             if not is_good_match:
                 logger.debug(
-                    f"[T1] Suggestion rejected (low match): '{label[:40]}' "
-                    f"overlap={overlap_ratio:.0%} query='{typed_query[:30]}'"
+                    f"[T1] Suggestion rejected: '{label[:40]}' "
+                    f"overlap={overlap_ratio:.0%} length_ratio={length_ratio:.1f} too_long={is_too_long} "
+                    f"query='{typed_query[:30]}'"
                 )
                 continue
 
@@ -2171,6 +2223,116 @@ Action: {{"action_type": "complete"}}"""
             "action_type": "click",
             "element_id": first.element_id,
         }
+
+    def _tier1_clock_time_entry(
+        self,
+        task: MobileTaskRequest,
+        ui_tree: SemanticUITree,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Android Clock uses a sequential digit pad, not separate hour/minute fields.
+        Typing must be done as a single stream: 5:30 → type "0530" once.
+        This T1 handler owns all time entry in the clock app entirely.
+        """
+        if not self._is_in_time_picker(ui_tree):
+            return None
+
+        extra = task.extra_params or {}
+        goal_text = f"{task.ai_prompt} {extra.get('time', '')} {extra.get('overall_goal', '')}".lower()
+        time_match = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", goal_text, re.IGNORECASE)
+        if not time_match:
+            return None
+
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        am_pm = (time_match.group(3) or "").upper()
+        pad_sequence = f"{hour:02d}{minute:02d}"
+
+        digit_field = None
+        for e in ui_tree.elements:
+            if e.focusable and e.enabled:
+                blob = (e.hint_text or e.content_description or e.resource_id or "").lower()
+                if any(kw in blob for kw in ("hour", "minute", "time", "clock")):
+                    digit_field = e
+                    break
+            if e.focusable and e.enabled and e.type in ("textfield",):
+                digit_field = e
+                break
+
+        if digit_field is None:
+            return None
+
+        already_typed_sequence = any(v == pad_sequence for v in self.typed_texts.values())
+        if already_typed_sequence:
+            return None
+
+        logger.info(f"[T1] Clock number pad: typing '{pad_sequence}' for {hour}:{minute:02d} {am_pm}")
+        return {
+            "thought": f"entering time {hour}:{minute:02d} {am_pm} as pad sequence '{pad_sequence}'",
+            "action_type": "type",
+            "element_id": digit_field.element_id,
+            "text": pad_sequence,
+            "clear_first": True,
+        }
+
+    def _detect_search_results_screen(
+        self,
+        task: MobileTaskRequest,
+        ui_tree: SemanticUITree,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        After search submission, detect if results are visible and complete.
+        Fires once — cleared after firing.
+        """
+        if self._search_pre_element_count == 0 and not any(
+            h.get("action", {}).get("global_action") == "ENTER"
+            for h in self.action_history[-3:]
+        ):
+            return None
+
+        goal_lower = (task.ai_prompt or "").lower()
+        is_search_task = any(kw in goal_lower for kw in (
+            "search", "find", "type", "look", "query"
+        ))
+        if not is_search_task:
+            return None
+
+        result_signals = 0
+        for e in ui_tree.elements:
+            blob = f"{e.text or ''} {e.content_description or ''} {e.resource_id or ''}".lower()
+            if any(kw in blob for kw in (
+                "views", "subscribers", "ago", "duration", "channel",
+                "result", "web", "wikipedia", "https://",
+                "download", "install", "rating",
+            )):
+                result_signals += 1
+            if result_signals >= 2:
+                break
+
+        pre = self._search_pre_element_count
+        if pre > 0:
+            change = abs(len(ui_tree.elements) - pre) / max(pre, 1)
+            if change >= 0.15 and result_signals >= 1:
+                logger.info(f"[T1] Search results detected — {len(ui_tree.elements)} elements, {result_signals} signals")
+                self._search_pre_element_count = 0
+                self._search_needs_confirm = False
+                self._search_confirm_app = ""
+                return {
+                    "thought": "search results are visible on screen — task complete",
+                    "action_type": "complete",
+                }
+
+        if result_signals >= 3:
+            logger.info(f"[T1] Search results detected by signals ({result_signals}) — task complete")
+            self._search_pre_element_count = 0
+            self._search_needs_confirm = False
+            self._search_confirm_app = ""
+            return {
+                "thought": "search results are visible on screen — task complete",
+                "action_type": "complete",
+            }
+
+        return None
 
     def _detect_click_to_type_pattern(
         self,

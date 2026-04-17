@@ -1049,7 +1049,7 @@ Examples of ACTION tasks:
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
 11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
-12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results and formats them into a natural, helpful conversational response.
+12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results extracted and returned by an "action" agent content extraction task and formats them into a natural, helpful conversational response.
 13. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action.
   - The confirmation task must have:
     - target_agent: "language"

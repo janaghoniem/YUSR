@@ -87,6 +87,7 @@ backend/conversations.jsonl
 /backend/agents/execution_agent/RAG/vectordb
 /backend/agents/execution_agent/RAG/rag_data
 /backend/agents/execution_agent/RAG/sandbox_logs
+/backend/agents/execution_agent/RAG/web/chrome_profile
 /backend/agents/execution_agent/rag-api/models
 
 /backend/conversations.jsonl

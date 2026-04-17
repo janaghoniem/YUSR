@@ -1154,33 +1154,44 @@ async def start_language_agent(broker):
         agent = get_or_create_agent(session_id, user_id)
 
         # ── Handle Security Confirmation ──────────────────────────────────────
+        # ── Handle Security Confirmation ──────────────────────────────────────
         is_security_confirmation = False
         if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
             if agent.awaiting_user_response.get("type") == "security_confirmation":
                 orig_request = agent.awaiting_user_response.get("original_request")
-                # Check if user says "yes/ok"
-                lower_input = input_text.lower().strip()
-                if lower_input in ["yes", "y", "ok", "sure", "proceed", "نعم", "موافق", "آه", "done", "do it"]:
-                    logger.info(f"✅ User bypassed security warning. Proceeding with original request.")
-                    input_text = orig_request  # Override input_text with the original prompt!
-                    is_security_confirmation = True
-                else:
-                    logger.info(f"🛑 User rejected security warning: {input_text}")
+                saved_at = agent.awaiting_user_response.get("timestamp", 0)
+                # Allow 5 minutes (300s) — voice/assistive users need more time
+                _SECURITY_CONFIRM_TTL = 300
+                if time.time() - saved_at > _SECURITY_CONFIRM_TTL:
+                    logger.warning(f"⏰ Security confirmation expired (>{_SECURITY_CONFIRM_TTL}s). Clearing state.")
                     agent.awaiting_user_response = None
-                    cancel_msg = AgentMessage(
-                        message_type=MessageType.TASK_RESPONSE,
-                        sender=AgentType.LANGUAGE,
-                        receiver=AgentType.LANGUAGE,
-                        session_id=session_id,
-                        response_to=http_request_id,
-                        payload={
-                            "response": "تم إلغاء الإجراء الأمني." if agent.preferred_language == "ar" else "Security action cancelled."
-                        }
-                    )
-                    await broker.publish(Channels.LANGUAGE_OUTPUT, cancel_msg)
-                    return
-                # Clear response state either way
-                agent.awaiting_user_response = None
+                    agent.save_memory()
+                    # Fall through — treat the new input as a fresh request
+                else:
+                    lower_input = input_text.lower().strip()
+                    if lower_input in ["yes", "y", "ok", "sure", "proceed", "نعم", "موافق", "آه", "done", "do it"]:
+                        logger.info(f"✅ User confirmed security warning. Proceeding with original request.")
+                        input_text = orig_request  # Resume the original blocked request
+                        is_security_confirmation = True
+                    else:
+                        logger.info(f"🛑 User rejected security warning: {input_text}")
+                        agent.awaiting_user_response = None
+                        agent.save_memory()
+                        cancel_msg = AgentMessage(
+                            message_type=MessageType.TASK_RESPONSE,
+                            sender=AgentType.LANGUAGE,
+                            receiver=AgentType.LANGUAGE,
+                            session_id=session_id,
+                            response_to=http_request_id,
+                            payload={
+                                "response": "تم إلغاء الإجراء الأمني." if agent.preferred_language == "ar" else "Security action cancelled."
+                            }
+                        )
+                        await broker.publish(Channels.LANGUAGE_OUTPUT, cancel_msg)
+                        return
+                    # Clear state after handling either way
+                    agent.awaiting_user_response = None
+                    agent.save_memory()
 
         if not is_security_confirmation:
             from agents.security.intent_classifier import classify_intent
@@ -1207,10 +1218,13 @@ async def start_language_agent(broker):
                 logger.info(f"⚠️ SUSPICIOUS intent detected: {intent_result.reasons}")
                 
                 # Store the original suspicious text to bypass classifier next time
+                # Include timestamp so we can extend the window to 5 minutes (voice users are slow)
                 agent.awaiting_user_response = {
                     "type": "security_confirmation",
-                    "original_request": input_text
+                    "original_request": input_text,
+                    "timestamp": time.time()
                 }
+                agent.save_memory()  # Persist immediately so it survives across turns
                 
                 # Ask for confirmation before proceeding (cheap, doesn't call LLM yet)
                 confirmation_msg = AgentMessage(

@@ -491,8 +491,25 @@ async def process_user_input(request: Request):
         
         # Create message
         if is_clarification:
+            # Same smart routing as the WebSocket path:
+            # short confirmation words → CLARIFICATION_RESPONSE (consumed by security/task handlers)
+            # longer task-like input → TASK_REQUEST (processed fresh by the language agent)
+            _CONFIRM_WORDS_HTTP = {
+                "yes", "y", "ok", "okay", "sure", "proceed", "do it", "done",
+                "no", "cancel", "stop", "نعم", "موافق", "لا", "آه", "إلغاء",
+            }
+            _answer_lower_http = user_input.lower().strip()
+            _is_short_confirmation_http = (
+                _answer_lower_http in _CONFIRM_WORDS_HTTP
+                or (len(user_input.split()) <= 4 and not any(
+                    kw in _answer_lower_http for kw in ["delete", "open", "create", "list", "send", "copy", "move", "show"]
+                ))
+            )
+            _msg_type_http = MessageType.CLARIFICATION_RESPONSE if _is_short_confirmation_http else MessageType.TASK_REQUEST
+            if not _is_short_confirmation_http:
+                logger.info(f"↩️ HTTP clarification looks like a new task — routing as TASK_REQUEST: '{user_input[:60]}'")
             message = AgentMessage(
-                message_type=MessageType.CLARIFICATION_RESPONSE,
+                message_type=_msg_type_http,
                 sender=AgentType.LANGUAGE,
                 receiver=AgentType.LANGUAGE,
                 session_id=session_id,
@@ -1124,8 +1141,35 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                     continue
                 
+                # Determine if this is a short confirmation ("yes"/"no") or a new
+                # standalone task typed into the clarification box.
+                # Short confirmations (≤6 words, no verb-object structure) stay as
+                # CLARIFICATION_RESPONSE so the language agent's security/task
+                # confirmation handlers can consume them.
+                # Longer inputs are new tasks — route them as TASK_REQUEST so the
+                # language agent processes them fresh instead of getting confused by
+                # the CLARIFICATION_RESPONSE message type.
+                _CONFIRM_WORDS = {
+                    "yes", "y", "ok", "okay", "sure", "proceed", "do it", "done",
+                    "no", "cancel", "stop", "نعم", "موافق", "لا", "آه", "إلغاء",
+                }
+                _answer_lower = answer.lower().strip()
+                _is_short_confirmation = (
+                    _answer_lower in _CONFIRM_WORDS
+                    or (len(answer.split()) <= 4 and not any(
+                        kw in _answer_lower for kw in ["delete", "open", "create", "list", "send", "copy", "move", "show"]
+                    ))
+                )
+
+                _msg_type = MessageType.CLARIFICATION_RESPONSE if _is_short_confirmation else MessageType.TASK_REQUEST
+
+                if not _is_short_confirmation:
+                    logger.info(
+                        f"↩️ Clarification answer looks like a new task — routing as TASK_REQUEST: '{answer[:60]}'"
+                    )
+
                 message = AgentMessage(
-                    message_type=MessageType.CLARIFICATION_RESPONSE,
+                    message_type=_msg_type,
                     sender=AgentType.LANGUAGE,
                     receiver=AgentType.LANGUAGE,
                     session_id=session_id,
@@ -1137,7 +1181,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         "user_language": user_language,
                     }
                 )
-                
+
                 future = asyncio.Future()
                 pending_responses[message.message_id] = future
                 await broker.publish(Channels.LANGUAGE_INPUT, message)

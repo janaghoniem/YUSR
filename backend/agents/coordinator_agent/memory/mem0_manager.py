@@ -18,10 +18,9 @@ logger = logging.getLogger(__name__)
 class Mem0PreferenceManager:
     """Manages long-term user preferences using Mem0 with MongoDB Atlas backend"""
     
-    def __init__(self, user_id: str, zero_token_mode: bool = False):
+    def __init__(self, user_id: str):
         self.user_id = user_id
-        self.zero_token_mode = zero_token_mode
-
+        
         MONGODB_URI = os.getenv("MONGODB_URI")
         if not MONGODB_URI:
             raise ValueError("MONGODB_URI not found in environment variables")
@@ -61,75 +60,8 @@ class Mem0PreferenceManager:
             logger.error(f"❌ Mem0 initialization failed: {e}")
             raise
 
-        # ── TTL cache (TC44) ─────────────────────────────────────────────────
-        self._search_cache: dict = {}
-        self._CACHE_TTL: float = 300.0  # 5 minutes
-
-    # Credential markers — preferences containing these are never stored
-    _CREDENTIAL_MARKERS = [
-        "password", "passwd", "pwd", "api key", "apikey", "api_key",
-        "secret key", "secret", "token", "private key", "passphrase",
-    ]
-    # Patterns that indicate a credential value is being given (not just mentioned)
-    _CREDENTIAL_PATTERNS = [
-        r'(?:password|passwd|pwd)\s+(?:is|:)\s*\S+',
-        r'api\s*key\s+(?:is|:)\s*\S+',
-        r'secret\s+(?:is|:)\s*\S+',
-        r'token\s+(?:is|:)\s*\S+',
-        r'my\s+(?:password|passwd|pwd|pin)\s+is\s+\S+',
-        r'gsk_[A-Za-z0-9]{20,}',
-        r'sk-[A-Za-z0-9]{20,}',
-    ]
-
-    def _is_credential(self, text: str) -> bool:
-        """Return True if text contains a credential that must not be stored."""
-        import re
-        t = text.lower()
-        for pattern in self._CREDENTIAL_PATTERNS:
-            if re.search(pattern, t, re.IGNORECASE):
-                return True
-        return False
-
-    # def add_preference(self, preference: str, metadata: Optional[Dict] = None) -> str:
-    #     """Store a user preference. Returns 'BLOCKED_CREDENTIAL' if credential detected.
-    #     Falls back to zero-token (local embedding) write when Groq is rate-limited."""
-    #     # TC57: block credentials before they reach Mem0
-    #     if self._is_credential(preference):
-    #         logger.warning(f"🚫 Credential blocked — not stored: '{preference[:60]}'")
-    #         return "BLOCKED_CREDENTIAL"
-    #     try:
-    #         messages = [{"role": "user", "content": preference}]
-    #         result = self.memory.add(
-    #             messages=messages,
-    #             user_id=self.user_id,
-    #             metadata=metadata or {}
-    #         )
-    #         logger.info(f"✅ Stored preference for {self.user_id}: {preference[:50]}...")
-    #         return result
-    #     except Exception as e:
-    #         error_str = str(e)
-    #         # Groq rate limit (429) or token exhaustion — fall back to zero-token write
-    #         if "429" in error_str or "rate_limit" in error_str.lower() or "tokens per day" in error_str.lower():
-    #             logger.warning(
-    #                 f"⚠️ Groq rate-limited — falling back to zero-token write for: '{preference[:50]}'"
-    #             )
-    #             return self.add_preference_zero_token(preference, metadata)
-    #         logger.error(f"❌ Failed to store preference: {e}")
-    #         return None
-
     def add_preference(self, preference: str, metadata: Optional[Dict] = None) -> str:
-        """Store a user preference. Returns 'BLOCKED_CREDENTIAL' if credential detected.
-        In zero_token_mode, skips Groq entirely and writes via local embeddings."""
-        # TC57: block credentials before they reach Mem0
-        if self._is_credential(preference):
-            logger.warning(f"🚫 Credential blocked — not stored: '{preference[:60]}'")
-            return "BLOCKED_CREDENTIAL"
-
-        # Zero-token mode: bypass Mem0's internal LLM entirely
-        if self.zero_token_mode:
-            logger.info(f"⚡ Zero-token mode — skipping Groq for: '{preference[:50]}'")
-            return self.add_preference_zero_token(preference, metadata)
-
+        """Store a user preference"""
         try:
             messages = [{"role": "user", "content": preference}]
             result = self.memory.add(
@@ -140,16 +72,9 @@ class Mem0PreferenceManager:
             logger.info(f"✅ Stored preference for {self.user_id}: {preference[:50]}...")
             return result
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "rate_limit" in error_str.lower() or "tokens per day" in error_str.lower():
-                logger.warning(
-                    f"⚠️ Groq rate-limited — falling back to zero-token write for: '{preference[:50]}'"
-                )
-                return self.add_preference_zero_token(preference, metadata)
             logger.error(f"❌ Failed to store preference: {e}")
             return None
-        
-        
+
     def add_preference_zero_token(self, preference: str, metadata: Optional[Dict] = None) -> str:
         """
         Store preference WITHOUT Mem0's internal LLM call.
@@ -201,33 +126,19 @@ class Mem0PreferenceManager:
             logger.info("↻ Falling back to Mem0's add_preference (will cost tokens)")
             return self.add_preference(preference, metadata)
    
-    
-    def add_preference_safe(self, preference: str, metadata: Optional[Dict] = None,
+    def add_preference_safe(self, preference: str, metadata: Optional[Dict] = None, 
                         similarity_threshold: float = 0.85) -> Optional[str]:
         """
-        Store preference only if no similar one exists.
-        Also blocks credential values and identity conflicts (TC57, TC59).
-        Returns None if duplicate/conflict detected, 'BLOCKED_CREDENTIAL' if credential.
+        Store preference only if no similar one exists
+        
+        Args:
+            preference: Preference text to store
+            metadata: Optional metadata
+            similarity_threshold: Minimum similarity to consider duplicate (0.85 = 85% similar)
+        
+        Returns:
+            Memory ID if stored, None if duplicate found or error
         """
-        import re
-        # TC57: block credentials
-        if self._is_credential(preference):
-            logger.warning(f"🚫 Credential blocked in safe store: '{preference[:60]}'")
-            return None
-
-        # TC59: identity conflict detection
-        # If the new fact claims a name/identity, check it doesn't conflict
-        _IDENTITY_PATTERNS = [r'\bmy name is\b', r'\bname is\b', r'\bi am\b', r'\bmy username is\b']
-        is_identity_claim = any(re.search(p, preference, re.IGNORECASE) for p in _IDENTITY_PATTERNS)
-        if is_identity_claim:
-            existing_identities = self.get_relevant_preferences("what is my name", limit=5)
-            if existing_identities:
-                logger.warning(
-                    f"🚫 Identity conflict rejected: tried to store '{preference[:60]}' "
-                    f"but identity already exists: '{existing_identities[0].get('memory','')[:60]}'"
-                )
-                return None
-
         try:
             # Check for existing similar preferences
             similar_prefs = self.get_relevant_preferences(
@@ -235,18 +146,18 @@ class Mem0PreferenceManager:
                 limit=3,
                 min_score=similarity_threshold
             )
-
+            
             if similar_prefs:
                 logger.info(f"⚠️ Similar preference exists, skipping: {similar_prefs[0].get('memory', '')[:50]}...")
                 return None
-
+            
             # No duplicates found, store it
             return self.add_preference(preference, metadata)
-
+            
         except Exception as e:
             logger.error(f"❌ Failed safe preference storage: {e}")
             return None
-        
+
     def update_preference(self, old_memory_id: str, new_preference: str, metadata: Optional[Dict] = None) -> bool:
         """
         Update an existing preference by ID

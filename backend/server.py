@@ -73,7 +73,7 @@ async def health_check():
 
     return {
         "status": "healthy",
-        "service": "YUSR Unified Backend (Pub/Sub)",
+        "service": "AURA Unified Backend (Pub/Sub)",
         "version": "3.0.0",
         "broker": "running" if broker.running else "stopped",
         "transcription": "available (Google Gemini)" if genai_client else "unavailable",
@@ -85,7 +85,7 @@ async def health_check():
 async def root():
     """Root endpoint"""
     return {
-        "service": "YUSR Unified Backend",
+        "service": "AURA Unified Backend",
         "description": "Multi-agent system with message broker",
         "architecture": "Publisher/Subscriber",
         "version": "3.0.0",

@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui';
 
-import 'package:android_intent_plus/android_intent.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -19,8 +18,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'screens/startup_screen.dart';
 import 'theme.dart';
-import 'widgets/execution_widget.dart';
-import 'widgets/task_execution_border.dart';
 
 TextStyle _f(
   Color color, {
@@ -650,33 +647,11 @@ class _AutomationDemoState extends State<AutomationDemo>
   }
 
   Future<void> _minimizeToHomeForExecution() async {
-    try {
-      await _platform.invokeMethod('goToHome');
-      return;
-    } catch (_) {}
-
-    try {
-      final intent = AndroidIntent(
-        action: 'android.intent.action.MAIN',
-        category: 'android.intent.category.HOME',
-      );
-      await intent.launch();
-    } catch (_) {}
+    return;
   }
 
   Future<void> _restoreAppAfterExecution() async {
-    try {
-      await _platform.invokeMethod('bringToFront');
-      return;
-    } catch (_) {}
-
-    try {
-      final intent = AndroidIntent(
-        action: 'android.intent.action.MAIN',
-        package: 'com.example.aura_project',
-      );
-      await intent.launch();
-    } catch (_) {}
+    return;
   }
 
   Future<void> _loadAccessibilityPref() async {
@@ -839,17 +814,16 @@ class _AutomationDemoState extends State<AutomationDemo>
       _thinkingSteps.clear();
       _status = 'Processing...';
       _responseText = '';
-      _showExecutionWidget = true;
-      _executionWidgetMinimized = false;
+      _showExecutionWidget = false;
+      _executionWidgetMinimized = true;
       _executionNeedsAttention = false;
       _executionWidgetTitle = 'Executing task';
       _executionWidgetSubtitle =
           hadPendingFollowup
               ? 'Applying your clarification...'
-              : 'AURA is running in background';
+              : 'Processing your request...';
     });
     _thinkCtrl.repeat();
-    unawaited(_minimizeToHomeForExecution());
     try {
       await _sendUITree();
       final resp = await http.post(
@@ -891,9 +865,9 @@ class _AutomationDemoState extends State<AutomationDemo>
             _needsConfirmation =
                 _confirmationRequest.trim().isNotEmpty ||
                 _draftedMessage.trim().isNotEmpty;
-            _showExecutionWidget = true;
-            _executionWidgetMinimized = false;
-            _executionNeedsAttention = true;
+            _showExecutionWidget = false;
+            _executionWidgetMinimized = true;
+            _executionNeedsAttention = false;
             _executionWidgetTitle =
                 _needsConfirmation ? 'Clarification needed' : 'Awaiting review';
             _executionWidgetSubtitle = _compactForWidget(
@@ -910,13 +884,11 @@ class _AutomationDemoState extends State<AutomationDemo>
             _confirmationRequest = '';
             _draftedMessage = '';
             _needsConfirmation = false;
-            _showExecutionWidget = true;
-            _executionWidgetMinimized = false;
-            _executionNeedsAttention = true;
+            _showExecutionWidget = false;
+            _executionWidgetMinimized = true;
+            _executionNeedsAttention = false;
             _executionWidgetTitle = 'Execution complete';
             _executionWidgetSubtitle = _compactForWidget(_responseText);
-            _scheduleExecutionWidgetDismiss();
-            unawaited(_restoreAppAfterExecution());
           }
           _textCtrl.clear();
           _transcribedText = '';
@@ -927,12 +899,11 @@ class _AutomationDemoState extends State<AutomationDemo>
             data['error']?.toString() ?? 'Unknown error',
             fallback: 'Task failed. Please try again.',
           );
-          _showExecutionWidget = true;
-          _executionWidgetMinimized = false;
-          _executionNeedsAttention = true;
+          _showExecutionWidget = false;
+          _executionWidgetMinimized = true;
+          _executionNeedsAttention = false;
           _executionWidgetTitle = 'Execution failed';
           _executionWidgetSubtitle = _compactForWidget(_responseText);
-          unawaited(_restoreAppAfterExecution());
         }
       });
     } catch (e) {
@@ -950,13 +921,12 @@ class _AutomationDemoState extends State<AutomationDemo>
         _confirmationRequest = '';
         _draftedMessage = '';
         _needsConfirmation = false;
-        _showExecutionWidget = true;
-        _executionWidgetMinimized = false;
-        _executionNeedsAttention = true;
+        _showExecutionWidget = false;
+        _executionWidgetMinimized = true;
+        _executionNeedsAttention = false;
         _executionWidgetTitle = 'Execution failed';
         _executionWidgetSubtitle = _compactForWidget(_responseText);
       });
-      unawaited(_restoreAppAfterExecution());
     }
   }
 
@@ -1021,7 +991,6 @@ class _AutomationDemoState extends State<AutomationDemo>
     try {
       await _platform.invokeMethod('stopExecution');
     } catch (_) {}
-    unawaited(_restoreAppAfterExecution());
   }
 
   Future<void> _playTTSAudio(String text) async {
@@ -1304,117 +1273,74 @@ class _AutomationDemoState extends State<AutomationDemo>
 
   @override
   Widget build(BuildContext context) {
-    return TaskExecutionBorder(
-      isExecuting: _isLoading || _isRecording,
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: Stack(
-          children: [
-            if (_videoCtrl.value.isInitialized)
-              SizedBox.expand(
-                child: FittedBox(
-                  fit: BoxFit.cover,
-                  child: SizedBox(
-                    width: _videoCtrl.value.size.width,
-                    height: _videoCtrl.value.size.height,
-                    child: VideoPlayer(_videoCtrl),
-                  ),
-                ),
-              ),
-
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black.withOpacity(0.16),
-                        Colors.black.withOpacity(0.44),
-                      ],
-                    ),
-                  ),
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          if (_videoCtrl.value.isInitialized)
+            SizedBox.expand(
+              child: FittedBox(
+                fit: BoxFit.cover,
+                child: SizedBox(
+                  width: _videoCtrl.value.size.width,
+                  height: _videoCtrl.value.size.height,
+                  child: VideoPlayer(_videoCtrl),
                 ),
               ),
             ),
 
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Center(
-                  child: Opacity(
-                    opacity: 0.18,
-                    child: Image.asset(
-                      'assets/aura_icon_haze.png',
-                      width: 420,
-                      height: 420,
-                      fit: BoxFit.contain,
-                    ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.16),
+                      Colors.black.withOpacity(0.44),
+                    ],
                   ),
                 ),
               ),
             ),
+          ),
 
-            SafeArea(
-              child: Stack(
-                children: [
-                  AnimatedScale(
-                    duration: const Duration(milliseconds: 220),
-                    scale: _showExecutionWidget ? 0.92 : 1,
-                    curve: Curves.easeOutCubic,
-                    child: AnimatedOpacity(
-                      duration: const Duration(milliseconds: 180),
-                      opacity: _showExecutionWidget ? 0 : 1,
-                      curve: Curves.easeOut,
-                      child: IgnorePointer(
-                        ignoring: _showExecutionWidget,
-                        child: Column(
-                          children: [
-                            _buildHeader(),
-                            Expanded(
-                              child:
-                                  _chatMode
-                                      ? _buildChatMode()
-                                      : _buildVoiceMode(),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Center(
+                child: Opacity(
+                  opacity: 0.18,
+                  child: Image.asset(
+                    'assets/aura_icon_haze.png',
+                    width: 420,
+                    height: 420,
+                    fit: BoxFit.contain,
                   ),
-                  if (_showExecutionWidget)
-                    ExecutionWidget(
-                      visible: _showExecutionWidget,
-                      minimized: _executionWidgetMinimized,
-                      isExecuting: _isExecuting,
-                      isPaused: _isPaused,
-                      needsAttention: _executionNeedsAttention,
-                      title: _executionWidgetTitle,
-                      subtitle: _executionWidgetSubtitle,
-                      animation: _waveCtrl,
-                      onToggleMinimize:
-                          () => setState(
-                            () =>
-                                _executionWidgetMinimized =
-                                    !_executionWidgetMinimized,
-                          ),
-                      onPauseResume:
-                          () =>
-                              _isPaused
-                                  ? _resumeExecution()
-                                  : _pauseExecution(),
-                      onStop: _stopExecution,
-                    ),
-                ],
+                ),
               ),
             ),
+          ),
 
-            if (!_showExecutionWidget) _buildSidebar(),
-            if (!_showExecutionWidget && _showSettings) _buildSettingsModal(),
-            if (!_showExecutionWidget && _viewingSessionId != null)
-              _buildChatViewerModal(),
-          ],
-        ),
+          SafeArea(
+            child: Stack(
+              children: [
+                Column(
+                  children: [
+                    _buildHeader(),
+                    Expanded(
+                      child: _chatMode ? _buildChatMode() : _buildVoiceMode(),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          _buildSidebar(),
+          if (_showSettings) _buildSettingsModal(),
+          if (_viewingSessionId != null) _buildChatViewerModal(),
+        ],
       ),
     );
   }

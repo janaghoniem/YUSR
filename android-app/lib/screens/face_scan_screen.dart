@@ -420,12 +420,12 @@ class _FaceScanScreenState extends State<FaceScanScreen>
                                                         ),
                                                       );
 
-                                                      if (_rotatePreviewQuarterTurn) {
-                                                        preview = RotatedBox(
-                                                          quarterTurns: 1,
-                                                          child: preview,
-                                                        );
-                                                      }
+                                                      // if (_rotatePreviewQuarterTurn) {
+                                                      //   preview = RotatedBox(
+                                                      //     quarterTurns: 1,
+                                                      //     child: preview,
+                                                      //   );
+                                                      // }
 
                                                       return preview;
                                                     },

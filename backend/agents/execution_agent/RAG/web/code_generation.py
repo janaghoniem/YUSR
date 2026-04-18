@@ -487,6 +487,13 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 - text = await page.text_content(selector)
 - print("EXECUTION_SUCCESS")
 
+⚠️ NEVER await a bare locator — page.locator() is SYNCHRONOUS:
+❌ WRONG: await page.locator('a:has-text("X")')   ← TypeError!
+❌ WRONG: link = await page.locator('a')            ← TypeError!
+✅ CORRECT: await page.locator('a:has-text("X")').first.click()
+✅ CORRECT: link = page.locator('a')  # no await
+✅ CORRECT: count = await page.locator('a').count()  # await the ACTION
+
 ================================================================
 ❗ MANDATORY PATTERN: GOOGLE SEARCHES
 ================================================================
@@ -847,6 +854,27 @@ CRITICAL RULES:
 CLICKING SEARCH RESULTS & LINKS — MANDATORY PATTERN
 ================================================================
 When clicking a search result, link, video thumbnail, or any interactive element:
+
+The LINKS section in the prompt shows ALL clickable links with their text.
+Use a:has-text("EXACT_LINK_TEXT") to click a specific link.
+
+EXAMPLE — Click a named link from the LINKS section (e.g. 'Cybernaut: Towards Reliable Web Automation'):
+  try:
+      link = page.locator('a:has-text("Cybernaut")')
+      await link.first.scroll_into_view_if_needed()
+      await page.wait_for_timeout(300)
+      await link.first.click()
+      await page.wait_for_load_state('domcontentloaded', timeout=10000)
+      print("EXECUTION_SUCCESS")
+  except Exception as e:
+      # Fallback: JS click by partial text
+      try:
+          js_code = 'const links=[...document.querySelectorAll("a")];const link=links.find(a=>a.textContent.includes("Cybernaut"));if(link)link.click();else throw new Error("Link not found");'
+          await page.evaluate(js_code)
+          await page.wait_for_load_state('domcontentloaded', timeout=10000)
+          print("EXECUTION_SUCCESS")
+      except Exception as e2:
+          print(f"FAILED: {e2}")
 
 1. ALWAYS wait for the element to be visible BEFORE clicking:
      await page.wait_for_selector('h3 a', state='visible', timeout=10000)

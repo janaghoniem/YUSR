@@ -3400,13 +3400,30 @@ class WebExecutionPipeline:
             if result.get('success'):
                 self.stats["dom_success"] += 1
             else:
-                visual_result = await self._try_visual_fallback_action(page, task, task_id)
-                if visual_result is not None:
-                    result = visual_result
-                    if result.get('success'):
-                        logger.info("✅ Visual fallback succeeded after DOM failure")
-                    else:
-                        logger.warning(f"⚠️ Visual fallback returned failure: {result.get('error')}")
+                # ✅ FIX: Try DOM-based fallback link click BEFORE OmniParser visual fallback.
+                # The page inspector already extracted all link texts from the DOM — use that
+                # instead of OmniParser image captioning which can't read text.
+                dom_fallback_tried = False
+                if action_type == 'click' and any(kw in clean_prompt.lower() for kw in ('link', 'click', 'open', 'result')):
+                    logger.info(f"🔧 RAG code failed — trying DOM-based fallback link click")
+                    try:
+                        fallback_code = self._generate_fallback_link_click(clean_prompt)
+                        result = await self._execute_generated_code(page, fallback_code, task_id)
+                        dom_fallback_tried = True
+                        if result.get('success'):
+                            logger.info("✅ DOM fallback link click succeeded")
+                    except Exception as fb_err:
+                        logger.warning(f"⚠️ DOM fallback link click failed: {fb_err}")
+
+                # Only try OmniParser if DOM fallback didn't work
+                if not result.get('success') and not dom_fallback_tried:
+                    visual_result = await self._try_visual_fallback_action(page, task, task_id)
+                    if visual_result is not None:
+                        result = visual_result
+                        if result.get('success'):
+                            logger.info("✅ Visual fallback succeeded after DOM failure")
+                        else:
+                            logger.warning(f"⚠️ Visual fallback returned failure: {result.get('error')}")
 
             # ✅ NEW TAB DETECTION: if a click opened a new tab, switch the session to it
             if action_type in ('click', 'navigate') and result.get('success'):
@@ -3797,6 +3814,24 @@ await main()
             # ✅ FIX 3: .first/.last are Locator properties, not coroutines
             code = re.sub(r'await\s+([\w.()\[\]]+)\.first\b', r'\1.first', code)
             code = re.sub(r'await\s+([\w.()\[\]]+)\.last\b', r'\1.last', code)
+            
+            # ✅ FIX: Sanitize 'await page.locator(...)' without chained action
+            # LLMs sometimes generate 'await page.locator(selector)' which is wrong —
+            # page.locator() is synchronous, only the action (.click(), .fill(), etc.) is async.
+            # Match 'await page.locator(...)' NOT followed by .click/.fill/.count/.text_content/etc.
+            code = re.sub(
+                r'await\s+(page\.locator\([^)]*\))\s*$',
+                r'\1',
+                code,
+                flags=re.MULTILINE
+            )
+            # Also fix 'await page.get_by_...(...)' bare calls
+            code = re.sub(
+                r'await\s+(page\.get_by_\w+\([^)]*\))\s*$',
+                r'\1',
+                code,
+                flags=re.MULTILINE
+            )
             
             # Wrap in async function
             def _indent(text, spaces=4):

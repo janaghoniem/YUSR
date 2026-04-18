@@ -13,6 +13,8 @@ class MessageType(str, Enum):
     TASK_RESPONSE = "task_response"
     CLARIFICATION_REQUEST = "clarification_request"
     CLARIFICATION_RESPONSE = "clarification_response"
+    CONFIRMATION_REQUEST = "confirmation_request"
+    CONFIRMATION_RESPONSE = "confirmation_response"
     EXECUTION_REQUEST = "execution_request"
     EXECUTION_RESPONSE = "execution_response"
     STATUS_UPDATE = "status_update"

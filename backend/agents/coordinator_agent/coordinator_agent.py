@@ -33,13 +33,70 @@ load_dotenv()
 # --- Initialize Groq LLM ---
 from .config.settings import LLM_MODEL, GROQ_API_KEY, MONGODB_URI
 from langchain_groq import ChatGroq
+from mistralai.client import Mistral
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","ministral-3b-2512")
 
 llm = ChatGroq(
     model=LLM_MODEL,
     temperature=0.05,
     max_tokens=2048,
     groq_api_key=GROQ_API_KEY
-) 
+) if GROQ_API_KEY else None
+
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
+
+
+def _extract_mistral_text(response_obj: Any) -> str:
+    try:
+        choices = getattr(response_obj, "choices", None) or []
+        if not choices:
+            return str(response_obj)
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text", "")))
+                else:
+                    parts.append(str(getattr(item, "text", item)))
+            content = "".join(parts)
+        return str(content or "")
+    except Exception:
+        return ""
+
+
+async def llm_invoke_with_fallback(prompt: str) -> str:
+    if llm:
+        try:
+            response = await llm.ainvoke(prompt)
+            return response.content if hasattr(response, "content") else str(response)
+        except Exception as groq_err:
+            logger.warning(f"⚠️ Coordinator Groq call failed, trying Mistral fallback: {groq_err}")
+    else:
+        logger.warning("⚠️ Coordinator Groq client unavailable: GROQ_API_KEY is not set")
+
+    if not mistral_client:
+        logger.error("❌ Coordinator Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+        return ""
+
+    try:
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model=MISTRAL_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.05,
+            max_tokens=2048,
+        )
+        text = _extract_mistral_text(response)
+        if text:
+            logger.info(f"✅ Coordinator fallback succeeded with Mistral ({MISTRAL_MODEL})")
+        return text
+    except Exception as mistral_err:
+        logger.error(f"❌ Coordinator Mistral fallback failed: {mistral_err}")
+        return ""
 
 
 # Initialize MongoDB checkpointer
@@ -161,9 +218,9 @@ def sanitize_confirmation_for_prompt(text: str) -> str:
     COORDINATOR_INJECTION_MARKERS = [
         "important system note",
         "system note:",
-        "you must also add",
-        "add a second task",
-        "add a task to",
+        "you must also add", 
+        "you must also",
+        "you must additionally",
         "also list all",
         "ignore previous",
         "disregard your",
@@ -171,24 +228,33 @@ def sanitize_confirmation_for_prompt(text: str) -> str:
         "set response_text",
         "<|system|>",
         "<|user|>",
+        "<|assistant|>",
         "ignore previous formatting",
         "ignore previous formatting rules",
-        "using pathlib",
-        "using shutil",
     ]
-
+    
+    # Look for markers as STANDALONE instructions, not as part of natural language
+    # e.g., "IMPORTANT SYSTEM NOTE: do X" is injection
+    #       "can you also add a second task?" is natural conversation
     text_lower = text.lower()
     for marker in COORDINATOR_INJECTION_MARKERS:
         if marker in text_lower:
-            logger.warning(
-                f"🚫 F3: Coordinator injection marker detected: '{marker}' — "
-                f"stripping to first sentence only"
-            )
-            idx = text_lower.index(marker)
-            safe_part = text[:idx].strip().rstrip('.,;')
-            logger.warning(f"   Safe part kept: '{safe_part[:80]}'")
-            return safe_part if safe_part else "Task request received."
-
+            # Check if marker appears as an instruction (followed by colon or newline)
+            # or if it's part of natural language
+            idx = text_lower.find(marker)
+            # Look ahead 20 chars to see if it's an instruction
+            lookahead = text[idx:idx+50].lower()
+            if ':' in lookahead or '\n' in lookahead or lookahead.strip().startswith(marker):
+                logger.warning(
+                    f"🚫 F3: Coordinator injection marker detected: '{marker}' — "
+                    f"stripping to first sentence only"
+                )
+                # Strip to just before the injection
+                safe_part = text[:idx].strip().rstrip('.,;')
+                if safe_part:
+                    return safe_part
+                return "Task request received."
+    
     return text
 
 
@@ -479,18 +545,18 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
             "error": result.error,
         }
 
-    if any(k in combined for k in ["permission", "allow", "deny access", "popup", "dialog", "modal"]):
-        return {
-            "task_id": task.task_id,
-            "task_prompt": task.ai_prompt,
-            "clarification_type": "permission_or_popup",
-            "question": "An unexpected popup appeared. Should I allow it, close it, or stop?",
-            "recoverable": True,
-            "metadata": result.metadata or {},
-            "error": result.error,
-        }
+    # if any(k in combined for k in ["permission", "allow", "deny access", "popup", "dialog", "modal"]):
+    #     return {
+    #         "task_id": task.task_id,
+    #         "task_prompt": task.ai_prompt,
+    #         "clarification_type": "permission_or_popup",
+    #         "question": "An unexpected popup appeared. Should I allow it, close it, or stop?",
+    #         "recoverable": True,
+    #         "metadata": result.metadata or {},
+    #         "error": result.error,
+    #     }
 
-    return None
+    # return None
 
 
 def _decide_execution_clarification_action(task: ActionTask, event: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,10 +747,22 @@ class TaskQueue:
     def add_to_current(self, tasks: List[ActionTask]):
         self.current_queue.extend(tasks)
         
-    def add_to_global(self, task_plan: Dict):
+    def add_to_global(self, task_plan: Any):
         self.global_queue.append(task_plan)
         
     def get_next_task(self) -> Optional[ActionTask]:
+        if not self.current_queue and self.global_queue and not self.is_paused and not self.is_stopped:
+            next_plan = self.global_queue.popleft()
+            if isinstance(next_plan, dict):
+                queued_tasks = next_plan.get("tasks", [])
+            elif isinstance(next_plan, list):
+                queued_tasks = next_plan
+            else:
+                queued_tasks = []
+            if queued_tasks:
+                logger.info(f"📦 Loading queued plan with {len(queued_tasks)} tasks into current queue")
+                self.current_queue.extend(queued_tasks)
+
         if self.current_queue and not self.is_paused and not self.is_stopped:
             task = self.current_queue.popleft()
             self.current_task_id = task.task_id
@@ -692,7 +770,7 @@ class TaskQueue:
         return None
     
     def has_tasks(self) -> bool:
-        return len(self.current_queue) > 0
+        return len(self.current_queue) > 0 or len(self.global_queue) > 0
     
     def pause(self):
         self.is_paused = True
@@ -704,7 +782,10 @@ class TaskQueue:
         
     def stop(self):
         self.is_stopped = True
+        self.is_paused = False
         self.current_queue.clear()
+        self.global_queue.clear()
+        self.current_task_id = None
         logger.info("⏹️ Task execution stopped")
         
     def reset(self):
@@ -744,6 +825,7 @@ coordinator_processing_lock = asyncio.Lock()
 pending_results: Dict[str, asyncio.Future] = {}
 #hala edit ashan el web 
 _session_browser_state: Dict[str, Dict] = {}
+_session_youtube_results: Dict[str, List] = {}
 
 # ICRL: Per-session, per-task buffers for In-Context Reinforcement Learning
 # Key: f"{session_id}:{task_id}" → ICRLBuffer
@@ -984,14 +1066,40 @@ async def decompose_task_to_actions(
                 history_context += f"Browser currently at: {entry['current_page_url']}\n"
             history_context += "\n"
     
+# Extract ICRL history injected by decompose_task_to_actions_with_icrl()
+    _icrl_history_block = user_request.get("_icrl_history", "")
+    _icrl_round = user_request.get("_icrl_round", 0)
+    _icrl_best_reward = user_request.get("_icrl_best_reward", 0.0)
+
+    # Build a clean copy of the request without the internal ICRL keys for display
+    _clean_request = {k: v for k, v in user_request.items()
+                      if not k.startswith("_icrl_")}
+
     prompt = f"""{device_hint}You are the AURA Task Decomposition Agent. Convert user requests into low-level executable tasks.
 
 # USER REQUEST
-{json.dumps(user_request, indent=2)}
+{json.dumps(_clean_request, indent=2)}
 
 # USER PREFERENCES
 {preferences_context}
 {history_context}"""
+
+    # Inject ICRL history as a clearly labelled section so the LLM actually sees it
+    if _icrl_history_block:
+        prompt += f"""
+
+============================
+PREVIOUS ATTEMPT HISTORY (In-Context RL — Round {_icrl_round})
+============================
+Best reward achieved so far: {_icrl_best_reward:.2f} (0.0 = total failure, 1.0 = perfect success)
+
+{_icrl_history_block}
+
+INSTRUCTION: Every previous attempt above failed (reward ≤ {_icrl_best_reward:.2f}).
+You MUST generate a plan that is DIFFERENT from all of the above.
+Do NOT repeat the same task prompt, same approach, or same tool sequence.
+============================
+"""
     
     # ✅ FIX 2: Add credentials section to prompt if applicable
     if credentials:
@@ -1397,15 +1505,25 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
 
 - task_id: task_2
   goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Navigate to Gmail 
+  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before opening any app or sending it. Wait for their response.
+  device: mobile
+  context: local
+  target_agent: language
+  extra_params:
+    input_from: "task_1"
+  depends_on: ["task_1"]
+
+- task_id: task_3
+  goal: Compose and send a meeting reschedule email to Sara
+  ai_prompt: Navigate to Gmail
   device: mobile
   context: local
   target_agent: action
   extra_params:
     app_name: gmail
-  depends_on: null
+  depends_on: ["task_2"]
 
-- task_id: task_3
+- task_id: task_4
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Compose new email to sara@gmail.com
   device: mobile
@@ -1413,34 +1531,24 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
   target_agent: action
   extra_params:
     recipient: sara@gmail.com
-  depends_on: ["task_2"]
+  depends_on: ["task_3"]
 
-- task_id: task_4
+- task_id: task_5
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_1", "task_3"]
+  depends_on: ["task_1", "task_4"]
 
-- task_id: task_5
+- task_id: task_6
   goal: Compose and send a meeting reschedule email to Sara
   ai_prompt: Fill the email body with the BODY value from the composed email
   device: mobile
   context: local
   target_agent: action
   extra_params: {{}}
-  depends_on: ["task_4"]
-
-- task_id: task_6
-  goal: Compose and send a meeting reschedule email to Sara
-  ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before sending it. Wait for their response.
-  device: mobile
-  context: local
-  target_agent: language
-  extra_params:
-    input_from: "task_1"
   depends_on: ["task_1", "task_5"]
 
 - task_id: task_7
@@ -1453,11 +1561,9 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
   depends_on: ["task_6"]
 
 EXPLANATION: task_1 (reasoning) returns {{"SUBJECT": "...", "BODY": "..."}}.
-task_2 navigates Gmail in parallel. task_3 fills the To field directly (known from
-the user request). tasks 4-5 depend on task_1 and receive the JSON as input_content
-so the action layer can parse SUBJECT and BODY individually. 
-task_6 explicitly takes input_from: "task_1" so the language agent can read the generated content to the user before task_7 sends it.
-The email app (Gmail) is chosen from USER PREFERENCES, not hardcoded.
+task_2 explicitly takes input_from: "task_1" so the language agent reads the generated content to the user for confirmation BEFORE any action tasks start.
+task_3 navigates Gmail and depends on task_2. task_4 fills the To field directly (known from the user request). 
+tasks 5-6 receive the JSON as input_content from task_1 so the action layer can parse SUBJECT and BODY individually. They also depend sequentially on task_4/5.
 
 ## Example 4: Mobile Configuration Task
 
@@ -1573,7 +1679,7 @@ Examples of ACTION tasks:
 9. **Include confirmation steps** - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
 10. **Content generation = reasoning** - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
 11. **Shared goal** - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
-12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results and formats them into a natural, helpful conversational response.
+12. **Research communication** - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results extracted and returned by an "action" agent content extraction task and formats them into a natural, helpful conversational response.
 13. **Confirmation for sensitive actions** – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action.
   - The confirmation task must have:
     - target_agent: "language"
@@ -1607,8 +1713,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
 Generate the task decomposition now:"""
 
     try:
-        response = await llm.ainvoke(prompt)
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        response_text = await llm_invoke_with_fallback(prompt)
         response_text = response_text.strip()
 
         # ── ROBUST JSON EXTRACTION ─────────────────────────────────────────────
@@ -1774,8 +1879,7 @@ If the plan violates this common‑sense device logic, you MAY add missing steps
 Return ONLY a valid JSON array of tasks (same format as input). Do not include markdown or explanations.
 """
         try:
-            val_response = await llm.ainvoke(validation_prompt)
-            val_text = val_response.content if hasattr(val_response, 'content') else str(val_response)
+            val_text = await llm_invoke_with_fallback(validation_prompt)
             val_text = val_text.strip()
             
             # Step A: strip markdown fences
@@ -1948,6 +2052,92 @@ async def decompose_task_to_actions_with_icrl(
     )
     return result
 
+
+async def split_independent_user_requests(raw_task: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Split a single user utterance into independent top-level requests for global queueing.
+    Returns one item when the request is singular or tightly coupled.
+    """
+    base_text = str(raw_task.get("original_input") or raw_task.get("confirmation") or "").strip()
+    if not base_text:
+        return [raw_task]
+
+    split_prompt = f"""You are an intent splitting classifier for an automation coordinator.
+Decide whether the request contains MULTIPLE INDEPENDENT top-level goals that should run as separate queued plans.
+
+USER REQUEST:
+{base_text}
+
+Rules:
+1. Split only when goals are unrelated and can be planned independently.
+2. Do NOT split tightly coupled flows (e.g. "open Gmail and send an email").
+3. Keep each split goal executable and concise.
+4. If uncertain, do not split.
+
+Return strict JSON only:
+{{
+  "split": true/false,
+  "goals": ["goal 1", "goal 2"]
+}}"""
+
+    try:
+        llm_text = await llm_invoke_with_fallback(split_prompt)
+        payload = extract_json_payload(llm_text, {"split": False, "goals": []})
+    except Exception as e:
+        logger.warning(f"⚠️ Independent-intent split failed, using single-plan fallback: {e}")
+        payload = {"split": False, "goals": []}
+
+    goals = payload.get("goals") if isinstance(payload, dict) else []
+    should_split = bool(isinstance(payload, dict) and payload.get("split") and isinstance(goals, list))
+
+    cleaned_goals: List[str] = []
+    if should_split:
+        for g in goals:
+            g_text = str(g).strip()
+            if g_text:
+                cleaned_goals.append(g_text)
+
+    if len(cleaned_goals) <= 1:
+        return [raw_task]
+
+    split_requests: List[Dict[str, Any]] = []
+    for goal in cleaned_goals[:4]:
+        sub = dict(raw_task)
+        sub["original_input"] = goal
+        sub["confirmation"] = goal
+        split_requests.append(sub)
+
+    logger.info(
+        f"🧩 Split request into {len(split_requests)} independent plans: "
+        + " | ".join(r.get("original_input", "") for r in split_requests)
+    )
+    return split_requests
+
+
+def namespace_task_plan(tasks: List[ActionTask], namespace: str) -> List[ActionTask]:
+    """Prefix task IDs/dependencies to avoid collisions across global queued plans."""
+    id_map = {t.task_id: f"{namespace}{t.task_id}" for t in tasks}
+    namespaced: List[ActionTask] = []
+    for task in tasks:
+        deps = task.depends_on or []
+        mapped_deps = [id_map.get(dep, f"{namespace}{dep}") for dep in deps] if deps else None
+        cloned = ActionTask(
+            task_id=id_map.get(task.task_id, f"{namespace}{task.task_id}"),
+            goal=task.goal,
+            ai_prompt=task.ai_prompt,
+            device=task.device,
+            context=task.context,
+            extra_params=dict(task.extra_params or {}),
+            web_params=dict(task.web_params or {}),
+            target_agent=task.target_agent,
+            depends_on=mapped_deps,
+        )
+        input_from = cloned.extra_params.get("input_from")
+        if input_from:
+            cloned.extra_params["input_from"] = id_map.get(input_from, f"{namespace}{input_from}")
+        namespaced.append(cloned)
+    return namespaced
+
 def create_coordinator_graph():
     """Create the coordinator orchestration graph"""
     graph = StateGraph(dict)
@@ -2095,40 +2285,56 @@ def create_coordinator_graph():
                 logger.debug(f"⚠️ conversation_history load failed (non-fatal): {_load_err}")
         # ─────────────────────────────────────────────────────────────────────
         
-        # ✅ FIX 3: Pass conversation history to decomposition
-        plan_result = await decompose_task_to_actions(
-            raw_task, 
-            preferences_context, 
-            device_type,
-            conversation_history=loaded_history,
-            session_id=session_id,
-            http_request_id=original_message_id,
-            current_page_url=current_page_url
-        )
-        
-        # Save the plan execution error if there was one
-        plan_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
-        
-        # Surface decomposition errors when present
-        if plan_error:
-            logger.error(f"❌ Decomposition returned error: {plan_error}")
-            tasks = []
-        else:
-            tasks = plan_result.get("tasks", [])
+        split_requests = await split_independent_user_requests(raw_task)
+        all_plans: List[List[ActionTask]] = []
+        plan_error = ""
+
+        for idx, sub_request in enumerate(split_requests):
+            plan_result = await decompose_task_to_actions(
+                sub_request,
+                preferences_context,
+                device_type,
+                conversation_history=loaded_history,
+                session_id=session_id,
+                http_request_id=original_message_id,
+                current_page_url=current_page_url
+            )
+
+            this_error = plan_result.get("error", "") if isinstance(plan_result, dict) else ""
+            if this_error:
+                plan_error = this_error
+                logger.error(f"❌ Decomposition returned error for plan {idx + 1}: {this_error}")
+                all_plans = []
+                break
+
+            plan_tasks: List[ActionTask] = plan_result.get("tasks", [])
+            if idx > 0:
+                plan_tasks = namespace_task_plan(plan_tasks, namespace=f"g{idx + 1}_")
+
+            for task in plan_tasks:
+                if getattr(task, "device", None) is None:
+                    task.device = device_type
+
+            all_plans.append(plan_tasks)
+
             try:
-                tasks_dump = [t.model_dump() if hasattr(t, 'model_dump') else t for t in tasks]
-                logger.info(f"📋 Decomposition result ({len(tasks_dump)} tasks): {json.dumps(tasks_dump, indent=2)}")
+                tasks_dump = [t.model_dump() if hasattr(t, "model_dump") else t for t in plan_tasks]
+                logger.info(
+                    f"📋 Decomposition result for plan {idx + 1} ({len(tasks_dump)} tasks): "
+                    f"{json.dumps(tasks_dump, indent=2)}"
+                )
             except Exception as e:
-                logger.info(f"📋 Decomposed into {len(tasks)} tasks (failed to serialize tasks: {e})")
-        
-        # Set device in all tasks if not already set
-        for task in tasks:
-            if getattr(task, "device", None) is None:
-                task.device = device_type
+                logger.info(f"📋 Decomposed plan {idx + 1} into {len(plan_tasks)} tasks (serialize failed: {e})")
+
+        primary_tasks: List[ActionTask] = all_plans[0] if all_plans else []
+        queued_task_plans: List[List[ActionTask]] = all_plans[1:] if len(all_plans) > 1 else []
+        tasks = [t for plan in all_plans for t in plan]
         
         return {
             "input": state["input"],
             "tasks": tasks,
+            "primary_tasks": primary_tasks,
+            "queued_task_plans": queued_task_plans,
             "status": "ready",
             "session_id": session_id,
             "original_message_id": original_message_id,
@@ -2139,7 +2345,8 @@ def create_coordinator_graph():
 
     async def execute_tasks(state: Dict) -> Dict:
         """STEP 2: Execute tasks sequentially"""
-        tasks = state["tasks"]
+        tasks = state.get("primary_tasks") or state["tasks"]
+        queued_task_plans = state.get("queued_task_plans") or []
         session_id = state.get("session_id")
         original_message_id = state.get("original_message_id")
         user_id = state.get("user_id", "default_user")
@@ -2148,13 +2355,178 @@ def create_coordinator_graph():
         output_language = state.get("input", {}).get("output_language", user_language)
         # user_profile: personalization data forwarded from Language Agent
         user_profile = state.get("input", {}).get("user_profile") or {}
-        
+        user_id = state.get("input", {}).get("user_id", "default_user")
+
+        async def handle_confirmation_revision_loop(current_task: ActionTask, initial_result: TaskResult) -> TaskResult:
+            """
+            If language confirmation returns critique, regenerate draft via reasoning,
+            then re-ask confirmation. Loop with a safe retry cap.
+            """
+            if current_task.target_agent != "language":
+                return initial_result
+
+            result = initial_result
+            max_revision_rounds = 3
+            revision_round = 0
+
+            while (
+                result.status == "awaiting_confirmation"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "critique"
+                and revision_round < max_revision_rounds
+            ):
+                revision_round += 1
+                critique_text = str(
+                    result.metadata.get("user_critique")
+                    or result.content
+                    or ""
+                ).strip()
+
+                input_from = (current_task.extra_params or {}).get("input_from")
+                prior_content = (
+                    (current_task.extra_params or {}).get("input_content")
+                    or result.metadata.get("draft_content")
+                    or (task_outputs.get(input_from) if input_from else "")
+                )
+
+                if not prior_content:
+                    logger.error(
+                        f"❌ Cannot revise confirmation task {current_task.task_id}: missing prior draft content"
+                    )
+                    return TaskResult(
+                        task_id=current_task.task_id,
+                        status="failed",
+                        error="Missing prior draft content for critique revision",
+                    )
+
+                revision_prompt = (
+                    "Revise the previously drafted content using the user critique. "
+                    "Preserve the same structure/format as the previous content.\n\n"
+                    f"USER CRITIQUE:\n{critique_text}\n\n"
+                    f"PREVIOUS CONTENT:\n{prior_content}\n\n"
+                    "Return only the revised final content."
+                )
+
+                revision_task = ActionTask(
+                    task_id=f"{current_task.task_id}_revise_{revision_round}",
+                    goal=current_task.goal,
+                    ai_prompt=revision_prompt,
+                    device=current_task.device,
+                    context="local",
+                    extra_params={
+                        "overall_goal": (current_task.extra_params or {}).get("overall_goal", current_task.goal),
+                        "goal": (current_task.extra_params or {}).get("goal", current_task.goal),
+                        "input_content": prior_content,
+                    },
+                    web_params={},
+                    target_agent="reasoning",
+                    depends_on=None,
+                )
+
+                logger.info(
+                    f"🔁 Confirmation critique detected for {current_task.task_id}; "
+                    f"starting revision round {revision_round}/{max_revision_rounds}"
+                )
+                revision_result = await execute_single_task(
+                    revision_task,
+                    session_id,
+                    original_message_id,
+                    user_language,
+                    output_language,
+                    user_profile,
+                    user_id,
+                )
+                results[revision_task.task_id] = revision_result
+                task_queue.log_execution(revision_task, revision_result)
+
+                if revision_result.status != "success" or not (revision_result.content or "").strip():
+                    logger.error(
+                        f"❌ Revision failed for {current_task.task_id} on round {revision_round}: "
+                        f"{revision_result.error or 'empty content'}"
+                    )
+                    return TaskResult(
+                        task_id=current_task.task_id,
+                        status="failed",
+                        error=revision_result.error or "Failed to regenerate revised content",
+                        metadata={"source": "confirmation_revision"},
+                    )
+
+                revised_content = revision_result.content.strip()
+                if input_from:
+                    task_outputs[input_from] = revised_content
+                current_task.extra_params = dict(current_task.extra_params or {})
+                current_task.extra_params["input_content"] = revised_content
+
+                result = await execute_single_task(
+                    current_task,
+                    session_id,
+                    original_message_id,
+                    user_language,
+                    output_language,
+                    user_profile,
+                    user_id,
+                )
+
+            if (
+                result.status == "awaiting_confirmation"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "critique"
+            ):
+                return TaskResult(
+                    task_id=current_task.task_id,
+                    status="failed",
+                    error="Maximum revision attempts reached without approval",
+                    metadata={"source": "confirmation_revision", "max_rounds": max_revision_rounds},
+                )
+
+            if (
+                result.status == "failed"
+                and isinstance(result.metadata, dict)
+                and result.metadata.get("confirmation_decision") == "rejected"
+            ):
+                return TaskResult(
+                    task_id=current_task.task_id,
+                    status="failed",
+                    error="User rejected the drafted content",
+                    metadata={"source": "confirmation", "decision": "rejected"},
+                )
+
+            return result
+
         task_queue.reset()
         task_queue.add_to_current(tasks)
+        for queued_plan in queued_task_plans:
+            if queued_plan:
+                task_queue.add_to_global({"tasks": queued_plan})
+        if queued_task_plans:
+            logger.info(
+                f"📚 Added {len(queued_task_plans)} independent plan(s) to global queue"
+            )
         
         results = {}
         task_outputs = {}
         clarification_event = None
+
+        # Signal UI layers that coordinator execution phase has started.
+        try:
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_started",
+                        "active": True,
+                    },
+                ),
+            )
+        except Exception as _phase_start_err:
+            logger.warning(f"⚠️ Failed to publish coordinator start phase: {_phase_start_err}")
 
         if checkpointer and session_id:
             try:
@@ -2226,7 +2598,13 @@ def create_coordinator_graph():
                 break
                 
             while task_queue.is_paused:
+                if task_queue.is_stopped:
+                    break
                 await asyncio.sleep(0.5)
+
+            if task_queue.is_stopped:
+                logger.warning("⏹️ Execution stopped while paused")
+                break
             
             current_task = task_queue.get_next_task()
             if not current_task:
@@ -2342,8 +2720,11 @@ def create_coordinator_graph():
             logger.info(f"🔄 Executing {current_task.task_id}: {current_task.ai_prompt[:50]}...")
             result = await execute_single_task(
                 current_task, session_id, original_message_id,
+                user_language, output_language, user_profile,
+                user_id
                 user_language, output_language, user_profile, user_id
             )
+            result = await handle_confirmation_revision_loop(current_task, result)
 
             fallback_result = await _attempt_email_web_fallback(
                 current_task,
@@ -2456,6 +2837,8 @@ def create_coordinator_graph():
                         logger.info(f"🛠️ Attempting self-resolution: {resolve_task.ai_prompt}")
                         resolve_result = await execute_single_task(
                             resolve_task, session_id, original_message_id,
+                            user_language, output_language, user_profile,
+                            user_id
                             user_language, output_language, user_profile, user_id
                         )
                         results[resolve_task.task_id] = resolve_result
@@ -2605,6 +2988,27 @@ def create_coordinator_graph():
         total_count = len(results)
         plan_error = state.get("plan_error", "")
         
+
+        # Signal UI layers that coordinator execution phase finished.
+        try:
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_finished",
+                        "active": False,
+                    },
+                ),
+            )
+        except Exception as _phase_finish_err:
+            logger.warning(f"⚠️ Failed to publish coordinator finish phase: {_phase_finish_err}")
 
         # ✅ FIX 3: Update conversation history — enriched with active app context
         # This is what tells Turn 2 ("write hello world") that Notepad is already open.
@@ -2996,8 +3400,7 @@ If truly nothing useful (e.g. task was just opening notepad with no user data), 
 
 Extract now:"""
                 
-                extraction_response = await llm.ainvoke(extraction_prompt)
-                extraction_text = extraction_response.content if hasattr(extraction_response, 'content') else str(extraction_response)
+                extraction_text = await llm_invoke_with_fallback(extraction_prompt)
                 preferences_to_store = extract_json_payload(extraction_text, [])
                 
                 if preferences_to_store and isinstance(preferences_to_store, list):
@@ -3233,6 +3636,27 @@ Extract now:"""
             # until the upstream task itself is fixed.
             # "execution" failures ARE retryable because the decomposition may have
             # chosen the wrong approach (wrong app, wrong sequence, missing confirmation step).
+            # If every failure is a pure execution timeout, re-decomposing produces
+            # the same plan and wastes API calls. Detect this and skip.
+            def _is_timeout_result(task_obj) -> bool:
+                r = results.get(task_obj.task_id)
+                if r is None:
+                    return False
+                error_str = str(getattr(r, "error", "") or "").lower()
+                content_str = str(getattr(r, "content", "") or "").lower()
+                return "timeout" in error_str or "timeout" in content_str
+
+            all_timed_out = bool(failed_tasks_this_round) and all(
+                _is_timeout_result(t) for t in failed_tasks_this_round
+            )
+
+            if all_timed_out:
+                logger.info(
+                    "🔄 ICRL: Skipping plan retry — all failures are execution timeouts "
+                    "(re-decomposing the same task will produce the same timeout)"
+                )
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
             ALWAYS_SKIP_RETRY_TYPES = set()  # currently nothing is truly un-retryable at plan level
             has_retryable_failure = bool(
                 failure_types_this_round - ALWAYS_SKIP_RETRY_TYPES
@@ -3410,6 +3834,7 @@ async def execute_single_task(
     user_language: str = "en",
     output_language: str = "en",
     user_profile: Optional[Dict[str, Any]] = None,
+    user_id: str = "default_user"
     user_id: Optional[str] = None,
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
@@ -3468,6 +3893,47 @@ async def execute_single_task(
     # DESKTOP TASK ROUTING (ORIGINAL)
     # ════════════════════════════════════════════════════════════════
     
+    # ── Destructive OS command gate ───────────────────────────────────────────
+    # Blocks any action task whose prompt contains OS-level destructive commands
+    # that should never be executed regardless of how the plan was generated.
+    # This catches cases where the LLM decomposer produced a shutdown/delete plan
+    # from ambiguous input that slipped past the intent classifier.
+    _BLOCKED_TASK_PATTERNS = [
+        r"shutdown\s*/[srph]",
+        r"shutdown\s+/s",
+        r"shutdown\s+now\b",
+        r"shutdown\s+the\s+(?:computer|pc|desktop|system)",
+        r"shut\s*down\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"power\s*off\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"turn\s+off\s+(?:the\s+)?(?:computer|pc|desktop|system)",
+        r"(?:type|write|enter)\s+.*shutdown\s*/s",
+        r"poweroff\b",
+        r"rm\s+-rf\s+/",
+        r"del\s+/f\s+/s\s+[Cc]:\\\\[Ww]indows",
+        r"format\s+[Cc]:",
+    ]
+    if task.target_agent == "action":
+        _prompt_lower = (task.ai_prompt or "").lower()
+        _ep_lower = str(task.extra_params or "").lower()
+        _combined = _prompt_lower + " " + _ep_lower
+        for _pat in _BLOCKED_TASK_PATTERNS:
+            if re.search(_pat, _combined, re.IGNORECASE):
+                logger.error(
+                    f"🚫 DESTRUCTIVE TASK BLOCKED: task={task.task_id}, "
+                    f"matched pattern='{_pat}', prompt='{task.ai_prompt[:100]}'"
+                )
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error=(
+                        f"Task blocked by safety gate: destructive OS command detected "
+                        f"in task prompt (pattern: {_pat}). "
+                        f"This action requires explicit confirmation and cannot be executed "
+                        f"from an automated plan."
+                    ),
+                )
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Route to appropriate agent
     if task.target_agent == "action":
         channel = Channels.COORDINATOR_TO_EXECUTION
@@ -3513,9 +3979,12 @@ async def execute_single_task(
         # Also set at top level for direct access
         task_payload["user_profile"] = user_profile or {}
 
+    # Use CONFIRMATION_REQUEST for Language Agent to ask user, else EXECUTION_REQUEST
+    msg_type = MessageType.CONFIRMATION_REQUEST if receiver == AgentType.LANGUAGE else MessageType.EXECUTION_REQUEST
+
     # Create message
     task_msg = AgentMessage(
-        message_type=MessageType.EXECUTION_REQUEST,
+        message_type=msg_type,
         sender=AgentType.COORDINATOR,
         receiver=receiver,
         session_id=session_id,
@@ -3533,7 +4002,10 @@ async def execute_single_task(
     await broker.publish(channel, task_msg)
     
     # Wait for result
+    # Language confirmation tasks depend on human response and need a longer SLA.
+    wait_timeout = 180 if task.target_agent == "language" else 60
     try:
+        result_payload = await asyncio.wait_for(future, timeout=wait_timeout)
         task_timeout_seconds = int(os.getenv("COORDINATOR_TASK_TIMEOUT_SECONDS", "120"))
         result_payload = await asyncio.wait_for(future, timeout=task_timeout_seconds)
         payload_status = result_payload.get("status", "failed")
@@ -3607,7 +4079,7 @@ async def execute_single_task(
         return result
 
     except asyncio.TimeoutError:
-        logger.error(f"⏰ Task {task.task_id} timeout after 60 seconds")
+        logger.error(f"⏰ Task {task.task_id} timeout after {wait_timeout} seconds")
         # Record timeout as near-zero reward in ICRL buffer
         if session_id and task.target_agent == "action":
             try:
@@ -3617,14 +4089,14 @@ async def execute_single_task(
                 icrl_buffer.add(
                     attempt_summary=f"Task: {task.ai_prompt[:100]} | Status: timeout",
                     reward=0.05,
-                    result_snippet="Task timed out after 60 seconds",
+                    result_snippet=f"Task timed out after {wait_timeout} seconds",
                 )
             except Exception:
                 pass
         return TaskResult(
             task_id=task.task_id,
             status="failed",
-            error="Task timeout"
+            error=f"Task timeout after {wait_timeout}s"
         )
     finally:
         pending_results.pop(task.task_id, None)
@@ -3679,6 +4151,8 @@ async def start_coordinator_agent(broker_instance):
         # ─────────────────────────────────────────────────────────────────────
 
         state_input = {
+            # Pass the user_id through to the state context
+            "user_id": user_id,
             "input": _raw_payload,
             "session_id": session_id,
             "original_message_id": http_request_id,
@@ -3871,6 +4345,41 @@ async def start_coordinator_agent(broker_instance):
                 logger.error(f"❌ Failed to save context snapshot: {e}")
             
             task_queue.stop()
+
+            # Resolve and clear all in-flight futures so execution flow halts quickly.
+            for pending_task_id, future in list(pending_results.items()):
+                if future.done():
+                    continue
+                try:
+                    future.set_result(
+                        {
+                            "status": "failed",
+                            "error": "Execution stopped by user",
+                            "metadata": {"interrupted": True, "command": "stop"},
+                        }
+                    )
+                except Exception:
+                    pass
+
+            pending_results.clear()
+
+            # Broadcast explicit coordinator phase end for desktop/mobile widget handling.
+            await broker_instance.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.TASK_PROGRESS,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=message.session_id,
+                    response_to=message.message_id,
+                    payload={
+                        "ws_type": "task_progress",
+                        "stage": "coordinator",
+                        "phase": "execution_stopped",
+                        "active": False,
+                    },
+                ),
+            )
         elif command == "retry":
             # Retry from last failed task
             retry_tasks = task_queue.retry_from_failed()

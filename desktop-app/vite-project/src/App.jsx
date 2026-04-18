@@ -1,16 +1,17 @@
 // App.jsx
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import SpeechRecognition, { useSpeechRecognition } from "react-speech-recognition";
 import Sidebar from "./components/SideBar";
 import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
 import SettingsModal from "./components/SettingsModal";
-import ThinkingIndicator from "./components/ThinkingIndicator";
 import OnboardingPage from "./components/onboarding/OnboardingPage";
 import LoginPage from "./components/onboarding/LoginPage";
 import ChatHistory from "./components/ChatHistory";
+import TitleBar from "./components/TitleBar";
+import Aurora from "./components/onboarding/Aurora";
+import SplitText from "./components/onboarding/SplitText";
 import screenReader from "./utils/ScreenReader";
-import { Mic, Pause, Square, Eye, Maximize2, Minus, X, Maximize, PictureInPicture2, ArrowUpRight } from "lucide-react";
+import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucide-react";
 
 function App() {
   /* ---------- STATE ---------- */
@@ -39,11 +40,16 @@ function App() {
 
   
   // ✅ AUTH STATE — "app" | "login" | "onboard"
-  // const [authState, setAuthState] = useState(() => {
-  //     if (localStorage.getItem("onboardingComplete") === "true") return "app";
-  //     return "login";
-  // });
-  const [authState, setAuthState] = useState("login");
+  const [authState, setAuthState] = useState(() => {
+    const onboardingComplete = localStorage.getItem("onboardingComplete") === "true";
+    const storedUserId = localStorage.getItem("userId");
+
+    if (onboardingComplete && storedUserId) {
+      return "app";
+    }
+
+    return "login";
+  });
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
   const [sessionId, setSessionId] = useState(() => {
       const stored = localStorage.getItem("currentSessionId");
@@ -64,6 +70,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [deviceType, setDeviceType] = useState("desktop");
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("ttsVoice") || "Gacrux");
+  const [preferredLanguage, setPreferredLanguage] = useState(() => localStorage.getItem("preferredLanguage") || localStorage.getItem("appLanguage") || localStorage.getItem("userLanguage") || "en");
   const [screenSize, setScreenSize] = useState("desktop");
   const [userName, setUserName] = useState(() => {
     const stored = localStorage.getItem("userName");
@@ -72,12 +79,16 @@ function App() {
   });
   const [thinkingSteps, setThinkingSteps] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [coordinatorActive, setCoordinatorActive] = useState(false);
+  const [auraStatus, setAuraStatus] = useState("starting");
+  const [wakePulse, setWakePulse] = useState(false);
   // True when server-provided SSE thinking stream is connected
   const [sseConnected, setSseConnected] = useState(false);
   const [chats, setChats] = useState([]);
   const [chatTitle, setChatTitle] = useState("New Chat");
   const [viewingChat, setViewingChat] = useState(null); // { sessionId, title, messages }
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const hasSpokenHeaderWelcomeRef = useRef(false);
 
   // WebSocket state
   const wsRef = useRef(null);
@@ -104,6 +115,7 @@ function App() {
   // Detected user language — set on first voice interaction, persists for session
   const [userLanguage, setUserLanguage] = useState(() => localStorage.getItem("userLanguage") || null);
   const userLanguageRef = useRef(localStorage.getItem("userLanguage") || null);
+  const preferredLanguageRef = useRef(localStorage.getItem("preferredLanguage") || localStorage.getItem("appLanguage") || localStorage.getItem("userLanguage") || "en");
   // Whether to vocalize thinking steps
   const [vocalizeSteps, setVocalizeSteps] = useState(true);
   // Ref to track the last spoken step index (avoid re-speaking)
@@ -113,6 +125,8 @@ function App() {
   const thinkingSpeechQueueRef = useRef([]);
   const thinkingSpeechRunningRef = useRef(false);
   const wakeWatchdogRef = useRef(null);
+  const wakePulseTimerRef = useRef(null);
+  const manualCaptureCancelledRef = useRef(false);
   const silenceFrameRef = useRef(null);
   const noSpeechTimeoutRef = useRef(null);
   const userSpokeRef = useRef(false);
@@ -121,6 +135,32 @@ function App() {
   const audioChunksRef = useRef([]);
   const audioRef = useRef(new Audio());
   const audioContextRef = useRef(null);
+
+  const playWakePing = useCallback(() => {
+    try {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const ctx = new AudioContextCtor();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(920, ctx.currentTime);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.24);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.25);
+      osc.onended = () => {
+        ctx.close().catch(() => {
+          // no-op
+        });
+      };
+    } catch (error) {
+      console.warn("[Wake] Ping sound failed:", error);
+    }
+  }, []);
 
   const isArabicText = useCallback((text) => /[\u0600-\u06FF]/.test(text || ""), []);
 
@@ -144,6 +184,18 @@ function App() {
   useEffect(() => {
     userLanguageRef.current = userLanguage;
   }, [userLanguage]);
+
+  useEffect(() => {
+    preferredLanguageRef.current = preferredLanguage;
+    localStorage.setItem("preferredLanguage", preferredLanguage);
+    screenReader.setLanguage(preferredLanguage);
+  }, [preferredLanguage]);
+
+  useEffect(() => {
+    if (authState !== "app") {
+      hasSpokenHeaderWelcomeRef.current = false;
+    }
+  }, [authState]);
 
   const normalizeThinkingStep = useCallback((step) => {
     return (step || "")
@@ -262,104 +314,117 @@ function App() {
   }, [detectLanguageFromText, extractReadableText, rememberUserLanguageFromText, stopThinkingSpeech]);
 
   // Speech recognition (wake-word)
-  const { transcript, interimTranscript, finalTranscript, resetTranscript, listening, browserSupportsSpeechRecognition } = useSpeechRecognition();
+  const [listening,          setListening]           = useState(false);
+  const [pendingWakeCommand, setPendingWakeCommand]  = useState(null);
+  const useElectronWakeWord =
+    !!window?.electronAPI?.onAuraWakeWord && !!window?.electronAPI?.onAuraFinalCommand;
 
-  // Start wake-word listening — use a language that can hear both EN and AR
+  const wakeStoppedRef      = useRef(false); // true = we deliberately stopped
+ 
+  // Start one STT session for wake-word detection
   const startWakeWordListening = useCallback(() => {
-    if (!browserSupportsSpeechRecognition) return;
-    if (isRecording) return;
-    try {
-      const lang = userLanguage === 'ar' ? 'ar-EG' : 'en-US';
-      try { SpeechRecognition.stopListening(); } catch (e) {}
-      SpeechRecognition.startListening({ continuous: true, language: lang, interimResults: true });
-      console.log(`[Wake] Listening started (lang=${lang})`);
-    } catch (e) {
-      console.warn('[Wake] Failed to start listening:', e);
-    }
-  }, [browserSupportsSpeechRecognition, userLanguage, isRecording]);
-
-  // Ensure continuous listening starts on mount (if supported)
-  useEffect(() => {
-    if (!browserSupportsSpeechRecognition) {
-      console.warn('[Wake] SpeechRecognition not supported by this browser');
+    if (useElectronWakeWord) {
+      window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || "en" }).catch(() => {
+        // Keep silent and let manual text/mic fallback handle the flow.
+      });
+      setListening(true);
       return;
     }
-
-    startWakeWordListening();
-
-    // Quick sanity-check: if recognition does not start within 1s, log a hint
-    setTimeout(() => {
-      if (!listening) {
-        console.warn('[Wake] SpeechRecognition did not report listening=true. Browser may not allow continuous recognition in this context.');
-      }
-    }, 1000);
-
-    return () => {
-      try { SpeechRecognition.stopListening(); } catch (e) {}
-    };
-  }, [browserSupportsSpeechRecognition, startWakeWordListening]);
+    setListening(false);
+  }, [
+    useElectronWakeWord,
+  ]);
 
   useEffect(() => {
-    if (!browserSupportsSpeechRecognition) return;
-    if (wakeWatchdogRef.current) {
-      clearInterval(wakeWatchdogRef.current);
-      wakeWatchdogRef.current = null;
-    }
+    if (!useElectronWakeWord || authState !== "app") return;
 
-    wakeWatchdogRef.current = setInterval(() => {
-      if (!isRecording && !listening) {
-        console.log("[Wake] Watchdog restarting speech recognition");
-        startWakeWordListening();
+    const offWake = window.electronAPI.onAuraWakeWord((payload) => {
+      const detectedLang = payload?.lang === "ar" ? "ar" : "en";
+      if (payload?.lang) {
+        preferredLanguageRef.current = detectedLang;
+        setPreferredLanguage(detectedLang);
       }
-    }, 2500);
-
-    return () => {
-      if (wakeWatchdogRef.current) {
-        clearInterval(wakeWatchdogRef.current);
-        wakeWatchdogRef.current = null;
-      }
-    };
-  }, [browserSupportsSpeechRecognition, isRecording, listening, startWakeWordListening]);
-
-  // Detect wake word AND interrupt commands in speech (always active, even during processing)
-  useEffect(() => {
-    const combined = `${interimTranscript || ''} ${finalTranscript || ''} ${transcript || ''}`.toLowerCase().trim();
-    if (!combined) return;
-
-    // Log every detected phrase for debugging
-    console.log(`[Wake-Debug] Heard: "${combined}"`);
-
-    // Check for interrupt commands FIRST (these work during processing/speaking)
-    for (const [phrase, command] of Object.entries(INTERRUPT_COMMANDS)) {
-      if (combined.includes(phrase)) {
-        console.log(`[Wake] Interrupt command detected: "${phrase}" → ${command}`);
-        resetTranscript();
-        sendInterrupt(command);
-        return;
-      }
-    }
-
-    // Wake word detection — English "aura" OR Arabic "أورا" / "اورا" / "أوره" / "اوره"
-    const hasEnglishWake = /\baura\b/.test(combined);
-    const hasArabicWake = /أورا|اورا|أوره|اوره|اورة|أورة/.test(combined);
-
-    if (hasEnglishWake || hasArabicWake) {
-      const detectedLang = hasArabicWake ? 'ar' : 'en';
-      console.log(`[Wake] Wake word detected (${detectedLang}): "${combined}"`);
-
-      // Remember user language on first wake word
-      if (!userLanguage) {
+      if (!userLanguageRef.current) {
+        userLanguageRef.current = detectedLang;
         setUserLanguage(detectedLang);
-        localStorage.setItem('userLanguage', detectedLang);
-        console.log(`[Wake] User language set to: ${detectedLang}`);
+        localStorage.setItem("userLanguage", detectedLang);
+        screenReader.setLanguage(detectedLang);
       }
+      setAuraStatus("armed");
+      setOrbState("listening");
+      setIsThinking(false);
+      setWakePulse(true);
+      playWakePing();
+      if (wakePulseTimerRef.current) {
+        clearTimeout(wakePulseTimerRef.current);
+      }
+      wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
+    });
 
-      resetTranscript();
-      if (!isRecording && orbState !== 'processing' && orbState !== 'speaking') {
-        startRecording();
+    const offPartial = window.electronAPI.onAuraPartialText((partial) => {
+      if (typeof partial === "string" && partial.trim()) {
+        setUserMessage(partial.trim());
       }
-    }
-  }, [interimTranscript, finalTranscript, transcript, isRecording, orbState, resetTranscript, userLanguage]);
+    });
+
+    const offFinal = window.electronAPI.onAuraFinalCommand(async (payload) => {
+      const text = (payload?.text || "").trim();
+      if (!text) return;
+      const lang = payload?.lang === "ar" ? "ar" : "en";
+      userLanguageRef.current = lang;
+      setUserLanguage(lang);
+      localStorage.setItem("userLanguage", lang);
+      setUserMessage(text);
+      setPendingWakeCommand({ text, lang });
+    });
+
+    const offStatus = window.electronAPI.onAuraStatus((status) => {
+      const state = typeof status === "string" ? status : status?.state;
+      if (status?.lang) {
+        const lang = status.lang === "ar" ? "ar" : "en";
+        setPreferredLanguage(lang);
+        preferredLanguageRef.current = lang;
+      }
+      if (state) {
+        setAuraStatus(state);
+      }
+      if (state === "error" || state === "stopped") {
+        setListening(false);
+      }
+      if (state === "idle" || state === "ready" || state === "started" || state === "listening" || state === "armed") {
+        setListening(true);
+        if (orbState !== "processing" && orbState !== "speaking") {
+          setOrbState("idle");
+        }
+      } else if (state === "listening") {
+        setListening(true);
+        setOrbState("listening");
+      }
+    });
+
+    return () => {
+      try { offWake?.(); } catch { /* no-op */ }
+      try { offPartial?.(); } catch { /* no-op */ }
+      try { offFinal?.(); } catch { /* no-op */ }
+      try { offStatus?.(); } catch { /* no-op */ }
+    };
+  }, [authState, useElectronWakeWord, orbState, playWakePing]);
+
+  useEffect(() => {
+    if (!useElectronWakeWord || authState !== "app") return;
+    window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || preferredLanguage || "en" }).catch(() => {
+      // The main process logs startup failures; the renderer only needs to retry when language changes.
+    });
+  }, [authState, preferredLanguage, useElectronWakeWord]);
+
+  useEffect(() => {
+    return () => {
+      wakeStoppedRef.current = true;
+      if (wakePulseTimerRef.current) {
+        clearTimeout(wakePulseTimerRef.current);
+      }
+    };
+  }, []);
 
   /* ---------- DEVICE DETECTION & RESPONSIVE LAYOUT ---------- */
   useEffect(() => {
@@ -442,13 +507,80 @@ function App() {
           case 'thinking_step':
           case 'thinking': // server alias
           {
+            const stepKey = (msg.step_key || "").toString();
+            const coordinatorSteps = new Set([
+              "preparing_for_coordinator",
+              "preparing_tasks",
+              "queued_request",
+              "creating_execution_plan",
+              "executing_task",
+              "finalizing",
+            ]);
+            if (!coordinatorSteps.has(stepKey)) {
+              break;
+            }
             const localizedStep = translateThinkingStep(msg.step);
             setThinkingSteps(prev => {
-              if (prev.includes(localizedStep)) return prev;
+              if (prev[prev.length - 1] === localizedStep) return prev;
+              if (prev.includes(localizedStep) && stepKey !== "executing_task") {
+                return prev;
+              }
               return [...prev, localizedStep];
             });
+
+            // Enter widget as soon as Language hands off to Coordinator.
+            if (stepKey === 'preparing_for_coordinator') {
+              setCoordinatorActive(true);
+              setOrbState("processing");
+              if (!autoWidgetTriggeredRef.current) {
+                window.electronAPI?.enterWidgetMode?.();
+                setExecutionMode("widget");
+                autoWidgetTriggeredRef.current = true;
+              }
+            }
+
             if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
             setIsThinking(true);
+            break;
+          }
+
+          case 'task_progress': {
+            if (msg.stage && msg.stage !== 'coordinator') {
+              break;
+            }
+
+            const phase = (msg.phase || '').toString().toLowerCase();
+            const terminalPhases = new Set([
+              'execution_finished',
+              'execution_stopped',
+              'finished',
+              'stopped',
+              'done',
+            ]);
+            const active =
+              typeof msg.active === 'boolean'
+                ? msg.active
+                : !terminalPhases.has(phase);
+            setCoordinatorActive(active);
+
+            if (active) {
+              setOrbState("processing");
+              setIsThinking(true);
+              if (!autoWidgetTriggeredRef.current) {
+                window.electronAPI?.enterWidgetMode?.();
+                setExecutionMode("widget");
+                autoWidgetTriggeredRef.current = true;
+              }
+            } else {
+              setIsThinking(false);
+              setThinkingSteps([]);
+              setOrbState((prev) => (prev === "speaking" ? prev : "idle"));
+              if (autoWidgetTriggeredRef.current) {
+                window.electronAPI?.exitWidgetMode?.();
+                setExecutionMode("normal");
+                autoWidgetTriggeredRef.current = false;
+              }
+            }
             break;
           }
 
@@ -460,16 +592,34 @@ function App() {
 
           case 'clarification':
           case 'clarification_needed': // server alias
+          case 'confirmation_needed':
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setClarificationResponseToId(msg.response_id);
-            setAssistantMessage(msg.question);
+            setAssistantMessage(msg.question || msg.full_content || msg.draft_content || "");
             if (msg.user_language) {
               setUserLanguage(msg.user_language);
               localStorage.setItem("userLanguage", msg.user_language);
             }
-            rememberUserLanguageFromText(msg.question);
-            speakAssistantResponse(msg.question, msg.user_language || userLanguage);
+            if (msg.question) {
+              rememberUserLanguageFromText(msg.question);
+            }
+            if (msg.type === 'confirmation_needed') {
+              setOrbState("speaking");
+              screenReader.speak((msg.question || msg.full_content || ""), {
+                onComplete: () => setOrbState("idle"),
+              });
+            } else {
+              speakAssistantResponse(msg.question, msg.user_language || userLanguage);
+            }
+            break;
+
+          case 'processing':
+            // Language-agent processing acknowledgements should not trigger coordinator visuals.
+            setOrbState("idle");
+            setIsThinking(false);
+            if (msg.text) setAssistantMessage(msg.text);
             break;
 
           case 'completion':
@@ -478,6 +628,7 @@ function App() {
           {
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setClarificationResponseToId(null);
             
             const responseText = msg.spoken_text || msg.response || msg.text || t("Task completed", "تم تنفيذ المهمة بنجاح");
@@ -507,6 +658,7 @@ function App() {
               screenReader.stop();
               setOrbState("idle");
               setIsThinking(false);
+              setCoordinatorActive(false);
               setThinkingSteps([]);
               setAssistantMessage(t("Stopped. Task cancelled.", "تم الإيقاف. تم إلغاء المهمة."));
               // Exit widget if auto-triggered
@@ -540,6 +692,7 @@ function App() {
           case 'error':
             setThinkingSteps([]);
             setIsThinking(false);
+            setCoordinatorActive(false);
             setAssistantMessage(msg.detail || t("An error occurred", "حدث خطأ"));
             setOrbState("idle");
             break;
@@ -563,7 +716,7 @@ function App() {
       console.warn('[WS] Error:', err);
       ws.close();
     };
-  }, [sessionId]); // Do NOT include executionMode — it would tear down the WS connection on mode change
+  }, [sessionId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, detectLanguageFromText, offerReadAloud, structuredResponse]);
 
   useEffect(() => {
     connectWebSocket();
@@ -583,6 +736,15 @@ function App() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        const stepKey = (data.step_key || data?.step?.step_key || "").toString();
+        const coordinatorSteps = new Set([
+          "preparing_for_coordinator",
+          "preparing_tasks",
+          "queued_request",
+          "creating_execution_plan",
+          "executing_task",
+          "finalizing",
+        ]);
         // Handle explicit clear events from server
         if (data.action === 'thinking_clear') {
           setThinkingSteps([]);
@@ -593,13 +755,34 @@ function App() {
 
         // Server sends { step: { action, step, session_id } }
         if (data.step) {
+          if (!coordinatorSteps.has(stepKey)) {
+            return;
+          }
           const localizedStep = translateThinkingStep(data.step);
-          setThinkingSteps(prev => [...prev, localizedStep]);
+          setThinkingSteps(prev => {
+            if (prev[prev.length - 1] === localizedStep) return prev;
+            return [...prev, localizedStep];
+          });
           setIsThinking(true);
+          if (stepKey === 'preparing_for_coordinator') {
+            setCoordinatorActive(true);
+            setOrbState("processing");
+            if (!autoWidgetTriggeredRef.current) {
+              window.electronAPI?.enterWidgetMode?.();
+              setExecutionMode("widget");
+              autoWidgetTriggeredRef.current = true;
+            }
+          }
           if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         } else if (Array.isArray(data.steps)) {
           const localizedSteps = data.steps.map(translateThinkingStep);
-          setThinkingSteps(localizedSteps);
+          setThinkingSteps((prev) => {
+            const merged = [...prev];
+            for (const s of localizedSteps) {
+              if (!merged.includes(s)) merged.push(s);
+            }
+            return merged;
+          });
           setIsThinking(localizedSteps.length > 0);
           // Speak only the last step from batch
           if (localizedSteps.length > 0 && vocalizeStepRef.current) vocalizeStepRef.current(localizedSteps[localizedSteps.length - 1]);
@@ -607,9 +790,12 @@ function App() {
       } catch (err) {
         // Fallback: plain text from server
         console.warn("[UI] Non-JSON SSE payload:", event.data);
-        if (event.data && typeof event.data === 'string' && event.data.trim().length > 0) {
+        if (event.data && typeof event.data === 'string' && event.data.trim().length > 0 && coordinatorActive) {
           const localizedStep = translateThinkingStep(event.data);
-          setThinkingSteps(prev => [...prev, localizedStep]);
+          setThinkingSteps(prev => {
+            if (prev[prev.length - 1] === localizedStep) return prev;
+            return [...prev, localizedStep];
+          });
           setIsThinking(true);
           if (vocalizeStepRef.current) vocalizeStepRef.current(localizedStep);
         }
@@ -626,7 +812,7 @@ function App() {
       setSseConnected(false);
       eventSource.close();
     };
-  }, [sessionId, wsConnected]);
+  }, [sessionId, wsConnected, coordinatorActive, stopThinkingSpeech, translateThinkingStep]);
 
   /* ---------- VOCALIZE THINKING STEP (local TTS) ---------- */
   const vocalizeStep = useCallback((text) => {
@@ -815,181 +1001,57 @@ function App() {
 
   /* ---------- AUDIO RECORDING ---------- */
   const startRecording = async () => {
+    if (!window?.electronAPI?.transcribeOnce) {
+      setAssistantMessage(t("Voice sidecar is unavailable", "محرك الصوت غير متاح"));
+      return;
+    }
+    if (isRecording) return;
+
+    manualCaptureCancelledRef.current = false;
+    setIsRecording(true);
+    setOrbState("listening");
+    setUserMessage(t("Listening...", "أستمع الآن..."));
+
     try {
-      console.log("[Audio] Starting recording...");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const preferredLang = preferredLanguageRef.current === "ar" ? "ar" : "en";
+      const result = await window.electronAPI.transcribeOnce({
+        lang: preferredLang,
+        timeoutMs: 10000,
+      });
 
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
+      if (manualCaptureCancelledRef.current) return;
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          audioChunksRef.current.push(e.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        console.log(`[Audio] Recording stopped. Size: ${blob.size} bytes`);
-        stream.getTracks().forEach((t) => t.stop());
-
-        if (silenceFrameRef.current) {
-          cancelAnimationFrame(silenceFrameRef.current);
-          silenceFrameRef.current = null;
-        }
-        if (noSpeechTimeoutRef.current) {
-          clearTimeout(noSpeechTimeoutRef.current);
-          noSpeechTimeoutRef.current = null;
-        }
-
-        // Stop and clear audio context if used
-        if (audioContextRef.current) {
-          try { audioContextRef.current.close(); } catch (e) {}
-          audioContextRef.current = null;
-        }
-
-        processAudio(blob);
-
-        // Resume wake-word listening after processing audio
-        try {
-          startWakeWordListening();
-          console.log('[Wake] Resumed wake-word listening');
-        } catch (e) {
-          console.warn('[Wake] Failed to resume listening:', e);
-        }
-      };
-
-      recorder.start();
-      setIsRecording(true);
-      setOrbState("listening");
-      setUserMessage(t("Listening...", "أستمع الآن..."));
-      userSpokeRef.current = false;
-
-      if (noSpeechTimeoutRef.current) {
-        clearTimeout(noSpeechTimeoutRef.current);
+      if (!result?.ok || !result?.text?.trim()) {
+        setOrbState("idle");
+        setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
+        return;
       }
-      noSpeechTimeoutRef.current = setTimeout(() => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording' && !userSpokeRef.current) {
-          console.log('[Audio] No speech detected in first 5s, finalizing input');
-          mediaRecorderRef.current.stop();
-        }
-      }, 5000);
 
-      // Silence detection using Web Audio API
-      try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        const audioCtx = new AudioCtx();
-        audioContextRef.current = audioCtx;
-        const sourceNode = audioCtx.createMediaStreamSource(stream);
-        const analyser = audioCtx.createAnalyser();
-        analyser.fftSize = 2048;
-        sourceNode.connect(analyser);
-        const bufferLength = analyser.fftSize;
-        const dataArray = new Uint8Array(bufferLength);
-        let silentStart = null;
-
-        const checkSilence = () => {
-          analyser.getByteTimeDomainData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < bufferLength; i++) {
-            const v = (dataArray[i] - 128) / 128;
-            sum += v * v;
-          }
-          const rms = Math.sqrt(sum / bufferLength);
-          if (rms >= 0.02) {
-            userSpokeRef.current = true;
-          }
-          if (rms < 0.01) {
-            if (silentStart === null) silentStart = Date.now();
-            else if (Date.now() - silentStart > 5000) {
-              console.log('[Audio] Silence detected >5s, stopping recording');
-              if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-                mediaRecorderRef.current.stop();
-              }
-            }
-          } else {
-            silentStart = null;
-          }
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            silenceFrameRef.current = requestAnimationFrame(checkSilence);
-          } else {
-            try { audioCtx.close(); } catch (e) {}
-          }
-        };
-
-        silenceFrameRef.current = requestAnimationFrame(checkSilence);
-      } catch (e) {
-        console.warn('[Audio] Silence detection not available:', e);
-      }
+      const transcriptText = result.text.trim();
+      setUserMessage(transcriptText);
+      rememberUserLanguageFromText(transcriptText);
+      setOrbState("processing");
+      await processText(transcriptText);
     } catch (error) {
-      console.error("[Audio] Microphone access failed:", error);
-      setAssistantMessage(t("Microphone access denied", "تم رفض الوصول إلى الميكروفون"));
+      console.error("[Audio] Sidecar one-shot transcription failed:", error);
+      setOrbState("idle");
+      setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
+    } finally {
+      setIsRecording(false);
+      startWakeWordListening();
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      console.log("[Audio] Stopping recording...");
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-    if (silenceFrameRef.current) {
-      cancelAnimationFrame(silenceFrameRef.current);
-      silenceFrameRef.current = null;
-    }
-    if (noSpeechTimeoutRef.current) {
-      clearTimeout(noSpeechTimeoutRef.current);
-      noSpeechTimeoutRef.current = null;
-    }
+    manualCaptureCancelledRef.current = true;
+    setIsRecording(false);
+    setOrbState("idle");
   };
 
   const handleMicClick = () => {
     console.log("[UI] Mic clicked. State:", orbState);
     // Allow mic during processing/speaking for interrupt commands
     isRecording ? stopRecording() : startRecording();
-  };
-
-  /* ---------- AUDIO → TEXT ---------- */
-  const processAudio = async (blob) => {
-    try {
-      setOrbState("processing");
-      setUserMessage(t("Processing...", "جاري المعالجة..."));
-      console.log("[STT] Transcribing audio...");
-
-      const reader = new FileReader();
-      reader.readAsDataURL(blob);
-
-      reader.onloadend = async () => {
-        const base64 = reader.result.split(",")[1];
-
-        const res = await fetch("http://localhost:8000/transcribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            audio_data: base64,
-            session_id: sessionId,
-            user_id: userId,
-          }),
-        });
-
-        const data = await res.json();
-        console.log("[STT] Response:", data);
-
-        if (!res.ok) {
-          throw new Error(data.detail || "Transcription failed");
-        }
-
-        console.log(`[STT] Transcript: "${data.transcript}"`);
-        rememberUserLanguageFromText(data.transcript);
-        setUserMessage(data.transcript);
-        await processText(data.transcript);
-      };
-    } catch (error) {
-      console.error("[STT] Error:", error);
-      setOrbState("idle");
-      setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
-    }
   };
 
   /* ---------- DIRECT TEXT (SKIP STT) ---------- */
@@ -1032,6 +1094,16 @@ function App() {
       localStorage.setItem("ttsVoice", profileData.voice);
       setTtsVoice(profileData.voice);
     }
+    if (profileData.language) {
+      const nextLanguage = profileData.language === "ar" ? "ar" : "en";
+      localStorage.setItem("preferredLanguage", nextLanguage);
+      localStorage.setItem("appLanguage", nextLanguage);
+      preferredLanguageRef.current = nextLanguage;
+      setPreferredLanguage(nextLanguage);
+      window.electronAPI?.initAura?.({ lang: nextLanguage }).catch(() => {
+        // Sidecar logs will show any restart issues.
+      });
+    }
   };
 
 
@@ -1050,8 +1122,17 @@ function App() {
       }
       setUserName(username);
       if (preferences?.voice) setTtsVoice(preferences.voice);
+      if (preferences?.language) {
+        const nextLanguage = preferences.language === "ar" ? "ar" : "en";
+        preferredLanguageRef.current = nextLanguage;
+        setPreferredLanguage(nextLanguage);
+        localStorage.setItem("preferredLanguage", nextLanguage);
+        localStorage.setItem("appLanguage", nextLanguage);
+      }
       localStorage.setItem("onboardingComplete", "true");
       setAuthState("app");
+      wakeStoppedRef.current = false;
+      setTimeout(() => startWakeWordListening(), 500);
   };
   /* ---------- LOGOUT ---------- */
   // In App.jsx, update the handleLogout function
@@ -1080,43 +1161,55 @@ function App() {
   };
   /* ---------- INTERRUPT COMMANDS ---------- */
   const sendInterrupt = useCallback((command) => {
-    console.log(`[Interrupt] Sending: ${command}`);
-    
-    // Immediately stop local TTS if speaking
-    if (command === 'stop') {
+    // ── Req 11: Local TTS for immediate control feedback — zero latency, no network ──
+    // System control confirmations ("Stopped", "Paused") use the local Web Speech API
+    // so the user gets instant audio feedback even if the backend is slow or offline.
+    const LOCAL_FEEDBACK = {
+      stop:   userLanguageRef.current === "ar" ? "تم الإيقاف." : "Stopped.",
+      pause:  userLanguageRef.current === "ar" ? "تم الإيقاف المؤقت." : "Paused.",
+      resume: userLanguageRef.current === "ar" ? "جاري المتابعة." : "Resuming.",
+      undo:   userLanguageRef.current === "ar" ? "تم التراجع." : "Undone.",
+      retry:  userLanguageRef.current === "ar" ? "جاري إعادة المحاولة." : "Retrying.",
+    };
+  
+    const feedbackText = LOCAL_FEEDBACK[command];
+    if (feedbackText) {
+      // Local Web Speech API — no HTTP call needed (Req 11)
+      screenReader.speak(feedbackText);
+    }
+  
+    // Stop any playing audio / thinking speech immediately
+    if (command === "AURA stop") {
       audioRef.current?.pause?.();
-      if (audioRef.current) {
-        audioRef.current.currentTime = 0;
-      }
+      if (audioRef.current) audioRef.current.currentTime = 0;
       stopThinkingSpeech();
       screenReader.stop();
-    } else if (command === 'pause') {
+    } else if (command === "AURA pause") {
       screenReader.pause();
-    } else if (command === 'resume') {
+    } else if (command === "AURA resume") {
       screenReader.resume();
     }
-
-    // Send to backend via WebSocket
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: "interrupt",
-        command: command,
-        user_id: userId,
-      }));
+  
+    // Send to backend for actual task control
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({ type: "interrupt", command, user_id: userId })
+      );
     } else {
-      // Fallback: HTTP POST
+      // HTTP fallback
       fetch("http://localhost:8000/process", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          session_id: sessionId,
-          user_id: userId,
-          input: `AURA ${command}`,
+          session_id:  sessionId,
+          user_id:     userId,
+          input:       `AURA ${command}`,
           device_type: deviceType,
         }),
-      }).catch(err => console.warn('[Interrupt] HTTP fallback failed:', err));
+      }).catch((err) => console.warn("[Interrupt] HTTP fallback failed:", err));
     }
-  }, [sessionId, userId, deviceType, stopThinkingSpeech]);
+  }, [sessionId, userId, deviceType, stopThinkingSpeech, userLanguage]);
+
 
   /* ---------- READ ALOUD FULL CONTENT ---------- */
   const handleReadAloud = useCallback(() => {
@@ -1257,6 +1350,9 @@ function App() {
         return;
       }
       console.log("[Agent] Clarification mode:", !!clarificationResponseToId);
+      setOrbState("processing");
+      // coordinatorActive and task_progress events control thinking/widget visuals.
+      setIsThinking(false);
 
       // Send via WebSocket if connected, fallback to HTTP
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -1278,7 +1374,8 @@ function App() {
       } else {
         // HTTP fallback
         console.log("[Agent] Using HTTP fallback (WS not connected)");
-        if (!sseConnected) await startThinkingSequence();
+        setThinkingSteps([]);
+        setIsThinking(false);
 
         const res = await fetch("http://localhost:8000/process", {
           method: "POST",
@@ -1328,6 +1425,7 @@ function App() {
 
         setThinkingSteps([]);
         setIsThinking(false);
+        setCoordinatorActive(false);
 
         if (data.status === "clarification_needed") {
           const questionText = extractReadableText(data.question) || t("Could you clarify?", "هل يمكنك التوضيح؟");
@@ -1374,9 +1472,18 @@ function App() {
       setAssistantMessage(t("Backend error", "خطأ في الخادم"));
       setThinkingSteps([]);
       setIsThinking(false);
+      setCoordinatorActive(false);
       setExecutionMode("normal");
     }
   };
+
+  useEffect(() => {
+    if (!pendingWakeCommand?.text) return;
+    const text = pendingWakeCommand.text;
+    setPendingWakeCommand(null);
+    void processText(text);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingWakeCommand]);
 
   /* ---------- STOP SEQUENCE ---------- */
   const handleStopSequence = () => {
@@ -1445,31 +1552,19 @@ function App() {
   const autoWidgetTriggeredRef = useRef(false);
 
   useEffect(() => {
-    const prevState = prevOrbStateRef.current;
     prevOrbStateRef.current = orbState;
-
-    const wasIdle = prevState === "idle" || prevState === "listening";
-    const isNowExecuting = orbState === "processing";
-
-    // Auto-enter widget when execution starts (only from idle/listening)
-    if (wasIdle && isNowExecuting && executionMode === "normal") {
-      console.log("[Auto-Widget] Execution started → entering widget mode");
-      window.electronAPI?.enterWidgetMode?.();
-      setExecutionMode("widget");
-      autoWidgetTriggeredRef.current = true;
-    }
-  }, [orbState, executionMode]);
+  }, [orbState]);
 
   // Auto-exit widget when execution finishes (only if we auto-entered)
   useEffect(() => {
-    const isNowIdle = orbState === "idle" && !isThinking;
-    if (isNowIdle && executionMode === "widget" && autoWidgetTriggeredRef.current) {
+    const isCoordinatorDone = !coordinatorActive;
+    if (isCoordinatorDone && executionMode === "widget" && autoWidgetTriggeredRef.current) {
       console.log("[Auto-Widget] Execution done → exiting widget mode");
       window.electronAPI?.exitWidgetMode?.();
       setExecutionMode("normal");
       autoWidgetTriggeredRef.current = false;
     }
-  }, [orbState, isThinking, executionMode]);
+  }, [coordinatorActive, executionMode]);
 
   /* ---------- RENDER ---------- */
 
@@ -1492,17 +1587,53 @@ function App() {
     }
 };
 
+  const handleHeaderContentReady = useCallback(({ greeting, headline, currentDate }) => {
+    if (authState !== "app" || hasSpokenHeaderWelcomeRef.current) return;
+
+    const safeGreeting = (greeting || "Welcome back")
+      .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+      .trim();
+    const safeHeadline = (headline || "How can I help you today?").trim();
+    const safeDate = (currentDate || "today").trim();
+
+    hasSpokenHeaderWelcomeRef.current = true;
+    setOrbState("speaking");
+
+    screenReader.speak(`${safeGreeting}. Today is ${safeDate}. ${safeHeadline}`, {
+      onComplete: () => setOrbState("idle"),
+    });
+  }, [authState]);
+
   
 /* ---------- RENDER ---------- */
-  const isExecuting = orbState === "processing" || orbState === "speaking" || isThinking;
+  const isExecuting = orbState === "processing" || isThinking;
   const appClassName = [
     "app-root",
     executionMode === "transparent" && isExecuting ? "transparent-mode" : "",
     executionMode === "widget" ? "widget-mode" : "",
   ].filter(Boolean).join(" ");
+  const liveCaptionText =
+    (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
+      ? userMessage
+      : (assistantMessage || (isThinking
+          ? t("Thinking...", "بفكر...")
+          : (listening
+              ? t("Say hey aura", "قول يا أورا")
+              : t("Wake service connecting", "جاري توصيل خدمة التنبيه"))));
 
   return (
     <>
+      {executionMode !== "widget" && (
+        <TitleBar
+          transparent={authState !== "app"}
+          showExtraControls={authState === "app"}
+          isExecuting={isExecuting}
+          executionMode={executionMode}
+          onToggleExecutionMode={toggleExecutionMode}
+          onEnterWidgetMode={enterWidgetMode}
+        />
+      )}
+
       {authState === "login" && (
         <LoginPage
           onLogin={({ userId: realId, username, preferences }) => {
@@ -1511,50 +1642,31 @@ function App() {
             setUserId(realId);
             setUserName(username);
             if (preferences?.voice) setTtsVoice(preferences.voice);
+            if (preferences?.language) {
+              const nextLanguage = preferences.language === "ar" ? "ar" : "en";
+              preferredLanguageRef.current = nextLanguage;
+              setPreferredLanguage(nextLanguage);
+              localStorage.setItem("preferredLanguage", nextLanguage);
+              localStorage.setItem("appLanguage", nextLanguage);
+            }
             setAuthState("app");
+            wakeStoppedRef.current = false;
+            setTimeout(() => startWakeWordListening(), 500);
           }}
           onSignUp={() => setAuthState("onboard")}
         />
       )}
 
       {authState === "onboard" && (
-        <OnboardingPage userId={userId} onComplete={handleOnboardingComplete} />
+        <OnboardingPage 
+          userId={userId} 
+          onComplete={handleOnboardingComplete} 
+          onBack={() => setAuthState("login")}
+        />
       )}
 
       {authState === "app" && (
         <div className={appClassName}>
-
-          {/* ===== Title bar (custom — frameless window) ===== */}
-          {executionMode !== "widget" && (
-            <div className="titlebar">
-              <div className="titlebar-drag">
-                <span className="titlebar-title">AURA</span>
-              </div>
-              <div className="titlebar-buttons">
-                {isExecuting && (
-                  <button
-                    className="titlebar-btn titlebar-mode"
-                    onClick={toggleExecutionMode}
-                    title={executionMode === "normal" ? "Go transparent" : "Back to normal"}
-                  >
-                    {executionMode === "normal" ? <Eye size={14} /> : <Maximize2 size={14} />}
-                  </button>
-                )}
-                <button className="titlebar-btn" onClick={enterWidgetMode} title="Minimize to widget">
-                  <PictureInPicture2 size={14} />
-                </button>
-                <button className="titlebar-btn" onClick={() => window.electronAPI?.minimizeWindow?.()} title="Minimize">
-                  <Minus size={14} />
-                </button>
-                <button className="titlebar-btn" onClick={() => window.electronAPI?.maximizeWindow?.()} title="Maximize">
-                  <Maximize size={14} />
-                </button>
-                <button className="titlebar-btn titlebar-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
-                  <X size={14} />
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* ===== Widget mini-player ===== */}
           {executionMode === "widget" && (
@@ -1562,8 +1674,13 @@ function App() {
               <div className="widget-drag-strip" />
 
               <div className="widget-left">
-                <div className={`widget-orb orb-${orbState}`}>
-                  {orbState === "processing" ? "⚡" : orbState === "speaking" ? "🔊" : "●"}
+                <div className={`widget-state-badge orb-${orbState}`}>
+                  {orbState === "processing" && <Cpu size={15} />}
+                  {orbState === "speaking" && <Waves size={15} />}
+                  {orbState === "listening" && <Mic size={15} />}
+                  {orbState === "idle" && (
+                    <img src="/aura_icon_white.png" alt="" className="widget-state-icon" />
+                  )}
                 </div>
                 <div className="widget-status-text">
                   {isExecuting
@@ -1646,26 +1763,42 @@ function App() {
             currentSessionId={sessionId}
           />
           <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
-            <video autoPlay muted loop playsInline>
-              <source src="/Background3.mp4" type="video/mp4" />
-            </video>
+            <div className="main-bg-layer" aria-hidden="true">
+              <Aurora />
+              <iframe src="/aura-cinematic-bg.html"
+                style={{ position: "absolute", width: "100%", height: "100%", border: "none", pointerEvents: "none", zIndex: 0 }}
+                title="Cinematic Background"
+              />
+              <div className="main-bg-core">
+                <img src="/aura_icon_white.png" alt="" className="main-bg-aura-icon" />
+                <div className="main-bg-core-ring" />
+              </div>
+            </div>
 
             <div className="main-overlay">
-              <HeaderContent userName={userName} chatTitle={chatTitle} />
+              <HeaderContent
+                userName={userName}
+                chatTitle={chatTitle}
+                onContentReady={handleHeaderContentReady}
+              />
 
-              {isThinking && <ThinkingIndicator steps={thinkingSteps} />}
-
-              {assistantMessage && !isThinking && (
-                <div className="response-container" role="status" aria-live="polite" aria-atomic="true" aria-label="Assistant response">
-                  <div className="response-message">
-                    {assistantMessage}
-                  </div>
+              <div className="mini-live-caption" role="status" aria-live="polite" aria-atomic="true" aria-label="Live caption">
+                <div className="mini-live-caption-kicker">
+                  {userMessage && (!assistantMessage || orbState === "listening") ? "You" : "AURA"}
                 </div>
-              )}
+                <div className="mini-live-caption-text">
+                  <SplitText
+                    key={liveCaptionText}
+                    text={liveCaptionText}
+                    delay={22}
+                  />
+                </div>
+              </div>
 
               <VoiceControls
                 isRecording={isRecording}
                 orbState={orbState}
+                wakePulse={wakePulse || auraStatus === "armed"}
                 onMicClick={handleMicClick}
                 onCancel={handleCancel}
                 chatMode={chatMode}
@@ -1685,6 +1818,7 @@ function App() {
               onLogout={handleLogout}
               initialName={userName}
               initialVoice={ttsVoice}
+              initialLanguage={preferredLanguage}
             />
           )}
 

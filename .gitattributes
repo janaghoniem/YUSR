@@ -1,0 +1,2 @@
+desktop-app/vite-project/resources/vosk-model-ar-mgb2-0.4/** filter=lfs diff=lfs merge=lfs -text
+desktop-app/vite-project/resources/vosk-model-small-en-us-0.15/** filter=lfs diff=lfs merge=lfs -text

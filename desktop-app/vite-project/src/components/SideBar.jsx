@@ -1,60 +1,75 @@
 // SideBar.jsx
 import React from "react";
-import { Settings, Menu, X, SquarePen } from "lucide-react";
+import { Settings, Menu, X, SquarePen, MessageSquare, Eye, Trash2 } from "lucide-react";
 
 const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], onSwitchChat, onViewChat, onDeleteChat, currentSessionId }) => {
   return (
     <>
-      <aside className={`sidebar ${collapsed ? "collapsed" : ""}`} role="navigation" aria-label="Main sidebar">
-        
-        {/* TOP ZONE */}
+      <aside
+        className={`sidebar ${collapsed ? "collapsed" : ""}`}
+        role="navigation"
+        aria-label="Main navigation"
+        aria-expanded={!collapsed}
+        id="sidebar-nav"
+      >
         <div className="sidebar-top">
-          {!collapsed && <span className="logo">AURA</span>}
-          <button className="toggle-btn" onClick={onToggle} aria-label="Toggle sidebar" aria-expanded={!collapsed}>
-            {collapsed ? <Menu size={22} /> : <X size={22} />}
+          <div className="logo-area">
+            {!collapsed && (
+              <span className="logo-wordmark" aria-hidden="true" style={{marginLeft: 10, fontSize: "1.2rem"}}>AURA</span>
+            )}
+          </div>
+          <button
+            className="toggle-btn"
+            onClick={onToggle}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            aria-controls="sidebar-nav"
+          >
+            {collapsed
+              ? <Menu size={19} aria-hidden="true" />
+              : <X size={19} aria-hidden="true" />}
           </button>
         </div>
 
-        {/* MIDDLE ZONE */}
-        <div className="sidebar-middle">
-          <button className="new-chat-btn" onClick={onNewChat} aria-label="Start a new chat">
-            <SquarePen size={18} />
+        <div className="sidebar-middle" id="sidebar-content">
+          <button
+            className="new-chat-btn"
+            onClick={onNewChat}
+            aria-label="Start a new chat"
+            title="New chat"
+          >
+            <SquarePen size={16} aria-hidden="true" />
             {!collapsed && <span>New chat</span>}
           </button>
 
-          {/* CHAT HISTORY */}
           {!collapsed && chats.length > 0 && (
-            <div className="chat-history">
-              <div className="chat-history-label">Recent chats</div>
-              <ul className="chat-list">
-                {chats.slice(0, 10).map((chat, idx) => {
+            <div className="chat-history" role="region" aria-label="Recent conversations">
+              <p className="chat-history-label" id="chat-history-heading">Recent</p>
+              <ul className="chat-list" role="list" aria-labelledby="chat-history-heading">
+                {chats.slice(0, 20).map((chat, idx) => {
                   const sid = chat.session_id || chat.sessionId || chat.id || null;
-                  const title = chat.title || chat.name || `Chat ${idx + 1}`;
-
+                  const rawTitle = chat.title || chat.name || `Chat ${idx + 1}`;
+                  const title = rawTitle.replace(/^<user_input>([\s\S]*)<\/user_input>$/, "$1").trim();
+                  const isActive = currentSessionId === sid;
                   if (!sid) {
                     return (
-                      <li key={`invalid-${idx}`} className="chat-item disabled" title="Invalid chat">
+                      <li key={`invalid-${idx}`} className="chat-item disabled" aria-disabled="true" title="Unavailable">
+                        <MessageSquare size={13} aria-hidden="true" style={{ flexShrink: 0, opacity: 0.4 }} />
                         <span className="chat-title">{title}</span>
                       </li>
                     );
                   }
-
-                  const isActive = currentSessionId === sid;
-
                   return (
                     <li
                       key={sid}
                       className={`chat-item ${isActive ? "active" : ""}`}
+                      onClick={() => onSwitchChat?.(sid, title)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSwitchChat?.(sid, title); } }}
                       role="button"
                       tabIndex={0}
+                      aria-label={`Open conversation: ${title}`}
+                      aria-current={isActive ? "page" : undefined}
                       title={title}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          isActive
-                            ? onViewChat && onViewChat(sid, title)
-                            : onSwitchChat && onSwitchChat(sid, title);
-                        }
-                      }}
                     >
                       <span
                         className="chat-title"
@@ -70,6 +85,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                       {/* Eye icon to view history of any chat */}
                       <button
                         className="chat-view-btn"
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           onViewChat && onViewChat(sid, title);
@@ -77,11 +93,12 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                         title="View chat history"
                         aria-label="View chat history"
                       >
-                        👁
+                        <Eye size={14} aria-hidden="true" />
                       </button>
                       {/* Delete chat button */}
                       <button
-                        className="chat-view-btn"
+                        className="chat-view-btn chat-delete-btn"
+                        type="button"
                         onClick={(e) => {
                           e.stopPropagation();
                           if (window.confirm(`Delete chat "${title}"?`)) {
@@ -90,9 +107,8 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                         }}
                         title="Delete this chat"
                         aria-label="Delete this chat"
-                        style={{ color: "#ff4d6d" }}
                       >
-                        🗑
+                        <Trash2 size={14} aria-hidden="true" />
                       </button>
                     </li>
                   );
@@ -102,14 +118,29 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
           )}
         </div>
 
-        {/* BOTTOM ZONE */}
-        <button className="sidebar-bottom" onClick={onSettingsClick} aria-label="Open settings">
-          <Settings size={18} />
-          {!collapsed && <span>Settings</span>}
-        </button>
+        <div className="sidebar-bottom">
+          <button
+            className="sidebar-bottom-btn"
+            onClick={onSettingsClick}
+            aria-label="Open settings"
+            title="Settings"
+          >
+            <Settings size={16} aria-hidden="true" />
+            {!collapsed && <span>Settings</span>}
+          </button>
+        </div>
       </aside>
 
-      {collapsed && <div className="sidebar-overlay" onClick={onToggle} role="button" aria-label="Open sidebar overlay"></div>}
+      {!collapsed && (
+        <div
+          className="sidebar-overlay"
+          onClick={onToggle}
+          role="button"
+          tabIndex={0}
+          aria-label="Close sidebar"
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); } }}
+        />
+      )}
     </>
   );
 };

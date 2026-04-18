@@ -1,0 +1,25 @@
+.spotlight-card {
+  position: relative;
+  border-radius: 24px;
+  background: rgba(25, 20, 15, 0.4);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.3s ease;
+}
+
+.spotlight-card-glare {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+  z-index: 0;
+}
+
+.spotlight-card-content {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+}

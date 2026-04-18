@@ -70,8 +70,8 @@ class RAGConfig:
     
     
     # LLM settings
-    llm_provider: str = "groq"  # Options: "anthropic", "openai", "ollama", "huggingface"
-    llm_model: str = "llama-3.3-70b-versatile"  # or "gpt-4", "gpt-3.5-turbo"
+    llm_provider: str = "mistral"  # Options: "anthropic", "openai", "ollama", "huggingface"
+    llm_model: str = "codestral-2508"  # or "gpt-4", "gpt-3.5-turbo"
     temperature: float = 0.4  # Lower = more deterministic
     max_tokens: int = 1024
     
@@ -234,10 +234,9 @@ class LLMInterface:
             if not api_key:
                 print("⚠️  Warning: OPENAI_API_KEY not found in environment")
             openai.api_key = api_key
-            self.client = "openai"  # Use openai module directly
+            self.client = "openai"
             
         elif self.config.llm_provider == "ollama":
-            # For local Ollama instance
             self.client = "ollama"
             print("Using local Ollama instance")
             
@@ -245,20 +244,31 @@ class LLMInterface:
             self.client = "gemini"
             api_key = os.getenv("GOOGLE_API_KEY")
             if not api_key:
-                 print("⚠️  Warning: GOOGLE_API_KEY not found in environment")
-                 self.client = None
+                print("⚠️  Warning: GOOGLE_API_KEY not found in environment")
+                self.client = None
             else:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
                 self.client = genai
+                
         elif self.config.llm_provider == "groq":
             api_key = os.getenv("GROQ_API_KEY")
             if not api_key:
-                 print("⚠️  Warning: GROQ_API_KEY not found in environment")
-                 self.client = None
+                print("⚠️  Warning: GROQ_API_KEY not found in environment")
+                self.client = None
             else:
                 from groq import Groq
                 self.client = Groq(api_key=api_key)
+                
+        elif self.config.llm_provider == "mistral":
+            api_key = os.getenv("MISTRAL_API_KEY")
+            if not api_key:
+                print("⚠️  Warning: MISTRAL_API_KEY not found in environment")
+                self.client = None
+            else:
+                self.client = "mistral_rest"
+                print(f"✅ Mistral REST API configured with model: {self.config.llm_model}")
+        
         else:
             raise ValueError(f"Unsupported LLM provider: {self.config.llm_provider}")
     
@@ -275,7 +285,47 @@ class LLMInterface:
             return self._generate_gemini(prompt, system_prompt)
         elif self.config.llm_provider == "groq":
             return self._generate_groq(prompt, system_prompt)
-
+        elif self.config.llm_provider == "mistral":
+            return self._generate_mistral(prompt, system_prompt)
+    
+    def _generate_mistral(self, prompt: str, system_prompt: str = None) -> str:
+        """Generate using Mistral AI's Codestral model via REST API"""
+        import requests
+        
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            return "Error: MISTRAL_API_KEY not found in environment"
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        url = "https://api.mistral.ai/v1/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": self.config.llm_model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            return result['choices'][0]['message']['content']
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Error calling Mistral API: {str(e)}"
+            print(f"❌ {error_msg}")
+            if hasattr(e, 'response') and e.response:
+                print(f"Response: {e.response.text}")
+            return f"ERROR: {error_msg}"
     
     def _generate_anthropic(self, prompt: str, system_prompt: str = None) -> str:
         """Generate using Anthropic Claude"""
@@ -323,7 +373,7 @@ class LLMInterface:
             full_prompt = f"{system_prompt}\n\n{prompt}"
         
         data = {
-            "model": self.config.llm_model,  # e.g., "codellama", "llama2"
+            "model": self.config.llm_model,
             "prompt": full_prompt,
             "stream": False
         }
@@ -349,12 +399,11 @@ class LLMInterface:
                 "temperature": self.config.temperature,
                 "max_output_tokens": self.config.max_tokens,
             }
-    )       
+        )
         
         return response.text
     
     def _generate_groq(self, prompt: str, system_prompt: str = None) -> str:
-        
         if not self.client:
             return "Error: Groq client not initialized. Please set GROQ_API_KEY."
 
@@ -373,8 +422,6 @@ class LLMInterface:
         )
 
         return response.choices[0].message.content
-
-
 
 
 
@@ -1158,12 +1205,14 @@ def demo_rag_system():
     print("RAG SYSTEM DEMO")
     print("=" * 80)
     
-    # Initialize system
+    # Initialize system with Mistral
     config = RAGConfig(
-        library_name="pywinauto",
-        llm_provider="groq",  # Change to "openai" or "ollama" as needed
+        library_name="pyautogui",  # or "pywinauto"
+        llm_provider="mistral",    # CHANGE THIS
+        llm_model="codestral-2508", # Your Codestral model
         top_k=5,
-        temperature=0.2
+        temperature=0.2,
+        use_rag=True  # Enable RAG
     )
     
     rag = RAGSystem(config)
@@ -1218,14 +1267,16 @@ def interactive_chat():
     """Run interactive chat session"""
     
     print("=" * 80)
-    print("🤖 RAG-POWERED CODE ASSISTANT")
+    print("🤖 RAG-POWERED CODE ASSISTANT (Mistral Codestral)")
     print("=" * 80)
     print("\nInitializing system...")
     
     config = RAGConfig(
-        library_name="pywinauto",
-        llm_provider="groq",  # Change as needed
-        temperature=0.2
+        library_name="pyautogui",
+        llm_provider="mistral",      # CHANGE THIS
+        llm_model="codestral-2508",  # Your Codestral model
+        temperature=0.2,
+        use_rag=True
     )
     
     rag = RAGSystem(config)

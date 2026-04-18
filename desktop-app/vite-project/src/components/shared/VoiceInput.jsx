@@ -14,8 +14,15 @@ const VoiceInput = ({
   const [isListening, setIsListening] = useState(false);
   const [recognition, setRecognition] = useState(null);
   const [supported, setSupported] = useState(false);
+  const [usingVosk, setUsingVosk] = useState(false);
 
   useEffect(() => {
+    if (window?.electronAPI?.transcribeOnce) {
+      setSupported(true);
+      setUsingVosk(true);
+      return;
+    }
+
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
@@ -39,6 +46,26 @@ const VoiceInput = ({
   }, []);
 
   const toggleVoice = () => {
+    if (usingVosk) {
+      if (isListening) {
+        setIsListening(false);
+        return;
+      }
+      setIsListening(true);
+      const logicalLang = /[\u0600-\u06FF]/.test(value || "") ? "ar" : "en";
+      window.electronAPI
+        .transcribeOnce({ lang: logicalLang, timeoutMs: 7000 })
+        .then((res) => {
+          const text = (res?.text || "").trim();
+          if (text) onChange(text);
+        })
+        .catch(() => {
+          // Keep silent; user can type manually.
+        })
+        .finally(() => setIsListening(false));
+      return;
+    }
+
     if (!recognition) return;
     if (isListening) {
       recognition.stop();

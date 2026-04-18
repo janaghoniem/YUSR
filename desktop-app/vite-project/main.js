@@ -1,11 +1,9 @@
 /* eslint-env node */
 // main.js — Electron entry point
-// Req 12: adds setPermissionRequestHandler to auto-grant microphone / STT
-// so local speech recognition never shows a browser permission dialog.
 
 /* eslint-env node */
 // Add Menu and screen here
-import { app, BrowserWindow, ipcMain, session, Menu, screen } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, screen } from "electron";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import path from "path";
@@ -20,6 +18,7 @@ let mainWindow  = null;
 let auraProcess = null;
 let savedBounds = null; // Add this line
 let currentAuraConfig = { lang: "en", once: false };
+const BACKEND_BASE_URL = process.env.AURA_BACKEND_URL || "http://localhost:8000";
 
 function normalizeLang(lang) {
   return lang === "ar" ? "ar" : "en";
@@ -177,124 +176,6 @@ function stopAuraProcess() {
   }
 }
 
-async function transcribeOnce(options = {}) {
-  const { command, args, cwd } = getAuraSpawnConfig({
-    once: true,
-    lang: options?.lang === "ar" ? "ar" : "en",
-    timeoutMs: Number(options?.timeoutMs || 10000),
-  });
-
-  return await new Promise((resolve) => {
-    let finished = false;
-    const child = spawn(command, args, {
-      cwd,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PYTHONUNBUFFERED: "1",
-      },
-    });
-
-    const cleanup = (result) => {
-      if (finished) return;
-      finished = true;
-      try {
-        child.kill();
-      } catch {
-        // best effort
-      }
-      resolve(result);
-    };
-
-    const timer = setTimeout(() => {
-      cleanup({ ok: false, error: "timeout" });
-    }, Number(options?.timeoutMs || 10000) + 2000);
-
-    const stdoutLines = readline.createInterface({ input: child.stdout });
-    stdoutLines.on("line", (line) => {
-      if (!line.trim()) return;
-      try {
-        const payload = JSON.parse(line);
-        if (payload?.type === "final" && payload?.text) {
-          clearTimeout(timer);
-          cleanup({ ok: true, text: payload.text, payload });
-        } else if (payload?.type === "error") {
-          clearTimeout(timer);
-          cleanup({ ok: false, error: payload.message || "transcription failed", payload });
-        }
-      } catch {
-        // ignore non-JSON lines
-      }
-    });
-
-    child.stderr?.on("data", (chunk) => {
-      const text = chunk.toString().trim();
-      if (text) {
-        console.warn("[AURA][stderr]", text);
-      }
-    });
-
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      cleanup({ ok: false, error: error?.message || String(error) });
-    });
-
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      if (!finished) {
-        cleanup({ ok: false, error: `sidecar exited with code ${code}` });
-      }
-    });
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REQ 12 — Permission handler
-// Must be registered BEFORE the BrowserWindow loads any URL.
-// Chromium routes all getUserMedia / SpeechRecognition requests through
-// session.setPermissionRequestHandler; without it the OS-level dialog appears.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function setupPermissions() {
-  const ALLOWED = new Set([
-    "media",             // navigator.mediaDevices.getUserMedia (mic + camera)
-    "microphone",        // explicit mic permission string
-    "audioCapture",      // Chrome internal for audio capture
-    "speech-recognition", // Web Speech API
-    "speechRecognition",  // Chrome internal for Web Speech API
-    "notifications",     // optional — allow if you want push notifications
-  ]);
-
-  session.defaultSession.setPermissionRequestHandler(
-    (webContents, permission, callback, details) => {
-      if (ALLOWED.has(permission)) {
-        console.log(`[Permissions] ✅ Auto-granting: ${permission}`);
-        callback(true);
-      } else {
-        console.log(
-          `[Permissions] ❌ Denying: ${permission}`,
-          details?.requestingUrl || ""
-        );
-        callback(false);
-      }
-    }
-  );
-
-  // Also handle synchronous permission checks from getUserMedia internals
-  session.defaultSession.setPermissionCheckHandler(
-    (webContents, permission /*, requestingOrigin, details*/) => {
-      const allow = ALLOWED.has(permission);
-      console.log(
-        `[PermissionCheck] ${allow ? "✅" : "❌"} ${permission}`
-      );
-      return allow;
-    }
-  );
-
-  console.log("[Permissions] Permission handlers registered.");
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // WINDOW CREATION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,8 +196,6 @@ function createWindow() {
       // nodeIntegration MUST stay false for security — preload handles IPC
       nodeIntegration:        false,
       contextIsolation:       true,
-      // Allow getUserMedia without the browser prompting
-      // (setPermissionRequestHandler above is the real gate)
       sandbox: false,
     },
   });
@@ -389,16 +268,53 @@ ipcMain.handle("widget:exit", () => {
 // main.js
 // main.js - Update your aura:init handler
 ipcMain.handle("aura:init", (_event, options = {}) => {
-  if (!mainWindow) return { ok: false, error: "main window unavailable" };
+  // Keep continuous sidecar disabled by default; renderer can still request one-shot fallback.
+  return { ok: false, disabled: true, reason: "vosk-disabled" };
+});
 
-  // If already running, just return success instead of spawning a second one
-  if (auraProcess) {
-    console.log("[AURA] Sidecar already running, skipping re-init");
-    return { ok: true };
+ipcMain.handle("stt:transcribe", async (_event, payload = {}) => {
+  const timeoutMs = Number(payload?.timeoutMs || 20000);
+  // Build request body without the electron-only timeoutMs field
+  const { timeoutMs: _dropped, ...requestBody } = payload;
+  console.info("[STT][IPC] Forwarding transcription request to backend", {
+    bytes: String(requestBody?.audio_data || "").length,
+    session_id: requestBody?.session_id,
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${BACKEND_BASE_URL}/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = { detail: raw };
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+    };
+  } catch (error) {
+    console.warn("[STT][IPC] Proxy request failed", error?.message || error);
+    return {
+      ok: false,
+      status: 0,
+      error: error?.message || String(error),
+    };
+  } finally {
+    clearTimeout(timer);
   }
-
-  const result = startAuraProcess(options);
-  return result;
 });
 
 
@@ -408,12 +324,9 @@ ipcMain.handle("aura:init", (_event, options = {}) => {
 
 // Update the bottom of main.js
 app.whenReady().then(() => {
-  setupPermissions();
   Menu.setApplicationMenu(null);
   createWindow();
-
-  // Only start it once here
-  startAuraProcess({ lang: currentAuraConfig.lang, once: false });
+  // Vosk sidecar startup disabled: Google/Web Speech only.
 });
 
 app.on("window-all-closed", () => {

@@ -40,7 +40,7 @@ import java.util.Base64
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.automation/service"
     private val TAG = "AutomationApp"
-    private val BACKEND_URL = "http://192.168.68.52:8000"
+    private val BACKEND_URL = "http://10.0.2.2:8000"
     private val SESSION_ID = UUID.randomUUID().toString()
     private var methodChannel: MethodChannel? = null
     private val NETWORK_TIMEOUT = 30000

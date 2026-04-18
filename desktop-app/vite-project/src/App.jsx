@@ -11,6 +11,7 @@ import TitleBar from "./components/TitleBar";
 import Aurora from "./components/onboarding/Aurora";
 import SplitText from "./components/onboarding/SplitText";
 import screenReader from "./utils/ScreenReader";
+import { requestTranscription } from "./utils/transcribeClient";
 import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucide-react";
 
 function App() {
@@ -131,16 +132,23 @@ function App() {
   const noSpeechTimeoutRef = useRef(null);
   const userSpokeRef = useRef(false);
 
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const audioRef = useRef(new Audio());
+  const mediaStreamRef = useRef(null);
   const audioContextRef = useRef(null);
+  const sourceNodeRef = useRef(null);
+  const processorNodeRef = useRef(null);
+  const processorSinkRef = useRef(null);
+  const pcmChunksRef = useRef([]);
+  const sampleRateRef = useRef(16000);
+  const recordingActiveRef = useRef(false);
+  const speechDetectedRef = useRef(false);
+  const lastSpeechAtRef = useRef(0);
+  const recordingStartedAtRef = useRef(0);
+  const audioRef = useRef(new Audio());
 
   const playWakePing = useCallback(() => {
     try {
-      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-      if (!AudioContextCtor) return;
-      const ctx = new AudioContextCtor();
+      if (!window.AudioContext) return;
+      const ctx = new window.AudioContext();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = "sine";
@@ -315,21 +323,13 @@ function App() {
 
   // Speech recognition (wake-word)
   const [listening,          setListening]           = useState(false);
-  const [pendingWakeCommand, setPendingWakeCommand]  = useState(null);
-  const useElectronWakeWord =
-    !!window?.electronAPI?.onAuraWakeWord && !!window?.electronAPI?.onAuraFinalCommand;
+  const useElectronWakeWord = false;
 
   const wakeStoppedRef      = useRef(false); // true = we deliberately stopped
  
   // Start one STT session for wake-word detection
   const startWakeWordListening = useCallback(() => {
-    if (useElectronWakeWord) {
-      window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || "en" }).catch(() => {
-        // Keep silent and let manual text/mic fallback handle the flow.
-      });
-      setListening(true);
-      return;
-    }
+    // Vosk wake-word sidecar disabled: Google/Web Speech only for now.
     setListening(false);
   }, [
     useElectronWakeWord,
@@ -339,17 +339,16 @@ function App() {
     if (!useElectronWakeWord || authState !== "app") return;
 
     const offWake = window.electronAPI.onAuraWakeWord((payload) => {
+      const wakeText = String(payload?.text || "")
+        .toLowerCase()
+        .replace(/[^a-z\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!(wakeText === "hey aura" || wakeText.startsWith("hey aura "))) {
+        return;
+      }
+
       const detectedLang = payload?.lang === "ar" ? "ar" : "en";
-      if (payload?.lang) {
-        preferredLanguageRef.current = detectedLang;
-        setPreferredLanguage(detectedLang);
-      }
-      if (!userLanguageRef.current) {
-        userLanguageRef.current = detectedLang;
-        setUserLanguage(detectedLang);
-        localStorage.setItem("userLanguage", detectedLang);
-        screenReader.setLanguage(detectedLang);
-      }
       setAuraStatus("armed");
       setOrbState("listening");
       setIsThinking(false);
@@ -359,23 +358,17 @@ function App() {
         clearTimeout(wakePulseTimerRef.current);
       }
       wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
+
+      // Capture the command with Google Web Speech (en-US / ar-EG), not Vosk.
+      if (orbState !== "processing" && orbState !== "speaking" && !isRecording) {
+        void startRecording({ fromWake: true });
+      }
     });
 
     const offPartial = window.electronAPI.onAuraPartialText((partial) => {
       if (typeof partial === "string" && partial.trim()) {
         setUserMessage(partial.trim());
       }
-    });
-
-    const offFinal = window.electronAPI.onAuraFinalCommand(async (payload) => {
-      const text = (payload?.text || "").trim();
-      if (!text) return;
-      const lang = payload?.lang === "ar" ? "ar" : "en";
-      userLanguageRef.current = lang;
-      setUserLanguage(lang);
-      localStorage.setItem("userLanguage", lang);
-      setUserMessage(text);
-      setPendingWakeCommand({ text, lang });
     });
 
     const offStatus = window.electronAPI.onAuraStatus((status) => {
@@ -405,17 +398,14 @@ function App() {
     return () => {
       try { offWake?.(); } catch { /* no-op */ }
       try { offPartial?.(); } catch { /* no-op */ }
-      try { offFinal?.(); } catch { /* no-op */ }
       try { offStatus?.(); } catch { /* no-op */ }
     };
-  }, [authState, useElectronWakeWord, orbState, playWakePing]);
+  }, [authState, useElectronWakeWord, orbState, playWakePing, isRecording]);
 
   useEffect(() => {
     if (!useElectronWakeWord || authState !== "app") return;
-    window.electronAPI?.initAura?.({ lang: preferredLanguageRef.current || preferredLanguage || "en" }).catch(() => {
-      // The main process logs startup failures; the renderer only needs to retry when language changes.
-    });
-  }, [authState, preferredLanguage, useElectronWakeWord]);
+    // Vosk wake-word sidecar disabled: no init call.
+  }, [authState, useElectronWakeWord]);
 
   useEffect(() => {
     return () => {
@@ -864,7 +854,7 @@ function App() {
 
   /* ---------- UI ACTIONS ---------- */
   const handleCancel = () => {
-    console.log("[UI] Cancel pressed → switching to chat mode");
+    console.log("[UI] Cancel pressed -> switching to chat mode");
     setOrbState("idle");
     setUserMessage("");
     setChatMode(true);
@@ -999,53 +989,304 @@ function App() {
     setIsThinking(false);
   };
 
+  const cleanupRecorderResources = useCallback(() => {
+    recordingActiveRef.current = false;
+
+    if (processorNodeRef.current) {
+      try {
+        processorNodeRef.current.disconnect();
+      } catch {
+        // no-op
+      }
+      processorNodeRef.current.onaudioprocess = null;
+      processorNodeRef.current = null;
+    }
+
+    if (sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current.disconnect();
+      } catch {
+        // no-op
+      }
+      sourceNodeRef.current = null;
+    }
+
+    if (processorSinkRef.current) {
+      try {
+        processorSinkRef.current.disconnect();
+      } catch {
+        // no-op
+      }
+      processorSinkRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch {
+        // no-op
+      }
+      audioContextRef.current = null;
+    }
+
+    if (mediaStreamRef.current) {
+      try {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      } catch {
+        // no-op
+      }
+      mediaStreamRef.current = null;
+    }
+  }, []);
+
+  const mergePcmChunks = useCallback((chunks) => {
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }, []);
+
+  const encodeWavFromFloat32 = useCallback((samples, sampleRate) => {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    const writeString = (offset, text) => {
+      for (let i = 0; i < text.length; i += 1) {
+        view.setUint8(offset + i, text.charCodeAt(i));
+      }
+    };
+
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+
+    let offset = 44;
+    for (let i = 0; i < samples.length; i += 1) {
+      const clamped = Math.max(-1, Math.min(1, samples[i]));
+      const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+      view.setInt16(offset, int16, true);
+      offset += 2;
+    }
+
+    return new Blob([buffer], { type: "audio/wav" });
+  }, []);
+
+  const blobToBase64 = useCallback(async (blob) => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  }, []);
+
+  const isServerUnreachableError = useCallback((error) => {
+    const message = String(error?.message || error || "").toLowerCase();
+    return (
+      message.includes("failed to fetch") ||
+      message.includes("networkerror") ||
+      message.includes("network request failed") ||
+      message.includes("err_connection_refused") ||
+      message.includes("load failed") ||
+      message.includes("timeout") ||
+      message.includes("aborted")
+    );
+  }, []);
+
   /* ---------- AUDIO RECORDING ---------- */
-  const startRecording = async () => {
-    if (!window?.electronAPI?.transcribeOnce) {
-      setAssistantMessage(t("Voice sidecar is unavailable", "محرك الصوت غير متاح"));
+  const startRecording = async (options = {}) => {
+    if (!navigator.mediaDevices?.getUserMedia || !window.AudioContext) {
+      setAssistantMessage(t("Microphone recording is unavailable", "تسجيل الميكروفون غير متاح"));
       return;
     }
-    if (isRecording) return;
+    if (isRecording || recordingActiveRef.current) return;
 
     manualCaptureCancelledRef.current = false;
+    pcmChunksRef.current = [];
+    speechDetectedRef.current = false;
+    userSpokeRef.current = false;
+    lastSpeechAtRef.current = 0;
+    recordingStartedAtRef.current = Date.now();
+    recordingActiveRef.current = true;
     setIsRecording(true);
     setOrbState("listening");
     setUserMessage(t("Listening...", "أستمع الآن..."));
 
     try {
-      const preferredLang = preferredLanguageRef.current === "ar" ? "ar" : "en";
-      const result = await window.electronAPI.transcribeOnce({
-        lang: preferredLang,
-        timeoutMs: 10000,
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       });
+      mediaStreamRef.current = stream;
 
-      if (manualCaptureCancelledRef.current) return;
+      const audioContext = new window.AudioContext({ sampleRate: 16000 });
+      audioContextRef.current = audioContext;
+      sampleRateRef.current = audioContext.sampleRate;
 
-      if (!result?.ok || !result?.text?.trim()) {
-        setOrbState("idle");
-        setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
-        return;
-      }
+      const source = audioContext.createMediaStreamSource(stream);
+      sourceNodeRef.current = source;
 
-      const transcriptText = result.text.trim();
-      setUserMessage(transcriptText);
-      rememberUserLanguageFromText(transcriptText);
-      setOrbState("processing");
-      await processText(transcriptText);
+      const processor = audioContext.createScriptProcessor(2048, 1, 1);
+      processorNodeRef.current = processor;
+
+      const sink = audioContext.createGain();
+      sink.gain.value = 0;
+      processorSinkRef.current = sink;
+
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(audioContext.destination);
+
+      processor.onaudioprocess = (event) => {
+        if (!recordingActiveRef.current) return;
+
+        const input = event.inputBuffer.getChannelData(0);
+        const copied = new Float32Array(input.length);
+        copied.set(input);
+        pcmChunksRef.current.push(copied);
+
+        let energy = 0;
+        for (let i = 0; i < copied.length; i += 1) {
+          energy += copied[i] * copied[i];
+        }
+        const rms = Math.sqrt(energy / copied.length);
+
+        const now = Date.now();
+        const isSpeechFrame = rms > 0.013;
+        if (isSpeechFrame) {
+          speechDetectedRef.current = true;
+          userSpokeRef.current = true;
+          lastSpeechAtRef.current = now;
+        }
+
+        const recordingElapsed = now - recordingStartedAtRef.current;
+        if (!speechDetectedRef.current && recordingElapsed >= 12000) {
+          stopRecording();
+          return;
+        }
+
+        if (speechDetectedRef.current && now - lastSpeechAtRef.current >= 5000) {
+          stopRecording();
+          return;
+        }
+
+        if (recordingElapsed >= 60000) {
+          stopRecording();
+        }
+      };
     } catch (error) {
-      console.error("[Audio] Sidecar one-shot transcription failed:", error);
+      console.error("[Audio] Recorder start failed:", error);
       setOrbState("idle");
       setAssistantMessage(t("Transcription failed", "فشل تحويل الصوت إلى نص"));
-    } finally {
       setIsRecording(false);
-      startWakeWordListening();
+      recordingActiveRef.current = false;
+      cleanupRecorderResources();
     }
   };
 
-  const stopRecording = () => {
-    manualCaptureCancelledRef.current = true;
-    setIsRecording(false);
-    setOrbState("idle");
+  const stopRecording = ({ cancel = false } = {}) => {
+    if (!recordingActiveRef.current) {
+      if (cancel) {
+        setIsRecording(false);
+        setOrbState("idle");
+      }
+      return;
+    }
+
+    manualCaptureCancelledRef.current = cancel;
+    recordingActiveRef.current = false;
+
+    const pcmSnapshot = pcmChunksRef.current.slice();
+    const hadSpeech = speechDetectedRef.current;
+    const sampleRate = sampleRateRef.current;
+
+    cleanupRecorderResources();
+
+    if (cancel) {
+      setIsRecording(false);
+      setOrbState("idle");
+      pcmChunksRef.current = [];
+      speechDetectedRef.current = false;
+      userSpokeRef.current = false;
+      return;
+    }
+
+    const finalizeRecording = async () => {
+      try {
+        if (manualCaptureCancelledRef.current) return;
+
+        if (!hadSpeech || pcmSnapshot.length === 0) {
+          setOrbState("idle");
+          setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
+          return;
+        }
+
+        const mergedPcm = mergePcmChunks(pcmSnapshot);
+        if (!mergedPcm.length) {
+          setOrbState("idle");
+          setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
+          return;
+        }
+
+        setOrbState("processing");
+        const wavBlob = encodeWavFromFloat32(mergedPcm, sampleRate);
+        const audioData = await blobToBase64(wavBlob);
+
+        const sttData = await requestTranscription(
+          {
+            audio_data: audioData,
+            audio_mime_type: "audio/wav",
+            session_id: sessionId,
+          },
+          { timeoutMs: 20000 }
+        );
+
+        const transcriptText = String(sttData?.transcript || "").trim();
+        if (!transcriptText || transcriptText.toLowerCase().includes("couldn't catch")) {
+          setOrbState("idle");
+          setAssistantMessage(t("Couldn't catch that. Try again.", "مش سامعك كويس، جرّب تاني."));
+          return;
+        }
+
+        setUserMessage(transcriptText);
+        rememberUserLanguageFromText(transcriptText);
+        await processText(transcriptText);
+      } catch (error) {
+        console.error("[Audio] Server STT transcription failed:", error?.message || error);
+        setOrbState("idle");
+        if (isServerUnreachableError(error)) {
+          setAssistantMessage(t("Server unreachable. Please try again.", "الخادم غير متاح حالياً. حاول مرة أخرى."));
+        } else {
+          setAssistantMessage(t(`Transcription failed: ${error?.message || "unknown error"}`, "فشل تحويل الصوت إلى نص"));
+        }
+      } finally {
+        setIsRecording(false);
+        pcmChunksRef.current = [];
+        speechDetectedRef.current = false;
+        userSpokeRef.current = false;
+      }
+    };
+
+    void finalizeRecording();
   };
 
   const handleMicClick = () => {
@@ -1100,9 +1341,6 @@ function App() {
       localStorage.setItem("appLanguage", nextLanguage);
       preferredLanguageRef.current = nextLanguage;
       setPreferredLanguage(nextLanguage);
-      window.electronAPI?.initAura?.({ lang: nextLanguage }).catch(() => {
-        // Sidecar logs will show any restart issues.
-      });
     }
   };
 
@@ -1132,7 +1370,6 @@ function App() {
       localStorage.setItem("onboardingComplete", "true");
       setAuthState("app");
       wakeStoppedRef.current = false;
-      setTimeout(() => startWakeWordListening(), 500);
   };
   /* ---------- LOGOUT ---------- */
   // In App.jsx, update the handleLogout function
@@ -1477,14 +1714,6 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    if (!pendingWakeCommand?.text) return;
-    const text = pendingWakeCommand.text;
-    setPendingWakeCommand(null);
-    void processText(text);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingWakeCommand]);
-
   /* ---------- STOP SEQUENCE ---------- */
   const handleStopSequence = () => {
     console.log("[System] Executing stop sequence");
@@ -1494,7 +1723,7 @@ function App() {
     }
     stopThinkingSpeech();
     screenReader.stop(); // Stop client-side TTS
-    stopRecording();
+    stopRecording({ cancel: true });
     setOrbState("idle");
     setUserMessage("");
     setAssistantMessage(t("Stop sequence initiated", "تم بدء إيقاف التنفيذ"));
@@ -1618,8 +1847,8 @@ function App() {
       : (assistantMessage || (isThinking
           ? t("Thinking...", "بفكر...")
           : (listening
-              ? t("Say hey aura", "قول يا أورا")
-              : t("Wake service connecting", "جاري توصيل خدمة التنبيه"))));
+              ? t("Listening for your voice...", "أستمع لصوتك...")
+              : t("Tap the mic to speak", "اضغط على الميكروفون للتحدث"))));
 
   return (
     <>
@@ -1651,7 +1880,6 @@ function App() {
             }
             setAuthState("app");
             wakeStoppedRef.current = false;
-            setTimeout(() => startWakeWordListening(), 500);
           }}
           onSignUp={() => setAuthState("onboard")}
         />

@@ -102,6 +102,7 @@ pyautogui
 pytesseract
 pillow
 playwright
+playwright-stealth
 docker
 chromadb
 uiautomator2

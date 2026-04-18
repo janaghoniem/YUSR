@@ -34,6 +34,7 @@ class AgentType(str, Enum):
     COORDINATOR = "coordinator"
     EXECUTION = "execution"
     REASONING = "reasoning"
+    EMAIL = "email"
 
 class AgentMessage(BaseModel):
     """Base message format for all agent communication"""
@@ -114,6 +115,70 @@ class ContextSnapshot(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     is_reversible: bool = False
 
+
+# ============================================================================
+# EMAIL AGENT DATA TYPES
+# ============================================================================
+
+class EmailTask(BaseModel):
+    """Email operation task"""
+    task_id: str = Field(default_factory=lambda: f"email_{datetime.now().timestamp()}")
+    operation: str  # "send", "read", "extract_otp", "extract_links"
+    user_id: str
+    email_address: Optional[str] = None
+    
+    # For send operation
+    to: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    attachments: Optional[List[Dict[str, str]]] = None
+    
+    # For read operation
+    max_results: int = 10
+    query: str = "is:unread"
+    
+    # For extraction
+    search_pattern: Optional[str] = None
+
+
+class EmailResult(BaseModel):
+    """Email operation result"""
+    task_id: str
+    status: str  # "success", "failed", "pending"
+    operation: str
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    message_count: int = 0
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+# ============================================================================
+# BOT EVASION DATA TYPES
+# ============================================================================
+
+class BotEvasionConfig(BaseModel):
+    """Bot evasion configuration"""
+    enabled: bool = True
+    behavioral_randomization: bool = True
+    fingerprint_spoofing: bool = True
+    proxy_rotation: bool = True
+    screenshot_verification: bool = True
+    detect_bot_blocks: bool = True
+
+
+class ProxyRotationRequest(BaseModel):
+    """Request to rotate proxy"""
+    session_id: str
+    reason: Optional[str] = None  # "rate_limit", "block_detected", "manual"
+    error_code: Optional[int] = None
+
+
+class ProxyRotationResponse(BaseModel):
+    """Response from proxy rotation"""
+    session_id: str
+    new_proxy: Optional[str] = None
+    status: str  # "success", "no_proxies_available"
+
 # Channel names for pub/sub
 class Channels:
     """Redis/Broker channel names"""
@@ -124,6 +189,11 @@ class Channels:
     COORDINATOR_TO_EXECUTION = "coordinator.to.execution"
     COORDINATOR_TO_LANGUAGE = "coordinator.to.language"
     COORDINATOR_TO_REASONING = "coordinator.to.reasoning"
+    COORDINATOR_TO_EMAIL = "coordinator.to.email"
+    
+    EMAIL_INPUT = "email.input"
+    EMAIL_OUTPUT = "email.output"
+    EMAIL_TO_COORDINATOR = "email.to.coordinator"
     
     EXECUTION_INPUT = "execution.input"
     EXECUTION_OUTPUT = "execution.output"

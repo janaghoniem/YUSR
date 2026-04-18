@@ -158,6 +158,19 @@ def classify_task_confirmation_reply(user_reply: str) -> str:
 
     return "critique"
 
+
+def is_explicit_send_email_task(text: str) -> bool:
+    """Detect explicit send-email commands with recipient + subject + body/content."""
+    if not text:
+        return False
+    lowered = text.lower()
+    has_send_verb = bool(re.search(r"\b(send|compose|draft|write)\b", lowered))
+    has_email_word = bool(re.search(r"\b(email|mail|gmail)\b", lowered))
+    has_recipient = bool(re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text))
+    has_subject = bool(re.search(r"\bsubject\b", lowered))
+    has_body = bool(re.search(r"\b(content|body|message|text)\b", lowered))
+    return has_send_verb and has_email_word and has_recipient and has_subject and has_body
+
 # -----------------------
 # Groq API Call
 # -----------------------
@@ -1165,21 +1178,44 @@ class LanguageAgent:
             self.memory = preserved
 
         print("   🤔 Thinking...", end=" ", flush=True)
-        # max_tokens must be large enough to contain a full JSON response including
-        # any story/answer text in response_text without truncation.
-        # 200 was too small — raising to MAX_TOKENS (600) to match the global config.
-        response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=MAX_TOKENS)
-        print("✓")
-
-        if not response:
+        # Deterministic shortcut: explicit send-email commands should not be dropped
+        # into clarification when recipient+subject+content are already present.
+        if is_explicit_send_email_task(user_text):
             response_text = (
-                "أواجه مشكلة في الاتصال الآن. حاول مرة أخرى."
+                "تمام، سأرسل هذا البريد الإلكتروني الآن."
                 if current_lang == "ar"
-                else "I'm having trouble connecting right now. Please try again."
+                else "Got it. I will send that email now."
             )
-            return response_text, False, None, current_lang
+            response = json.dumps(
+                {
+                    "is_complete": True,
+                    "response_text": response_text,
+                    "original_task": user_text,
+                    "personal_info": None,
+                    "output_language": current_lang,
+                },
+                ensure_ascii=False,
+            )
+            is_complete = True
+            personal_info = None
+            output_language = current_lang
+            print("✓")
+        else:
+            # max_tokens must be large enough to contain a full JSON response including
+            # any story/answer text in response_text without truncation.
+            # 200 was too small — raising to MAX_TOKENS (600) to match the global config.
+            response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=MAX_TOKENS)
+            print("✓")
 
-        response_text, is_complete, personal_info, output_language = self.parse_response(response)
+            if not response:
+                response_text = (
+                    "أواجه مشكلة في الاتصال الآن. حاول مرة أخرى."
+                    if current_lang == "ar"
+                    else "I'm having trouble connecting right now. Please try again."
+                )
+                return response_text, False, None, current_lang
+
+            response_text, is_complete, personal_info, output_language = self.parse_response(response)
 
         # Persist output_language for this session
         self.output_language = output_language

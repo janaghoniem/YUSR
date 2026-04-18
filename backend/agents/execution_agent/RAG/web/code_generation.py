@@ -32,7 +32,7 @@ class PlaywrightRAGConfig:
     
     # LLM settings (MATCHED TO DESKTOP RAG)
     llm_provider: str = "groq"
-    llm_model: str = "moonshotai/kimi-k2-instruct-0905"  # ✅ Same as desktop RAG
+    llm_model: str = "llama-3.3-70b-versatile"  # ✅ Same as desktop RAG
     temperature: float = 0.4  # ✅ Same as desktop RAG
     max_tokens: int = 1024  # ✅ Same as desktop RAG
     
@@ -432,13 +432,14 @@ class PlaywrightRAGSystem:
         
         # Add instructions
         prompt_parts.append("## Requirements:")
-        prompt_parts.append("Generate complete Playwright Python code that:")
-        prompt_parts.append("1. Uses async/await pattern (async def main, await page.goto, etc.)")
-        prompt_parts.append("2. Launches browser with headless=False")
-        prompt_parts.append("3. Handles errors with try/except")
-        prompt_parts.append("4. Prints 'EXECUTION_SUCCESS' on success")
-        prompt_parts.append("5. Prints 'FAILED: {error}' on failure")
-        prompt_parts.append("6. Always closes browser in finally block")
+        prompt_parts.append("Generate Playwright Python code that:")
+        prompt_parts.append("1. Uses async/await pattern with the existing 'page' variable (do NOT create browser/page)")
+        prompt_parts.append("2. Handles errors with try/except")
+        prompt_parts.append("3. Prints 'EXECUTION_SUCCESS' on success")
+        prompt_parts.append("4. Prints 'FAILED: {error}' on failure")
+        prompt_parts.append("5. Waits for elements before interacting: await page.wait_for_selector(sel, state='visible', timeout=10000)")
+        prompt_parts.append("6. After click-triggered navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)")
+        prompt_parts.append("7. If browser is already on the correct domain, interact with page elements instead of calling page.goto()")
         prompt_parts.append("")
         prompt_parts.append("Format:")
         prompt_parts.append("```python")
@@ -485,6 +486,13 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 - await page.keyboard.press('Control+Enter')
 - text = await page.text_content(selector)
 - print("EXECUTION_SUCCESS")
+
+⚠️ NEVER await a bare locator — page.locator() is SYNCHRONOUS:
+❌ WRONG: await page.locator('a:has-text("X")')   ← TypeError!
+❌ WRONG: link = await page.locator('a')            ← TypeError!
+✅ CORRECT: await page.locator('a:has-text("X")').first.click()
+✅ CORRECT: link = page.locator('a')  # no await
+✅ CORRECT: count = await page.locator('a').count()  # await the ACTION
 
 ================================================================
 ❗ MANDATORY PATTERN: GOOGLE SEARCHES
@@ -639,7 +647,7 @@ COLOR-BASED FINDING:
 TITLE ATTRIBUTE FINDING:
   # PDF reader button with title
   pdf_btn = page.locator('button[title*="PDF"], button[title*="pdf"], [title*="Read PDF"]').first
-  await pdf_btn.scroll_into_view()
+  await pdf_btn.scroll_into_view_if_needed()
   await pdf_btn.click()
 
 DATA-* ATTRIBUTE FINDING:
@@ -688,7 +696,7 @@ CORRECT PATTERN:
   locator = page.locator('a:has-text("View PDF")')
   
   # IMPORTANT: Scroll into view FIRST
-  await locator.first.scroll_into_view()
+  await locator.first.scroll_into_view_if_needed()
   await page.wait_for_timeout(300)
   
   # Then click
@@ -700,7 +708,7 @@ If Locator.click: Timeout exceeds 30s, the element likely needs scrolling or wai
 
   # Alternative: Wait for visibility explicitly
   await page.wait_for_selector('a:has-text("View PDF")', state='visible', timeout=10000)
-  await page.locator('a:has-text("View PDF")').first.scroll_into_view()
+  await page.locator('a:has-text("View PDF")').first.scroll_into_view_if_needed()
   await page.locator('a:has-text("View PDF")').first.click()
 
 ================================================================
@@ -841,6 +849,82 @@ CRITICAL RULES:
 13. For visual element finding — use color/title/data-* attributes per FIX 2
 14. For text extraction — return text directly; it will be captured as 'text_extracted' per FIX 3
 15. Avoid rapid navigation; add small waits to evade bot detection (FIX 4)
+
+================================================================
+CLICKING SEARCH RESULTS & LINKS — MANDATORY PATTERN
+================================================================
+When clicking a search result, link, video thumbnail, or any interactive element:
+
+The LINKS section in the prompt shows ALL clickable links with their text.
+Use a:has-text("EXACT_LINK_TEXT") to click a specific link.
+
+EXAMPLE — Click a named link from the LINKS section (e.g. 'Cybernaut: Towards Reliable Web Automation'):
+  try:
+      link = page.locator('a:has-text("Cybernaut")')
+      await link.first.scroll_into_view_if_needed()
+      await page.wait_for_timeout(300)
+      await link.first.click()
+      await page.wait_for_load_state('domcontentloaded', timeout=10000)
+      print("EXECUTION_SUCCESS")
+  except Exception as e:
+      # Fallback: JS click by partial text
+      try:
+          js_code = 'const links=[...document.querySelectorAll("a")];const link=links.find(a=>a.textContent.includes("Cybernaut"));if(link)link.click();else throw new Error("Link not found");'
+          await page.evaluate(js_code)
+          await page.wait_for_load_state('domcontentloaded', timeout=10000)
+          print("EXECUTION_SUCCESS")
+      except Exception as e2:
+          print(f"FAILED: {e2}")
+
+1. ALWAYS wait for the element to be visible BEFORE clicking:
+     await page.wait_for_selector('h3 a', state='visible', timeout=10000)
+
+2. Use page.locator() with human-readable text/role locators as primary strategy:
+     await page.locator('h3 a').first.click()
+   NOT brittle CSS selectors that break on dynamic pages.
+
+3. After any click that triggers navigation, ALWAYS wait for load:
+     await page.wait_for_load_state('domcontentloaded', timeout=10000)
+
+4. If locator click times out, fall back to JavaScript DOM click:
+     await page.evaluate('document.querySelector("h3 a").click()')
+
+EXAMPLE — Click first Google search result:
+  try:
+      await page.wait_for_selector('h3', state='visible', timeout=10000)
+      await page.locator('h3').first.scroll_into_view_if_needed()
+      await page.wait_for_timeout(300)
+      await page.locator('h3').first.click()
+      await page.wait_for_load_state('domcontentloaded', timeout=10000)
+      print("EXECUTION_SUCCESS")
+  except Exception as e:
+      # Fallback: JS click
+      try:
+          await page.evaluate('document.querySelector("h3 a").click()')
+          await page.wait_for_load_state('domcontentloaded', timeout=10000)
+          print("EXECUTION_SUCCESS")
+      except Exception as e2:
+          print(f"FAILED: {e2}")
+
+================================================================
+IN-PAGE NAVIGATION — DO NOT CONSTRUCT URLs
+================================================================
+If the browser is ALREADY on the correct domain, do NOT call page.goto().
+Instead, interact with the existing page elements:
+  - Type in search boxes and press Enter
+  - Click links and buttons
+  - Use page.go_back() for back-navigation (NOT page.goto(previous_url))
+
+WRONG:
+  await page.goto("https://www.google.com/search?q=test")  # constructs URL
+
+CORRECT:
+  await page.fill('input[name="q"]', 'test')
+  await page.keyboard.press('Enter')
+  await page.wait_for_load_state('domcontentloaded')
+
+The same tab MUST be reused across all steps of a single task plan.
+Never open a new tab mid-task unless the task explicitly says "open in new tab".
 """
 
     def _parse_response(self, response: str, contexts: List[Dict]) -> Dict:

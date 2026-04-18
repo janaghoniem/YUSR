@@ -111,10 +111,10 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
 
     uvicorn.run(
-        "server:app",
+        app,
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=reload_enabled,
         log_level="info",
         access_log=True,
     )

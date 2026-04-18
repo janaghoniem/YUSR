@@ -1392,7 +1392,7 @@ async def start_language_agent(broker):
                     session_id=session_id,
                     response_to=http_request_id,
                     payload={
-                        "question": "I'm not able to process that request. Blocked by security.",
+                        "question": "This operation is not permitted. The request was blocked because it involves a potentially harmful or unsafe action (such as bulk file operations, destructive commands, or blocked system libraries). If you believe this is a mistake, please rephrase your request.",
                         "context": "",
                         "device_type": device_type
                     }

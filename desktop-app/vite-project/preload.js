@@ -1,14 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  closeWindow:     () => ipcRenderer.invoke('window:close'),
-  minimizeWindow:  () => ipcRenderer.invoke('window:minimize'),
-  maximizeWindow:  () => ipcRenderer.invoke('window:maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   enterWidgetMode: () => ipcRenderer.invoke('widget:enter'),
-  exitWidgetMode:  () => ipcRenderer.invoke('widget:exit'),
-  initAura:        (options) => ipcRenderer.invoke('aura:init', options),
-  transcribeOnce:  (options) => ipcRenderer.invoke('aura:transcribe-once', options),
-  onAuraWakeWord:  (callback) => {
+  exitWidgetMode: () => ipcRenderer.invoke('widget:exit'),
+  initAura: (options) => ipcRenderer.invoke('aura:init', options),
+  transcribeAudio: (payload) => ipcRenderer.invoke('stt:transcribe', payload),
+  onAuraWakeWord: (callback) => {
     const handler = (_event, payload) => callback?.(payload);
     ipcRenderer.on('aura-wake-word', handler);
     return () => ipcRenderer.removeListener('aura-wake-word', handler);

@@ -1,3 +1,4 @@
+# aura_engine.py (fixed with VAD)
 import argparse
 import json
 import os
@@ -13,28 +14,19 @@ except Exception as exc:
     sys.stdout.flush()
     raise
 
+# VAD import – optional, but highly recommended
+try:
+    import webrtcvad
+    VAD_AVAILABLE = True
+except ImportError:
+    VAD_AVAILABLE = False
+    print(json.dumps({"type": "warning", "message": "webrtcvad not installed, voice activity detection disabled"}), flush=True)
+
 SetLogLevel(-1)
 
 SAMPLE_RATE = 16000
 EN_WAKE_PHRASES = [
-    "aura",
     "hey aura",
-    "hi aura",
-    "hello aura",
-]
-AR_WAKE_PHRASES = [
-    "اورا",
-    "أورا",
-    "يا اورا",
-    "يا أورا",
-    "هاي اورا",
-    "هاي أورا",
-    "هالو اورا",
-    "هالو أورا",
-    "اهلا اورا",
-    "اهلا أورا",
-    "اهلا يا اورا",
-    "اهلا يا أورا",
 ]
 MODEL_CACHE = {}
 
@@ -95,10 +87,12 @@ class AuraEngine:
             raise FileNotFoundError("Could not find any Vosk models for wake-word listening")
 
         self.command_lang = self.preferred_lang if self.preferred_lang in self.models else next(iter(self.models))
+        self.wake_lang = "en"
         self.wake_recognizers = self._build_wake_recognizers()
         self.command_recognizer = None
         self.armed = False
         self.active_lang = self.command_lang
+        self.command_from_wake_enabled = False
         self.stop_event = threading.Event()
         self.last_partial_emit_at = 0.0
         self.last_partial_text = ""
@@ -106,6 +100,36 @@ class AuraEngine:
         self.last_command_activity_at = 0.0
         self.last_command_partial = ""
         self.command_silence_seconds = 5.0
+        self.last_wake_emit_at = 0.0
+        self.wake_cooldown_seconds = 1.4
+
+        # VAD setup
+        self.vad = None
+        if VAD_AVAILABLE:
+            # Higher aggressiveness reduces false triggers on noise.
+            self.vad = webrtcvad.Vad(3)
+
+    def _is_speech(self, audio_bytes: bytes) -> bool:
+        """Return True if the audio chunk contains human speech using WebRTC VAD."""
+        if self.vad is None:
+            return True  # VAD disabled, assume speech always present
+
+        # VAD expects 10, 20, or 30ms frames. At 16kHz, 30ms = 480 samples = 960 bytes.
+        frame_duration_ms = 30
+        frame_size_bytes = int(SAMPLE_RATE * frame_duration_ms / 1000) * 2  # 2 bytes per sample (int16)
+        if len(audio_bytes) < frame_size_bytes:
+            return False
+
+        # Check each 30ms frame; if any frame contains speech, consider the whole block as speech.
+        for offset in range(0, len(audio_bytes) - frame_size_bytes + 1, frame_size_bytes):
+            frame = audio_bytes[offset:offset + frame_size_bytes]
+            try:
+                if self.vad.is_speech(frame, SAMPLE_RATE):
+                    return True
+            except Exception:
+                # In case of malformed frame, skip
+                continue
+        return False
 
     def emit_partial_throttled(self, text: str, lang: str, min_interval: float = 0.25):
         text = (text or "").strip()
@@ -123,10 +147,13 @@ class AuraEngine:
 
     def _build_wake_recognizers(self):
         recognizers = {}
-        for lang, model in self.models.items():
-            wake_grammar = AR_WAKE_PHRASES if lang == "ar" else EN_WAKE_PHRASES
-            recognizer = KaldiRecognizer(model, SAMPLE_RATE, json.dumps(wake_grammar, ensure_ascii=False))
-            recognizers[lang] = recognizer
+        model = self.models.get(self.wake_lang)
+        if model is None:
+            return recognizers
+        # Do NOT use grammar-constrained wake recognition here.
+        # Grammar mode can over-trigger by forcing close phrases into the grammar.
+        recognizer = KaldiRecognizer(model, SAMPLE_RATE)
+        recognizers[self.wake_lang] = recognizer
         return recognizers
 
     @staticmethod
@@ -141,14 +168,18 @@ class AuraEngine:
         return " ".join(normalized.split())
 
     def _is_wake_match(self, text: str, lang: str) -> bool:
+        if lang != "en":
+            return False
         normalized = self._normalize_text(text)
         if not normalized:
             return False
 
-        phrases = AR_WAKE_PHRASES if lang == "ar" else EN_WAKE_PHRASES
+        phrases = EN_WAKE_PHRASES
         normalized_phrases = [self._normalize_text(phrase) for phrase in phrases]
+        # Require wake phrase at utterance start (or exact match) to avoid accidental
+        # triggers when the words appear inside unrelated speech.
         return any(
-            normalized == phrase or normalized.startswith(f"{phrase} ") or f" {phrase} " in f" {normalized} "
+            normalized == phrase or normalized.startswith(f"{phrase} ")
             for phrase in normalized_phrases
             if phrase
         )
@@ -168,10 +199,13 @@ class AuraEngine:
     def handle_wake_result(self, text: str, lang: str):
         normalized = self._normalize_text(text)
         if self._is_wake_match(normalized, lang):
+            now = time.monotonic()
+            if (now - self.last_wake_emit_at) < self.wake_cooldown_seconds:
+                return
+            self.last_wake_emit_at = now
             self.active_lang = lang if lang in self.models else self.command_lang
             emit({"type": "wake_word", "text": normalized, "lang": self.active_lang})
-            self.armed = True
-            self.reset_command_recognizer()
+            self.armed = False
             emit({"type": "status", "state": "armed", "lang": self.active_lang, "text": normalized})
 
     def handle_command_result(self, text: str):
@@ -208,8 +242,12 @@ class AuraEngine:
 
         audio_bytes = bytes(indata)
 
+        # VAD gate: skip this block if no speech is detected
+        if not self._is_speech(audio_bytes):
+            return
+
         try:
-            if self.armed:
+            if self.command_from_wake_enabled and self.armed:
                 if self.command_recognizer is None:
                     self.reset_command_recognizer()
 
@@ -250,6 +288,13 @@ class AuraEngine:
             self.stop_event.set()
 
     def run_continuous(self):
+        if not self.wake_recognizers:
+            emit({
+                "type": "error",
+                "message": "English wake-word model is required but was not found",
+            })
+            raise RuntimeError("English wake-word model is required")
+
         emit({"type": "status", "state": "listening", "lang": self.command_lang})
 
         try:
@@ -282,6 +327,10 @@ class AuraEngine:
                 print(status, file=sys.stderr)
 
             audio_bytes = bytes(indata)
+            # VAD gate for one‑shot mode as well
+            if not self._is_speech(audio_bytes):
+                return
+
             try:
                 if recognizer.AcceptWaveform(audio_bytes):
                     result = json.loads(recognizer.Result())
@@ -328,12 +377,15 @@ def parse_args():
 def main():
     args = parse_args()
     engine = AuraEngine(lang=args.lang)
-    emit({"type": "status", "state": "starting", "lang": engine.command_lang})
 
     if args.once:
+        engine.stop_event.clear()
         engine.run_once(timeout_ms=args.timeout_ms)
-    else:
-        engine.run_continuous()
+        emit({"type": "status", "state": "stopped", "mode": "once", "lang": engine.command_lang})
+        return
+
+    engine.stop_event.clear()
+    engine.run_continuous()
 
 
 if __name__ == "__main__":

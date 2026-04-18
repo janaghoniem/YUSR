@@ -35,7 +35,7 @@ from langchain_groq import ChatGroq
 from mistralai.client import Mistral
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","ministral-3b-2512")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","mistral-medium-latest")
 
 llm = ChatGroq(
     model=LLM_MODEL,

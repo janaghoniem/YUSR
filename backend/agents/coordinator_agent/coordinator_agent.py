@@ -745,6 +745,10 @@ pending_results: Dict[str, asyncio.Future] = {}
 #hala edit ashan el web 
 _session_browser_state: Dict[str, Dict] = {}
 
+# Cache YouTube search results per session so follow-up commands like
+# "open the first result" can resolve without re-searching.
+_session_youtube_results: Dict[str, list] = {}
+
 # ICRL: Per-session, per-task buffers for In-Context Reinforcement Learning
 # Key: f"{session_id}:{task_id}" → ICRLBuffer
 # Cleared when a new chat session starts

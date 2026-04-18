@@ -729,6 +729,13 @@ Capabilities: {', '.join(capabilities) if capabilities else 'none detected'}
 ENHANCED RULES WITH SMART INTENT HANDLING:
 ================================================================
 
+0. **CRITICAL — IN-PAGE NAVIGATION**:
+   The browser is ALREADY on URL: {page_context.get('url', 'unknown')}
+   If the task's target site matches the current domain, do NOT call page.goto().
+   Instead, interact with the page: type in search boxes, click links, press Enter.
+   For back-navigation, use: await page.go_back()
+   After any click that triggers navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)
+
 1. **Primary Approach**: Use ONLY elements that exist in the list above
 
 2. **Smart Intent for Missing Elements**: 
@@ -2463,7 +2470,10 @@ class WebExecutionPipeline:
                                         logger.warning(f"⚠️ Download file still 0 bytes after wait: {fp}")
                                         return
                                     try:
-                                        subprocess.Popen(f'start "" "{fp}"', shell=True)
+                                        subprocess.run(
+                                            ['cmd', '/c', 'start', '', os.path.normpath(fp)],
+                                            shell=False, check=False,
+                                        )
                                         logger.info(f"📂 Opened downloaded file: {fp}")
                                     except Exception as _open_err:
                                         logger.warning(f"⚠️ Could not open downloaded file: {_open_err}")
@@ -2730,6 +2740,19 @@ class WebExecutionPipeline:
 
         existing = self.sessions.get(session_id)
         page_truly_closed = await self._is_page_truly_closed(existing)
+
+        # ── FIX (Bug 1): When the stored page is dead but a CDP context
+        # already has open pages, reuse the *last* (foreground) page instead
+        # of opening a brand-new about:blank tab — this preserves session
+        # cookies, history, and avoids bot-detection.
+        if page_truly_closed and self.context and self.context.pages:
+            # Pick the last page (most recently focused tab)
+            candidate = self.context.pages[-1]
+            if not await self._is_page_truly_closed(candidate):
+                logger.info(f"♻️ Reusing existing foreground tab for session {session_id}: {candidate.url}")
+                self.sessions[session_id] = candidate
+                return candidate
+
         if page_truly_closed:
             try:
                 page = await self.context.new_page()
@@ -2783,10 +2806,19 @@ class WebExecutionPipeline:
                     
                     logger.info(f"✅ Downloaded successfully: {filepath}")
                     
-                    # Verify file exists
+                    # Verify file exists and is non-empty (save_as may return before OS flush)
+                    _dl_deadline = _time_module.time() + 5
+                    while _time_module.time() < _dl_deadline:
+                        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                            break
+                        await asyncio.sleep(0.5)
+
                     if os.path.exists(filepath):
                         filesize = os.path.getsize(filepath)
-                        logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
+                        if filesize == 0:
+                            logger.warning(f"⚠️ File is 0 bytes after wait: {filepath}")
+                        else:
+                            logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
                         
                         # Track download for this session
                         if session_id not in self.session_downloads:
@@ -2794,11 +2826,15 @@ class WebExecutionPipeline:
                         self.session_downloads[session_id].append(filepath)
 
                         # Open the file with the default system application
-                        try:
-                            subprocess.Popen(f'start "" "{filepath}"', shell=True)
-                            logger.info(f"📂 Opened downloaded file: {filepath}")
-                        except Exception as _open_err:
-                            logger.warning(f"⚠️ Could not auto-open downloaded file: {_open_err}")
+                        if filesize > 0:
+                            try:
+                                subprocess.run(
+                                    ['cmd', '/c', 'start', '', os.path.normpath(os.path.abspath(filepath))],
+                                    shell=False, check=False,
+                                )
+                                logger.info(f"📂 Opened downloaded file: {filepath}")
+                            except Exception as _open_err:
+                                logger.warning(f"⚠️ Could not auto-open downloaded file: {_open_err}")
                     else:
                         logger.warning(f"⚠️ File not found after save: {filepath}")
                         
@@ -3213,22 +3249,41 @@ class WebExecutionPipeline:
                         target_url = url_match.group(0)
                 
                 if target_url:
-                    logger.info(f"🌐 Direct navigation to: {target_url}")
-                    try:
-                        # Navigate directly without LLM generation
-                        await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
-                        await page.wait_for_timeout(500)  # Let page settle
-                        
-                        logger.info(f"✅ Successfully navigated to {target_url}")
-                        
-                        return WebExecutionResult(
-                            validation_passed=True,
-                            security_passed=True,
-                            error=None,
-                            execution_time=(datetime.now() - start_time).total_seconds()
-                        )
-                    except Exception as nav_error:
-                        logger.warning(f"⚠️ Navigation failed: {nav_error}")
+                    # ── FIX (Bug 3): If we're already on the target domain,
+                    # skip page.goto() and fall through to in-page interaction
+                    # so the LLM generates type-in-searchbox / click code instead.
+                    from urllib.parse import urlparse
+                    _target_domain = urlparse(target_url).netloc.replace('www.', '')
+                    _current_domain = urlparse(page.url or '').netloc.replace('www.', '')
+                    _already_on_domain = (
+                        _target_domain and _current_domain
+                        and _target_domain == _current_domain
+                    )
+                    # Still navigate if it's a specific deep URL (has path/query),
+                    # but skip if it's just the bare homepage and we're already there.
+                    _target_path = urlparse(target_url).path.strip('/')
+                    _target_query = urlparse(target_url).query
+                    _is_deep_url = bool(_target_path) or bool(_target_query)
+
+                    if _already_on_domain and not _is_deep_url:
+                        logger.info(f"♻️ Already on {_current_domain} — skipping page.goto(), will interact in-page")
+                    else:
+                        logger.info(f"🌐 Direct navigation to: {target_url}")
+                        try:
+                            # Navigate directly without LLM generation
+                            await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(500)  # Let page settle
+                            
+                            logger.info(f"✅ Successfully navigated to {target_url}")
+                            
+                            return WebExecutionResult(
+                                validation_passed=True,
+                                security_passed=True,
+                                error=None,
+                                execution_time=(datetime.now() - start_time).total_seconds()
+                            )
+                        except Exception as nav_error:
+                            logger.warning(f"⚠️ Navigation failed: {nav_error}")
                         # Fall through to LLM-generated code as fallback
             
             # ✅ STEP 2: TRY PLATFORM-SPECIFIC KEYBOARD SHORTCUTS (GENERIC)

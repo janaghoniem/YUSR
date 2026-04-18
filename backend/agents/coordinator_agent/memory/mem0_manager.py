@@ -119,11 +119,26 @@ class Mem0PreferenceManager:
 
     def add_preference(self, preference: str, metadata: Optional[Dict] = None) -> str:
         """Store a user preference. Returns 'BLOCKED_CREDENTIAL' if credential detected.
-        In zero_token_mode, skips Groq entirely and writes via local embeddings."""
-        # TC57: block credentials before they reach Mem0
+        In zero_token_mode, skips Groq entirely and writes via local embeddings.
+        Always checks for existing similar entries before writing (dedup guard)."""
+        # Block credentials
         if self._is_credential(preference):
             logger.warning(f"🚫 Credential blocked — not stored: '{preference[:60]}'")
             return "BLOCKED_CREDENTIAL"
+
+        # ── Dedup guard: skip if a sufficiently similar memory already exists ──
+        # This runs BEFORE any write path (Groq, zero-token, or fallback) so that
+        # rate-limit fallbacks don't accumulate duplicate name/personal_info entries.
+        try:
+            _existing = self.get_relevant_preferences(preference, limit=3, min_score=0.82)
+            if _existing:
+                logger.info(
+                    f"⏭️ Skipping duplicate — similar memory exists: "
+                    f"'{_existing[0].get('memory','')[:60]}'"
+                )
+                return None
+        except Exception as _dedup_err:
+            logger.debug(f"Dedup check failed (non-fatal): {_dedup_err}")
 
         # Zero-token mode: bypass Mem0's internal LLM entirely
         if self.zero_token_mode:
@@ -328,7 +343,9 @@ class Mem0PreferenceManager:
             query_lower = query.lower().strip()
             
             # ── CACHE CHECK ─────────────────────────────────────────────────────
-            cache_key = f"{self.user_id}:{query[:80]}:{limit}:{min_score}"
+            import re as _re
+            _query_normalized = _re.sub(r'[^\w\s]', '', query.lower().strip())[:80]
+            cache_key = f"{self.user_id}:{_query_normalized}:{limit}:{min_score}"
             if hasattr(self, '_search_cache') and cache_key in self._search_cache:
                 cached_result, cached_time = self._search_cache[cache_key]
                 if time.time() - cached_time < self._CACHE_TTL:
@@ -358,9 +375,11 @@ class Mem0PreferenceManager:
                         category = pref.get('metadata', {}).get('category', '')
                         if category == 'personal_info':
                             memory_text = pref.get('memory', '').lower()
-                            # Check for name-related content (supports Arabic and English)
-                            name_keywords = ['name', 'سارة', 'salma', 'sara', 'ahmed', 'mohamed', 'user', 'username']
-                            if any(keyword in memory_text for keyword in name_keywords):
+                            # Match ANY personal_info entry on identity queries.
+                            # Previous hardcoded name list missed users whose names
+                            # weren't in the list (e.g. "shahd", "layla", etc.)
+                            name_related_keywords = ['name', 'username', 'user name', 'اسم', 'اسمي', 'يسمى']
+                            if any(keyword in memory_text for keyword in name_related_keywords):
                                 exact_matches.append({
                                     'memory': pref.get('memory', ''),
                                     'score': 1.0,
@@ -436,20 +455,24 @@ class Mem0PreferenceManager:
             # Sort by score descending
             combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             
-            # ── STEP 5: FALLBACK - Always try to get personal_info if none found ──
-            if not combined_results:
+            # ── STEP 5: FALLBACK - Always inject personal_info when missing from results ──
+            already_have_personal = any(
+                r.get('metadata', {}).get('category') == 'personal_info'
+                for r in combined_results
+            )
+            if not already_have_personal:
                 try:
-                    all_prefs = self.get_all_preferences()
-                    for pref in all_prefs:
+                    # Reuse already-fetched list if available from exact match step above
+                    _all_prefs_fallback = all_prefs if 'all_prefs' in dir() and all_prefs else self.get_all_preferences()
+                    for pref in _all_prefs_fallback:
                         category = pref.get('metadata', {}).get('category', '')
                         if category == 'personal_info':
-                            combined_results.append({
+                            combined_results.insert(0, {
                                 'memory': pref.get('memory', ''),
-                                'score': 0.9,
+                                'score': 0.95,
                                 'metadata': pref.get('metadata', {})
                             })
-                            logger.info(f"  ✅ Fallback: Added personal info: {pref.get('memory', '')[:60]}")
-                            break  # Only add one personal info as fallback
+                            logger.info(f"  ✅ Injected personal info: {pref.get('memory', '')[:60]}")
                 except Exception as e:
                     logger.debug(f"Fallback personal_info fetch failed: {e}")
             
@@ -464,6 +487,7 @@ class Mem0PreferenceManager:
             # ── STORE IN CACHE ──────────────────────────────────────────────────
             if hasattr(self, '_search_cache'):
                 self._search_cache[cache_key] = (combined_results, time.time())
+                logger.info(f"💾 Cached result for key: {cache_key[:60]}")
 
             return combined_results
 
@@ -592,5 +616,24 @@ _preference_managers: Dict[str, Mem0PreferenceManager] = {}
 def get_preference_manager(user_id: str) -> Mem0PreferenceManager:
     """Get or create preference manager for user"""
     if user_id not in _preference_managers:
-        _preference_managers[user_id] = Mem0PreferenceManager(user_id)
+        mgr = Mem0PreferenceManager(user_id)
+        _preference_managers[user_id] = mgr
+        # Pre-warm the personal_info cache so identity queries on new sessions
+        # immediately hit the cache instead of doing a cold vector search.
+        try:
+            _warm = mgr.get_all_preferences()
+            _personal = [
+                {'memory': p.get('memory', ''), 'score': 1.0, 'metadata': p.get('metadata', {})}
+                for p in _warm if p.get('metadata', {}).get('category') == 'personal_info'
+            ]
+            if _personal:
+                import time as _t
+                import re as _re
+                for _warm_query in ["what is my name", "my name", "who am i"]:
+                    _norm = _re.sub(r'[^\w\s]', '', _warm_query.lower().strip())[:80]
+                    _cache_key = f"{user_id}:{_norm}:10:0.25"
+                    mgr._search_cache[_cache_key] = (_personal, _t.time())
+                logger.info(f"✅ Pre-warmed personal_info cache for {user_id} ({len(_personal)} items)")
+        except Exception as _e:
+            logger.debug(f"Cache pre-warm failed (non-fatal): {_e}")
     return _preference_managers[user_id]

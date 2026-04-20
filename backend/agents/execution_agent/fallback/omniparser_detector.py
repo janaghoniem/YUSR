@@ -11,15 +11,15 @@ from PIL import Image
 import pyautogui
 
 
-import importlib
-import sys
+# import importlib
+# import sys
 
-# Force reload the OmniParser module
-if 'agents.execution_agent.fallback.omniparser_detector' in sys.modules:
-    importlib.reload(sys.modules['agents.execution_agent.fallback.omniparser_detector'])
+# # Force reload the OmniParser module
+# if 'agents.execution_agent.fallback.omniparser_detector' in sys.modules:
+#     importlib.reload(sys.modules['agents.execution_agent.fallback.omniparser_detector'])
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from core.exec_agent_models import VisionResult
+# sys.path.insert(0, str(Path(__file__).parent.parent))
+from ..core.exec_agent_models import VisionResult
 
 # Import OmniParser utilities
 from .utils import IconDetector, IconCaptioner, crop_image_region, calculate_center

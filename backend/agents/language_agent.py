@@ -14,6 +14,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import asyncio
 import logging
 from groq import Groq
+from mistralai.client import Mistral
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from agents.utils.protocol import AgentMessage, MessageType, AgentType, ClarificationMessage
@@ -28,8 +29,11 @@ logger = logging.getLogger(__name__)
 # CONFIG - GROQ API
 # -----------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
 MODEL_NAME = "llama-3.3-70b-versatile"
-client = Groq(api_key=GROQ_API_KEY)
+MISTRAL_MODEL_NAME = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
 
 CONV_SAVE_PATH = "conversations.jsonl"
 TASKS_SAVE_PATH = "tasks.jsonl"
@@ -87,6 +91,74 @@ def detect_language_from_text(text: str) -> str:
     return "ar" if ratio > 0.15 else "en"
 
 
+def classify_task_confirmation_reply(user_reply: str) -> str:
+    """Classify user reply to a task confirmation as approved/critique/rejected."""
+    normalized = normalize_arabic(user_reply or "")
+    text = (user_reply or "").strip().lower()
+    compact = re.sub(r"[^a-z\u0600-\u06FF\s]", " ", text)
+    compact = re.sub(r"\s+", " ", compact).strip()
+
+    approvals_en = {
+        "yes", "y", "ok", "okay", "sure", "proceed", "go ahead", "do it",
+        "send", "looks good", "approved", "approve", "confirm", "continue",
+    }
+    approvals_ar = {
+        "نعم", "اه", "آه", "ايوه", "ايوا", "تمام", "موافق", "اكمل", "استمر", "ارسله",
+    }
+    rejects_en = {
+        "no", "n", "cancel", "stop", "don't", "do not", "not now", "abort",
+    }
+    rejects_ar = {
+        "لا", "الغاء", "إلغاء", "الغيه", "وقف", "مش دلوقتي", "لا ترسل",
+    }
+
+    approval_phrases_en = [
+        "go ahead", "go for it", "send it", "proceed", "continue", "looks good",
+        "sounds good", "all good", "you can send", "yes go ahead",
+    ]
+    rejection_phrases_en = [
+        "do not send", "don't send", "cancel", "stop", "abort", "not now",
+    ]
+    approval_phrases_ar = [
+        "ارسله", "ارسلي", "كملي", "اكمل", "استمر", "موافق", "تمام كمل",
+    ]
+    rejection_phrases_ar = [
+        "لا ترسل", "لا تبعت", "الغاء", "إلغاء", "وقف",
+    ]
+
+    if normalized in approvals_en or normalized in approvals_ar:
+        return "approved"
+    if normalized in rejects_en or normalized in rejects_ar:
+        return "rejected"
+
+    if any(p in compact for p in rejection_phrases_en) or any(p in normalized for p in rejection_phrases_ar):
+        return "rejected"
+    if any(p in compact for p in approval_phrases_en) or any(p in normalized for p in approval_phrases_ar):
+        return "approved"
+
+    short_tokens = text.split()
+    if 1 <= len(short_tokens) <= 3:
+        if all(tok in {"yes", "ok", "okay", "sure", "نعم", "تمام", "موافق"} for tok in short_tokens):
+            return "approved"
+        if all(tok in {"no", "cancel", "stop", "لا", "الغاء", "إلغاء", "وقف"} for tok in short_tokens):
+            return "rejected"
+
+    # If it begins with an explicit affirmative cue and contains no revision cue,
+    # treat as approval even when phrased as a longer sentence.
+    revision_markers = {
+        "make it", "revise", "rewrite", "edit", "change", "shorter", "longer", "friendlier",
+        "more formal", "less formal", "tone", "rephrase", "modify", "اجعل", "غيّر", "عدل",
+    }
+    affirmative_prefixes = (
+        "yes", "ok", "okay", "sure", "go ahead", "send it", "proceed", "continue",
+        "نعم", "تمام", "موافق", "اكمل", "استمر", "ارسله",
+    )
+    if compact.startswith(affirmative_prefixes) and not any(m in compact for m in revision_markers):
+        return "approved"
+
+    return "critique"
+
+
 def is_explicit_send_email_task(text: str) -> bool:
     """Detect explicit send-email commands with recipient + subject + body/content."""
     if not text:
@@ -103,9 +175,50 @@ def is_explicit_send_email_task(text: str) -> bool:
 # Groq API Call
 # -----------------------
 def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
-    if not GROQ_API_KEY:
-        raise ValueError("⚠️  GROQ_API_KEY not set in .env!")
+    def _extract_mistral_text(response_obj: Any) -> str:
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return sanitize_text(str(response_obj))
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", "") if message is not None else ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(getattr(item, "text", item)))
+                content = "".join(parts)
+            return sanitize_text(str(content or ""))
+        except Exception:
+            return ""
+
+    def _call_mistral_fallback() -> str:
+        if not mistral_client:
+            logger.warning("⚠️ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+            return ""
+        try:
+            # Keep message structure unchanged so prompt behavior matches Groq path.
+            completion = mistral_client.chat.complete(
+                model=MISTRAL_MODEL_NAME,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0.1,
+            )
+            text = _extract_mistral_text(completion)
+            if text:
+                logger.info(f"✅ Language model fallback succeeded with Mistral ({MISTRAL_MODEL_NAME})")
+            return text
+        except Exception as mistral_err:
+            logger.error(f"❌ Mistral fallback failed: {mistral_err}")
+            return ""
+
     try:
+        if not client:
+            logger.warning("⚠️ Groq unavailable: GROQ_API_KEY is not set. Trying Mistral fallback.")
+            return _call_mistral_fallback()
+
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
@@ -117,8 +230,8 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
         text = completion.choices[0].message.content
         return sanitize_text(text)
     except Exception as e:
-        print(f"⚠️  Groq API Error: {e}")
-        return ""
+        logger.warning(f"⚠️ Groq API Error, trying Mistral fallback: {e}")
+        return _call_mistral_fallback()
 
 # ===========================================================================
 # DUAL-MODE PROMPTS
@@ -940,13 +1053,48 @@ class LanguageAgent:
             except Exception:
                 return None
 
+        def _extract_first_json_object(text: str) -> Optional[str]:
+            """Extract first balanced JSON object while respecting quoted strings."""
+            start = text.find("{")
+            if start == -1:
+                return None
+
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i in range(start, len(text)):
+                ch = text[i]
+
+                if escape_next:
+                    escape_next = False
+                    continue
+
+                if ch == "\\" and in_string:
+                    escape_next = True
+                    continue
+
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+
+                if in_string:
+                    continue
+
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i + 1]
+
+            return None
+
         try:
-            cleaned_response = response.replace("\\\\", "/").replace("\\", "/")
+            cleaned_response = str(response or "").strip()
 
             # F2: Extract FIRST valid JSON object only — ignore anything after it
-            import re as _re
-            json_match = _re.search(r'\{[^{}]*\}', cleaned_response, _re.DOTALL)
-            if not json_match:
+            json_obj = _extract_first_json_object(cleaned_response)
+            if not json_obj:
                 # Try repair
                 repaired = _attempt_repair(cleaned_response)
                 if repaired:
@@ -957,9 +1105,9 @@ class LanguageAgent:
             else:
                 import json as _json
                 try:
-                    parsed = _json.loads(json_match.group(0))
+                    parsed = _json.loads(json_obj)
                 except _json.JSONDecodeError:
-                    repaired = _attempt_repair(json_match.group(0))
+                    repaired = _attempt_repair(json_obj)
                     if repaired:
                         parsed = _json.loads(repaired)
                     else:
@@ -1088,14 +1236,27 @@ class LanguageAgent:
         logger.info(f"🔄 Cleared conversation for session {self.session_id}")
 
 
-# Store active agents by session_id
+# Store active agents by agent_key {user_id}_{session_id}
 active_agents: Dict[str, LanguageAgent] = {}
 
 def get_agent_for_session(session_id: str) -> Optional[LanguageAgent]:
+    """Retrieve an active agent purely by session_id suffix."""
     for key, agent in active_agents.items():
         if key.endswith(f"_{session_id}"):
             return agent
     return None
+
+def _get_agent_by_user(user_id: str) -> Optional[LanguageAgent]:
+    """Find the most recently used agent for a user, handling fast mobile session rotation."""
+    # Assuming the most recently created or updated agent is at the end or we just find one.
+    # We will look for an agent that has a pending confirmation in the user's name.
+    fallback_agent = None
+    for key, agent in reversed(active_agents.items()):
+        if key.startswith(f"{user_id}_"):
+            fallback_agent = agent
+            if agent.awaiting_user_response:
+                return agent
+    return fallback_agent
 
 
 async def start_language_agent(broker):
@@ -1107,11 +1268,35 @@ async def start_language_agent(broker):
     def get_or_create_agent(session_id: str, user_id: str) -> LanguageAgent:
         """Get existing agent for session or create new one"""
         agent_key = f"{user_id}_{session_id}"
-        if agent_key not in active_agents:
-            logger.info(f"🆕 Creating new agent for session {session_id}, user {user_id}")
-            active_agents[agent_key] = LanguageAgent(session_id, user_id)
-        else:
+        
+        # If it exactly matches, return it.
+        if agent_key in active_agents:
             logger.info(f"♻️ Reusing existing agent for session {session_id}")
+            return active_agents[agent_key]
+            
+        # The mobile flutter app constantly creates new session IDs on every request,
+        # destroying the pending confirmation context. 
+        # Check if this user already has an active agent pending a response:
+        existing_user_agent = _get_agent_by_user(user_id)
+        if existing_user_agent and existing_user_agent.awaiting_user_response:
+            logger.warning(f"⚠️ Mobile App Session drift detected. User {user_id} rotated session {existing_user_agent.session_id} -> {session_id}. Transferring state.")
+            # Transfer the pending response state to a new agent 
+            # Or instead of creating a new agent, we can just return the old one?
+            # Creating a new agent is safer so we comply with DB session structures.
+            new_agent = LanguageAgent(session_id, user_id)
+            new_agent.awaiting_user_response = existing_user_agent.awaiting_user_response
+            new_agent.preferred_language = existing_user_agent.preferred_language
+            
+            # Clean up old agent
+            old_key = f"{user_id}_{existing_user_agent.session_id}"
+            if old_key in active_agents:
+                del active_agents[old_key]
+                
+            active_agents[agent_key] = new_agent
+            return new_agent
+
+        logger.info(f"🆕 Creating new agent for session {session_id}, user {user_id}")
+        active_agents[agent_key] = LanguageAgent(session_id, user_id)
         return active_agents[agent_key]
 
     async def handle_user_input(message: dict):
@@ -1193,7 +1378,8 @@ async def start_language_agent(broker):
                     agent.awaiting_user_response = None
                     agent.save_memory()
 
-        if not is_security_confirmation:
+        msg_type = getattr(message, 'message_type', None)
+        if not is_security_confirmation and msg_type not in (MessageType.CONFIRMATION_RESPONSE, MessageType.CLARIFICATION_RESPONSE):
             from agents.security.intent_classifier import classify_intent
             intent_result = classify_intent(input_text)
             
@@ -1206,7 +1392,7 @@ async def start_language_agent(broker):
                     session_id=session_id,
                     response_to=http_request_id,
                     payload={
-                        "question": "I'm not able to process that request. Blocked by security.",
+                        "question": "This operation is not permitted. The request was blocked because it involves a potentially harmful or unsafe action (such as bulk file operations, destructive commands, or blocked system libraries). If you believe this is a mistake, please rephrase your request.",
                         "context": "",
                         "device_type": device_type
                     }
@@ -1267,10 +1453,19 @@ async def start_language_agent(broker):
         if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
             if agent.awaiting_user_response.get("type") == "task_confirmation":
                 task_id = agent.awaiting_user_response.get("task_id")
-                orig_request = agent.awaiting_user_response.get("original_request")
+                draft_content = agent.awaiting_user_response.get("draft_content", "")
+                input_from = agent.awaiting_user_response.get("input_from")
                 agent.awaiting_user_response = None
                 
                 logger.info(f"✅ User answered task confirmation for {task_id}: {input_text}")
+
+                decision = classify_task_confirmation_reply(input_text)
+                if decision == "approved":
+                    exec_status = "success"
+                elif decision == "rejected":
+                    exec_status = "failed"
+                else:
+                    exec_status = "awaiting_confirmation"
                 
                 # Clear thinking step immediately
                 try:
@@ -1285,14 +1480,42 @@ async def start_language_agent(broker):
                     receiver=AgentType.COORDINATOR,
                     session_id=session_id,
                     task_id=task_id,
-                    response_to=orig_request or http_request_id,
+                    response_to=http_request_id,
                     payload={
-                        "status": "success",
+                        "status": exec_status,
                         "content": input_text,
-                        "details": f"User replied: {input_text}"
+                        "details": f"User replied: {input_text}",
+                        "metadata": {
+                            "confirmation_decision": decision,
+                            "user_critique": input_text if decision == "critique" else "",
+                            "draft_content": draft_content,
+                            "input_from": input_from,
+                        },
                     }
                 )
                 await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
+
+                # Resolve the WebSocket pending request for the user's confirmation input
+                if decision == "approved":
+                    ack_text = "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding..."
+                elif decision == "rejected":
+                    ack_text = "تم إيقاف المهمة بناءً على طلبك." if agent.preferred_language == "ar" else "Understood, I will stop this task."
+                else:
+                    ack_text = "ممتاز، سأعيد صياغتها بناءً على ملاحظتك." if agent.preferred_language == "ar" else "Got it, I will revise the draft based on your feedback."
+
+                ws_resolve_msg = AgentMessage(
+                    message_type=MessageType.TASK_RESPONSE,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=message.message_id,
+                    payload={
+                        "status": "processing",
+                        "response": ack_text,
+                        "user_language": agent.preferred_language
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
                 return
 
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
@@ -1515,8 +1738,8 @@ async def start_language_agent(broker):
             )
             await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
 
-    async def handle_execution_request(message):
-        """Handle execution request (task confirmation) from Coordinator."""
+    async def handle_confirmation_request(message):
+        """Handle confirmation request from Coordinator."""
         # Convert to AgentMessage if it's a dict
         if isinstance(message, dict):
             try:
@@ -1524,7 +1747,7 @@ async def start_language_agent(broker):
             except Exception:
                 return
 
-        if message.message_type != MessageType.EXECUTION_REQUEST:
+        if message.message_type != MessageType.CONFIRMATION_REQUEST:
             return
             
         payload_data = message.payload
@@ -1540,18 +1763,39 @@ async def start_language_agent(broker):
             
         agent = get_or_create_agent(session_id, user_id)
         
-        question = ai_prompt
+        is_ar = (agent.preferred_language == "ar")
+        question = "هل يجب أن أكمل؟\n\n" if is_ar else "I have drafted the content. Should I proceed?\n\n"
         if input_content:
-             question += f"\n\nContent:\n{input_content}"
+            try:
+                import json
+                parsed = json.loads(input_content)
+                if isinstance(parsed, dict):
+                    formatted_parts = []
+                    for k, v in parsed.items():
+                        title = k.replace("_", " ").title()
+                        if is_ar and title.upper() == "SUBJECT": title = "الموضوع"
+                        if is_ar and title.upper() == "BODY": title = "الرسالة"
+                        formatted_parts.append(f"{title}: {v}")
+                    
+                    question_hdr = "إليك المسودة. هل يجب المتابعة؟\n\n" if is_ar else "Here is the drafted content. Should I proceed?\n\n"
+                    question = question_hdr + "\n\n".join(formatted_parts)
+                else:
+                    question += f"Draft:\n{input_content}"
+            except Exception:
+                question += f"Content:\n{input_content}"
              
         agent.awaiting_user_response = {
             "type": "task_confirmation",
             "task_id": task_id,
-            "original_request": message.response_to
+            "original_request": message.response_to,
+            "draft_content": input_content,
+            "input_from": extra_params.get("input_from"),
         }
+        # If the mobile app recreates sessions, save immediately so a new session on the next turn can recover this via the DB
+        agent.save_memory()
         
         clarification_msg = AgentMessage(
-            message_type=MessageType.CLARIFICATION_REQUEST,
+            message_type=MessageType.CONFIRMATION_REQUEST,
             sender=AgentType.LANGUAGE,
             receiver=AgentType.LANGUAGE,
             session_id=session_id,
@@ -1564,13 +1808,13 @@ async def start_language_agent(broker):
         await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
         
         ws_msg = AgentMessage(
-            message_type=MessageType.CLARIFICATION_REQUEST,
+            message_type=MessageType.CONFIRMATION_REQUEST,
             sender=AgentType.LANGUAGE,
             receiver=AgentType.LANGUAGE,
             session_id=session_id,
             response_to=message.response_to,
             payload={
-                "ws_type": "clarification_needed",
+                "ws_type": "confirmation_needed",
                 "question": question
             }
         )
@@ -1578,7 +1822,7 @@ async def start_language_agent(broker):
         logger.info(f"🛑 Paused for user task confirmation: {task_id}")
 
     broker.subscribe(Channels.LANGUAGE_INPUT, handle_user_input)
-    broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_execution_request)
+    broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_confirmation_request)
     logger.info("✅ Language Agent started")
 
     while True:

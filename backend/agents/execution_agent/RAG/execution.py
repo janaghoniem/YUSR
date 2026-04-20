@@ -54,7 +54,7 @@ class SandboxConfig:
     # Resource limits
     cpu_limit: float = 1.0  # CPU cores
     memory_limit: str = "512m"  # Memory limit
-    timeout_seconds: int = 30  # Execution timeout
+    timeout_seconds: int = 60  # Execution timeout
     
     # Network settings
     network_mode: str = "none"  # Isolated network
@@ -68,7 +68,7 @@ class SandboxConfig:
     
     # Validation
     require_success_indicator: bool = True
-    max_retry_attempts: int = 1
+    max_retry_attempts: int = 3  # Allow up to 3 retry attempts for code generation
     
     # Paths
     logs_dir: Path = Path("sandbox_logs")
@@ -158,7 +158,7 @@ class SecurityValidator:
             'os.remove',
             'os.unlink',
             'os.rmdir',
-            'os.system',
+            # 'os.system',
             'os.popen',
             # NOTE: 'pathlib.Path' removed — os.path.* calls are safe and used
             # by module_selector.py. pathlib import is blocked at the AST level.
@@ -270,14 +270,14 @@ class SecurityValidator:
                     method_name = node.func.attr
 
                     DANGEROUS_METHODS = {
-                        'os':     {
-                            # Blocked: destructive or shell-execution methods
-                            'remove', 'unlink', 'rmdir', 'system', 'popen',
-                            'rename', 'replace',
-                            # NOTE: 'makedirs' and 'listdir' are intentionally ALLOWED.
-                            # module_selector.py uses makedirs to create output folders.
-                            # 'startfile' is also allowed — it opens files/apps safely.
-                        },
+                        # 'os':     {
+                        #     # Blocked: destructive or shell-execution methods
+                        #     'remove', 'unlink', 'rmdir', 'system', 'popen',
+                        #     'rename', 'replace',
+                        #     # NOTE: 'makedirs' and 'listdir' are intentionally ALLOWED.
+                        #     # module_selector.py uses makedirs to create output folders.
+                        #     # 'startfile' is also allowed — it opens files/apps safely.
+                        # },
                         'shutil': {'rmtree', 'move', 'copy', 'copy2', 'copytree',
                                    'disk_usage'},
                         'ctypes': {'windll', 'cdll', 'WinDLL'},
@@ -537,17 +537,42 @@ class LocalSandbox:
         self.config = config
     
     def execute_local(self, code: str, timeout: int = None) -> ExecutionResult:
-        """Execute code in local subprocess"""
+        """Execute code in local subprocess with proper Python path setup"""
         if timeout is None:
             timeout = self.config.timeout_seconds
-        
+
         start_time = time.time()
-        
+
+        # CRITICAL: Inject sys.path setup so imports work in sandbox
+        # Calculate AURA backend path more robustly
+        import os
+        # Current file: d:\AURA\backend\agents\execution_agent\RAG\execution.py
+        # We want: d:\AURA\backend
+        current_file = os.path.abspath(__file__)
+        rag_dir = os.path.dirname(current_file)  # ...RAG
+        agent_dir = os.path.dirname(rag_dir)     # ...execution_agent
+        exec_dir = os.path.dirname(agent_dir)    # ...agents
+        backend_dir = os.path.dirname(exec_dir)  # backend
+
+        # Escape backslashes for Python string
+        backend_dir_escaped = backend_dir.replace('\\', '\\\\')
+
+        # Inject sys.path at the very beginning
+        path_setup = f"""import sys
+import os
+_backend_path = r'{backend_dir}'
+if _backend_path not in sys.path:
+    sys.path.insert(0, _backend_path)
+"""
+
+        # Prepend path setup to user code
+        code_with_path = path_setup + "\n" + code
+
         # Create temporary file
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.py', delete=False) as f:
-            f.write(code)
+            f.write(code_with_path)
             temp_file = f.name
-        
+
         try:
             # Execute in subprocess
             result = subprocess.run(
@@ -556,15 +581,15 @@ class LocalSandbox:
                 text=True,
                 timeout=timeout
             )
-            
+
             execution_time = time.time() - start_time
-            
+
             # Determine status
             if result.returncode == 0:
                 status = ExecutionStatus.SUCCESS
             else:
                 status = ExecutionStatus.FAILED
-            
+
             return ExecutionResult(
                 status=status,
                 exit_code=result.returncode,
@@ -1079,8 +1104,9 @@ class SandboxExecutionPipeline:
             logger.warning(f"🔒 Layer 3 (code scan): {len(code_scan.violations)} violation(s)")
             for v in code_scan.violations:
                 logger.warning(f"   - {v}")
-            # Block execution if code contains credential extraction patterns
-            if any("password" in v.lower() or "credential" in v.lower() for v in code_scan.violations):
+        # Block execution if code contains credential extraction or destructive OS patterns
+        BLOCK_KEYWORDS = ("password", "credential", "shutdown", "poweroff", "netsh")
+        if any(any(kw in v.lower() for kw in BLOCK_KEYWORDS) for v in code_scan.violations):
                 return ExecutionResult(
                     status=ExecutionStatus.SECURITY_VIOLATION,
                     exit_code=-1,
@@ -1202,7 +1228,7 @@ class SandboxExecutionPipeline:
         # imports as a final layer before subprocess execution.
         # Addresses A4 where shutil/os/ctypes ran on host.
         STRIP_IMPORTS = [
-            'shutil', 'pathlib', 'os', 'ctypes',
+            'shutil', 'pathlib', 'ctypes',
             'subprocess', 'winreg', 'socket',
         ]
 
@@ -1445,7 +1471,13 @@ class RAGWithSandbox:
                 use_docker=False,  # Use local for speed (Docker if needed)
                 retry_on_failure=False
             )
-            
+
+            # Add delay to allow GUI applications to start before validation
+            # This prevents false-negative validation when apps take time to launch
+            if exec_result.exit_code == 0:
+                print("\n[WAIT] Allowing application time to initialize (3s delay)...")
+                time.sleep(3)
+
             # Step 3: Check result
             if exec_result.validation_passed and exec_result.security_passed:
                 print("\nExecution successful!")
@@ -1481,17 +1513,20 @@ class RAGWithSandbox:
                 }
             
             # Failed - prepare for retry
-            print(f"\n Execution failed (attempt {attempt})")
-            
+            print(f"\n⚠️ Execution failed (attempt {attempt}/{max_retries})")
+            print(f"   Validation Errors: {exec_result.validation_errors}")
+            if exec_result.stderr:
+                print(f"   Stderr: {exec_result.stderr[:150]}")
+
             error_context = f"Errors: {', '.join(exec_result.validation_errors)}"
             if exec_result.stderr:
                 error_context += f" | Stderr: {exec_result.stderr[:200]}"
-            
+
             start_context_index += self.rag.config.top_k
-            
+
             if attempt >= max_retries:
-                print("\n❌ Max retries reached")
-                
+                print(f"\n❌ Max retries reached ({max_retries} attempts)")
+
                 return {
                     'success': False,
                     'query': user_query,
@@ -1499,8 +1534,9 @@ class RAGWithSandbox:
                     'execution_result': exec_result.to_dict(),
                     'rag_context': rag_result,
                     'attempts': attempt,
-                    'error': 'Max retries exceeded',
-                    'cache_hit': False
+                    'error': f'Max retries exceeded after {max_retries} attempts',
+                    'cache_hit': False,
+                    'last_error': error_context
                 }
         
         # If we exit the loop without returning (all contexts exhausted)

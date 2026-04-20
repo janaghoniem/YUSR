@@ -56,11 +56,13 @@ class FaceAuth:
             
             # Detect face locations with higher accuracy model
             # Use CNN model if available (better accuracy), fallback to HOG
-            try:
-                face_locations = face_recognition.face_locations(rgb_img, model="cnn")
-            except:
-                face_locations = face_recognition.face_locations(rgb_img, model="hog")
-            
+            # try:
+            #     face_locations = face_recognition.face_locations(rgb_img, model="cnn")
+            # except:
+            #     face_locations = face_recognition.face_locations(rgb_img, model="hog")
+            # Use HOG model — reliable on CPU servers without CUDA dlib
+            # CNN requires dlib compiled with CUDA; HOG works everywhere
+            face_locations = face_recognition.face_locations(rgb_img, model="hog")
             if not face_locations:
                 return None, "No face detected in the image"
             
@@ -154,6 +156,35 @@ class FaceAuth:
         
         return encoding
     
+    # def store_face_data(self, user_id, username, face_encoding):
+    #     """Store face encoding securely in MongoDB"""
+    #     try:
+    #         # Encrypt the encoding before storage
+    #         encrypted_data = self._encrypt_encoding(face_encoding)
+            
+    #         face_doc = {
+    #             "user_id": user_id,
+    #             "username": username,
+    #             "face_encoding_data": encrypted_data,
+    #             "created_at": datetime.utcnow().isoformat(),
+    #             "updated_at": datetime.utcnow().isoformat(),
+    #             "auth_type": "face"
+    #         }
+            
+    #         # Upsert (update if exists, insert if not)
+    #         result = self.face_data_col.update_one(
+    #             {"user_id": user_id},
+    #             {"$set": face_doc},
+    #             upsert=True
+    #         )
+            
+    #         logger.info(f"Face data stored for user: {username}")
+    #         return True, "Face biometrics registered successfully"
+            
+    #     except Exception as e:
+    #         logger.error(f"Failed to store face data: {e}")
+    #         return False, f"Failed to store face data: {str(e)}"
+    
     def store_face_data(self, user_id, username, face_encoding):
         """Store face encoding securely in MongoDB"""
         try:
@@ -169,6 +200,8 @@ class FaceAuth:
                 "auth_type": "face"
             }
             
+            logger.info(f"💾 Storing face data for user_id={user_id}, username={username}")
+            
             # Upsert (update if exists, insert if not)
             result = self.face_data_col.update_one(
                 {"user_id": user_id},
@@ -176,13 +209,23 @@ class FaceAuth:
                 upsert=True
             )
             
-            logger.info(f"Face data stored for user: {username}")
+            logger.info(f"✅ Face data stored — matched={result.matched_count}, modified={result.modified_count}, upserted_id={result.upserted_id}")
+            
+            # Immediate read-back verification
+            saved = self.face_data_col.find_one({"user_id": user_id})
+            if saved:
+                logger.info(f"✅ Verified in DB: username={saved.get('username')}, has_encoding={bool(saved.get('face_encoding_data'))}")
+            else:
+                logger.error(f"❌ Read-back FAILED — document not found after upsert for user_id={user_id}")
+                return False, "Face data failed to persist after write"
+            
             return True, "Face biometrics registered successfully"
             
         except Exception as e:
-            logger.error(f"Failed to store face data: {e}")
+            logger.error(f"❌ Failed to store face data: {e}", exc_info=True)
             return False, f"Failed to store face data: {str(e)}"
-    
+
+
     def verify_face(self, username, current_face_encoding):
         """
         Compare current face encoding with stored face encoding

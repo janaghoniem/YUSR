@@ -24,6 +24,7 @@ google-generativeai>=0.8.3
 langchain_groq
 # Cerebras API (replaces Groq for main LLM calls)
 cerebras-cloud-sdk
+mistralai==1.9.11
 # google-ai-generativelanguage is now handled by the consolidated genai SDK
 
 # Google API dependencies
@@ -81,6 +82,12 @@ pillow>=9.0.0
 opencv-python>=4.7.0
 ultralytics>=8.0.0  # For YOLO model
 gtts
+edge-tts
+sounddevice
+webrtcvad
+audioop-lts
+vosk
+pyinstaller
 
 # Anthropic
 anthropic
@@ -106,3 +113,7 @@ bezier>=2024.1.1
 scikit-image>=0.21.0
 cryptography>=41.0.0
 2captcha-python>=1.2.0
+uiautomator2
+adbutils
+apkutils
+adb

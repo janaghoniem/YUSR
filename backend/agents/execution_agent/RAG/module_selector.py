@@ -598,6 +598,131 @@ Key python-pptx patterns:
 AVOID: subprocess, pyautogui, PowerPoint UI, mouse/keyboard events
 """
     ),
+    "file": ModuleGuidance(
+        module_name="File",
+        library_name="file_agent (smart file search with fuzzy matching)",
+        library_import="try:\n    from agents.execution_agent.RAG.file_agent import find_file, open_file\nexcept ImportError:\n    from file_agent import find_file, open_file",
+        keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file", "create file", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"],
+        guidance="""
+Use the file_agent module for fast, intelligent file operations with fuzzy matching.
+
+SETUP:
+try:
+    from agents.execution_agent.RAG.file_agent import find_file, open_file
+except ImportError:
+    from file_agent import find_file, open_file
+import os
+
+============ KEY FEATURES ============
+✅ Fuzzy matching - "flutter quiz" matches "flutter_quiz_answers.pdf"
+✅ Caching - first search indexes files, subsequent searches <0.5s
+✅ Smart fallback - uses system search if cached index doesn't match
+✅ Structured responses - JSON with status, path, confidence, suggestions
+
+============ RETURN FORMAT ============
+All find_file() calls return a dict:
+
+Success (single match):
+    {"status": "found", "path": "C:\\..\\file.pdf", "confidence": 0.92}
+
+Multiple candidates (task is ambiguous):
+    {"status": "multiple", "paths": [
+        {"path": "C:\\..\\report_2024.pdf", "confidence": 0.88},
+        {"path": "C:\\..\\report_draft.pdf", "confidence": 0.81}
+    ], "count": 2}
+
+Not found:
+    {"status": "not_found", "suggestions": ["Did you mean: report_backup.pdf?"]}
+
+============ OPERATION TYPES ============
+
+[1] OPEN FILE DIRECTLY — task says "open", "launch", "view" + filename:
+    result = find_file("flutter_quiz_answers.docx")
+    if result["status"] == "found":
+        success = open_file("flutter_quiz_answers.docx")
+        if success:
+            print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Multiple matches - use first or ask for clarification
+        print("File search returned multiple results, using first match")
+        success = open_file(result["paths"][0]["path"])
+        if success:
+            print("EXECUTION_SUCCESS")
+    else:
+        print("EXECUTION_FAILED: File not found")
+
+[2] GET FILE PATH (for downstream tasks) — task says "find", "locate", "where is":
+    result = find_file("report.pdf")
+    if result["status"] == "found":
+        print(f"[FILE]: {result['path']}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Return first match to downstream task
+        print(f"[FILE]: {result['paths'][0]['path']}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[3] SEARCH MULTIPLE FILES — task says "search", "find all", "list":
+    result = find_file("*.txt")  # or search for pattern
+    if result["status"] == "found":
+        print(f"[FOUND]: {result['path']}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        for match in result["paths"]:
+            print(f"[FOUND]: {match['path']}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("No files found")
+
+[4] READ FILE CONTENTS — task says "read", "show contents", "display":
+    result = find_file("config.txt")
+    if result["status"] == "found":
+        path = result["path"]
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        print(content)  # OUTPUT DATA FIRST
+        print(f"[FILE]: {path}")
+        print("EXECUTION_SUCCESS")
+    elif result["status"] == "multiple":
+        # Read first match
+        path = result["paths"][0]["path"]
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        print(content)
+        print(f"[FILE]: {path}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[5] DELETE FILE — task says "delete", "remove", "erase":
+    result = find_file("old_backup.zip")
+    if result["status"] == "found":
+        os.remove(result["path"])
+        print(f"[DELETED]: {result['path']}")
+        print("EXECUTION_SUCCESS")
+    else:
+        print("File not found")
+
+[6] CREATE FILE — task says "create", "new", "make":
+    save_dir = os.path.expanduser('~\\\\Documents')
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, "new_file.txt")
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write("content")
+    print(f"[FILE]: {save_path}")
+    print("EXECUTION_SUCCESS")
+
+============ KEY POINTS ============
+✅ ALWAYS check result["status"] before accessing path/paths
+✅ Fuzzy matching means you can use partial queries: "flutter quiz" not just "flutter_quiz_answers.docx"
+✅ If "multiple" status, use first match or ask for clarification
+✅ open_file() outputs [FILE]: <path> automatically
+✅ OUTPUT DATA BEFORE status messages (critical for pipelines)
+✅ Use [FILE]: marker for downstream tasks
+✅ Cache automatically refreshes after 24 hours, manual refresh via find_file(query, "full")
+"""
+    ),
 }
 
 
@@ -766,6 +891,11 @@ if __name__ == "__main__":
         "Generate a PowerPoint presentation with 5 slides",
         "Write a Python script using pyautogui",
         "Open file explorer and navigate to Documents",
+        "Open the file named API ENDPOINTS.txt",
+        "Find and open my resume.pdf",
+        "Search for all Excel files on Desktop",
+        "Read the contents of config.txt",
+        "Delete the old backup.zip file",
     ]
 
     for i, task in enumerate(test_tasks, 1):

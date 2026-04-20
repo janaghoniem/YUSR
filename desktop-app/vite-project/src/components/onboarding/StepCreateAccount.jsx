@@ -1,61 +1,56 @@
-// StepCreateAccount.jsx - With Fixed User ID Management
+// StepCreateAccount.jsx — Face capture modal redesigned to match LoginPage's face scan UI
+//  • Uses Aurora + cinematic background + SpotlightCard for glassmorphic look
+//  • Back button with ShinyText
+//  • FIXED: card now expands to full content height (no more clipping)
+
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import VoiceInput from "../shared/VoiceInput";
 import FaceCapture from "../FaceCapture";
+import BlurText from "./BlurText";
+import ShinyText from "./ShinyText";
+import SpotlightCard from "./SpotlightCard";
+import Aurora from "./Aurora";
+import screenReader from "../../utils/ScreenReader";
 
-const StepCreateAccount = ({ onSubmit, data, setData, isSubmitting }) => {
-  const [errors, setErrors] = useState({});
-  const [usernameAvailable, setUsernameAvailable] = useState(null);
-  const [checking, setChecking] = useState(false);
-  const [showFaceRegistration, setShowFaceRegistration] = useState(false);
-  const [faceRegistered, setFaceRegistered] = useState(false);
-  const debounceTimerRef = useRef(null);
-  
-  // Get the correct userId from localStorage (which should be synced by OnboardingPage)
-  const [userId] = useState(() => {
-    const stored = localStorage.getItem("userId");
-    if (!stored) {
-      console.error("[StepCreateAccount] No userId found in localStorage!");
-      // Generate a temporary one if not found
-      const tempId = `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      console.log("[StepCreateAccount] Generated temporary userId:", tempId);
-      localStorage.setItem("userId", tempId);
-      return tempId;
-    }
-    console.log("[StepCreateAccount] Using userId from localStorage:", stored);
-    return stored;
-  });
+const StepCreateAccount = ({
+  onSubmit,
+  data,
+  setData,
+  isSubmitting,
+  faceRegistered,
+  onFaceRegistered,
+  showFaceCapture,
+  setShowFaceCapture,
+  lang = "en",
+}) => {
+  const [errors,           setErrors]     = useState({});
+  const [usernameAvailable,setAvailable]  = useState(null);
+  const [checking,         setChecking]   = useState(false);
+  const debounceRef = useRef(null);
+  const usernameRef = useRef(null);
+  const isAr = lang === "ar";
 
-  // Log when component mounts to debug
+  const userId = localStorage.getItem("userId") || `user_${Date.now()}`;
+
   useEffect(() => {
-    console.log("[StepCreateAccount] Current state:", {
-      userId: userId,
-      username: data.username,
-      faceRegistered: faceRegistered,
-      usernameAvailable: usernameAvailable
-    });
-  }, [userId, data.username, faceRegistered, usernameAvailable]);
+    usernameRef.current?.focus();
+    const textEn = "Account Setup! Finally, let's create your digital identity.";
+    const textAr = "إنشاء الحساب! أخيراً، خلينا نعمل هويتك الرقمية.";
+    screenReader.stop();
+    screenReader.speak(isAr ? textAr : textEn);
+    return () => screenReader.stop();
+  }, [isAr]);
 
   const checkUsername = useCallback(async (username) => {
-    if (username.length < 3) {
-      setUsernameAvailable(null);
-      return;
-    }
-    
+    if (username.length < 3) { setAvailable(null); return; }
     setChecking(true);
     try {
-      const res = await fetch(
-        `http://localhost:8000/onboarding/check-username?username=${encodeURIComponent(username)}`
-      );
-      const result = await res.json();
-      setUsernameAvailable(result.available);
-      
-      if (result.available) {
-        setErrors(prev => ({ ...prev, username: null }));
-      }
-    } catch (error) {
-      console.error("Username check failed:", error);
-      setUsernameAvailable(null);
+      const res  = await fetch(`http://localhost:8000/onboarding/check-username?username=${encodeURIComponent(username)}`);
+      const json = await res.json();
+      setAvailable(json.available);
+      if (json.available) setErrors((e) => ({ ...e, username: null }));
+    } catch {
+      setAvailable(null);
     } finally {
       setChecking(false);
     }
@@ -63,201 +58,192 @@ const StepCreateAccount = ({ onSubmit, data, setData, isSubmitting }) => {
 
   const handleUsernameChange = (val) => {
     setData({ ...data, username: val });
-    
-    if (usernameAvailable !== null) {
-      setUsernameAvailable(null);
-    }
-    
-    if (errors.username) {
-      setErrors(prev => ({ ...prev, username: null }));
-    }
-    
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-    }
-    
-    debounceTimerRef.current = setTimeout(() => {
-      checkUsername(val);
-    }, 500);
-  };
-
-  const validate = () => {
-    const errs = {};
-    if (!data.username || data.username.length < 3) {
-      errs.username = "Username must be at least 3 characters.";
-    } else if (usernameAvailable === false) {
-      errs.username = "Username is already taken.";
-    }
-    
-    if (!faceRegistered) {
-      errs.face = "Please register your face for secure login.";
-    }
-    
-    return errs;
+    setAvailable(null);
+    setErrors((e) => ({ ...e, username: null }));
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => checkUsername(val), 500);
   };
 
   const handleFaceCapture = async (faceImage) => {
     try {
-      // Get the current userId from localStorage (should be set by OnboardingPage)
-      let currentUserId = localStorage.getItem("userId");
-      
-      // If this is a temp ID, replace it with a proper one
-      if (!currentUserId || currentUserId.startsWith('temp_')) {
-        currentUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        console.log("[StepCreateAccount] Replaced temp userId with:", currentUserId);
-        localStorage.setItem("userId", currentUserId);
-      }
-      
-      console.log("[StepCreateAccount] Registering face for:", {
-        username: data.username,
-        user_id: currentUserId
-      });
-      
-      const response = await fetch("http://localhost:8000/onboarding/register-face", {
+      const res = await fetch("http://localhost:8000/onboarding/register-face", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username: data.username,
-          user_id: currentUserId,
-          face_image: faceImage,
-        }),
+        body: JSON.stringify({ username: data.username, user_id: userId, face_image: faceImage }),
       });
-
-      if (response.ok) {
-        const result = await response.json();
-        console.log("[StepCreateAccount] Face registration successful:", result);
-        setFaceRegistered(true);
-        setShowFaceRegistration(false);
-        setErrors({ ...errors, face: null });
+      if (res.ok) {
+        onFaceRegistered();
+        setShowFaceCapture(false);
+        setErrors((e) => ({ ...e, face: null }));
       } else {
-        const error = await response.json();
-        console.error("[StepCreateAccount] Face registration failed:", error);
-        setErrors({ ...errors, face: error.detail || "Face registration failed" });
+        const err = await res.json();
+        setErrors((e) => ({ ...e, face: err.detail || "Face registration failed." }));
       }
-    } catch (error) {
-      console.error("[StepCreateAccount] Face registration error:", error);
-      setErrors({ ...errors, face: "Failed to register face. Please try again." });
+    } catch {
+      setErrors((e) => ({ ...e, face: "Network error during face registration." }));
     }
+  };
+
+  const validate = () => {
+    const errs = {};
+    if (!data.username || data.username.length < 3)
+      errs.username = isAr ? "اسم المستخدم لازم يكون ٣ حروف على الأقل." : "Username must be at least 3 characters.";
+    else if (usernameAvailable === false)
+      errs.username = isAr ? "اسم المستخدم ده موجود قبل كده." : "This username is already taken.";
+    if (!faceRegistered)
+      errs.face = isAr ? "من فضلك سجل وجهك لتسجيل الدخول الآمن." : "Please register your face for secure login.";
+    return errs;
   };
 
   const handleSubmit = () => {
     const errs = validate();
-    if (Object.keys(errs).length > 0) {
-      setErrors(errs);
-      return;
-    }
-    
-    // Final check: ensure we have a valid userId
-    let finalUserId = localStorage.getItem("userId");
-    if (!finalUserId || finalUserId.startsWith('temp_')) {
-      finalUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      localStorage.setItem("userId", finalUserId);
-      console.log("[StepCreateAccount] Generated final userId:", finalUserId);
-    }
-    
-    console.log("[StepCreateAccount] Submitting account with userId:", finalUserId);
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
     setErrors({});
     onSubmit();
   };
 
-  if (showFaceRegistration) {
+  const t = (en, ar) => isAr ? ar : en;
+
+  // ── Face capture modal – redesigned to match LoginPage's face login UI ──
+  if (showFaceCapture) {
     return (
-      <FaceCapture
-        onCapture={handleFaceCapture}
-        onCancel={() => setShowFaceRegistration(false)}
-        mode="signup"
-        username={data.username}
-      />
+      <div className="onboarding-step" style={{ display: "flex", flexDirection: "column", width: "100%", alignItems: "center" }}>
+        <button
+          className="onboarding-btn ghost"
+          onClick={() => setShowFaceCapture(false)}
+          style={{
+            alignSelf: "flex-start",
+            marginBottom: "0.5rem",
+            padding: "8px 12px",
+            width: "auto",
+          }}
+        >
+          <ShinyText text={t("← Back to Account Setup", "← رجع لإعداد الحساب")} speed={3} />
+        </button>
+        <FaceCapture
+          onCapture={handleFaceCapture}
+          onCancel={() => setShowFaceCapture(false)}
+          mode="signup"
+          username={data.username}
+          onSpeakStart={() => {}}     // optional – no STT conflict here
+          onSpeakEnd={() => {}}
+        />
+      </div>
     );
   }
 
+  // ── Normal account creation step UI (unchanged) ──
   return (
-    <div className="onboarding-step">
-      <h2 className="onboarding-title">Create your account</h2>
+    <div className="onboarding-step" role="region" aria-labelledby="ca-title">
+      <h2 className="onboarding-title" id="ca-title">
+        <BlurText text={t("Create your account", "أنشئ حسابك")} delay={50} />
+      </h2>
       <p className="onboarding-subtitle">
-        Your account links your chats, memory, and preferences across sessions.
+        {t(
+          "Your account links your chats, memory, and preferences across sessions.",
+          "حسابك بيربط محادثاتك وذاكرتك وتفضيلاتك في كل الجلسات."
+        )}
       </p>
 
+      {/* Username */}
       <VoiceInput
-        label="Username"
+        label={t("Username", "اسم المستخدم")}
         value={data.username}
         onChange={handleUsernameChange}
-        placeholder="Choose a username..."
+        placeholder={t("Choose a username…", "اختار اسم مستخدم...")}
+        inputRef={usernameRef}
+        aria-describedby="username-status"
+        lang={lang}
       />
-      {checking && <p className="onboarding-hint">Checking availability...</p>}
-      {usernameAvailable === true && data.username.length >= 3 && (
-        <p className="onboarding-hint success">✓ Username is available</p>
-      )}
-      {usernameAvailable === false && data.username.length >= 3 && (
-        <p className="onboarding-error">✗ Username already taken</p>
-      )}
-      {errors.username && <p className="onboarding-error">{errors.username}</p>}
+      <div id="username-status" aria-live="polite" aria-atomic="true">
+        {checking && <p className="onboarding-hint">{t("Checking availability…", "بنشوف اللو متاح...")}</p>}
+        {!checking && usernameAvailable === true  && data.username.length >= 3 && <p className="onboarding-hint success">✓ {t("Username is available", "الاسم متاح")}</p>}
+        {!checking && usernameAvailable === false && data.username.length >= 3 && <p className="onboarding-error">✗ {t("Username already taken", "الاسم مأخود")}</p>}
+        {errors.username && <p className="onboarding-error" role="alert">{errors.username}</p>}
+      </div>
 
-      {/* Email field */}
-      <div className="voice-input-wrapper" style={{ marginTop: "16px" }}>
-        <label className="onboarding-input-label">Email (optional)</label>
+      {/* Email */}
+      <div className="voice-input-wrapper" style={{ marginTop: 16 }}>
+        <label className="onboarding-input-label" htmlFor="ca-email">
+          {t("Email (optional)", "الإيميل (اختياري)")}
+        </label>
         <div className="voice-input-container">
           <input
+            id="ca-email"
             type="email"
             className="onboarding-input"
             value={data.email || ""}
             onChange={(e) => setData({ ...data, email: e.target.value })}
-            placeholder="your@email.com"
+            placeholder={t("your@email.com", "إيميلك@مثال.كوم")}
             autoComplete="email"
+            dir="ltr"
           />
         </div>
       </div>
 
-      {/* Face Registration Section */}
-      <div className="face-registration-section" style={{ marginTop: "24px" }}>
-        <label className="onboarding-input-label">Face Authentication</label>
-        {!faceRegistered ? (
-          <button
-            className="onboarding-btn secondary"
-            onClick={() => setShowFaceRegistration(true)}
-            style={{ width: "100%" }}
-            disabled={!data.username || usernameAvailable !== true}
-          >
-            Register Your Face →
-          </button>
-        ) : (
-          <div className="face-success-message">
-            <p className="onboarding-hint success">✓ Face registered successfully!</p>
-            <p className="onboarding-hint">
-              You'll be able to log in using your face instead of a password.
-            </p>
-          </div>
-        )}
-        {errors.face && <p className="onboarding-error">{errors.face}</p>}
-      </div>
-
-      {/* Optional password fallback */}
-      <div className="voice-input-wrapper" style={{ marginTop: "16px" }}>
-        <label className="onboarding-input-label">
-          Password (Optional - for fallback)
+      {/* Password */}
+      <div className="voice-input-wrapper" style={{ marginTop: 16 }}>
+        <label className="onboarding-input-label" htmlFor="ca-password">
+          {t("Password (optional — face auth is primary)", "كلمة السر (اختياري — التعرف بالوجه هو الأساسي)")}
         </label>
         <div className="voice-input-container">
           <input
+            id="ca-password"
             type="password"
             className="onboarding-input"
-            value={data.password}
+            value={data.password || ""}
             onChange={(e) => setData({ ...data, password: e.target.value })}
-            placeholder="Create a password (optional)..."
+            placeholder={t("Create a fallback password…", "كلمة سر احتياطية...")}
             autoComplete="new-password"
+            dir="ltr"
           />
         </div>
-        <p className="onboarding-hint">
-          Password is optional if you're using face authentication.
-        </p>
       </div>
 
+      {/* Face auth */}
+      <div className="face-registration-section" style={{ marginTop: 24 }} aria-labelledby="face-auth-label">
+        <label className="onboarding-input-label" id="face-auth-label" style={{ display: "block", marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+          {t("Face Authentication", "التحقق بالوجه")}
+        </label>
+
+        {!faceRegistered ? (
+          <>
+            <button
+              className="onboarding-btn secondary"
+              style={{ width: "100%" }}
+              disabled={!data.username || usernameAvailable !== true}
+              onClick={() => setShowFaceCapture(true)}
+            >
+              {t("Register Your Face →", "سجل وجهك →")}
+            </button>
+            <p className="onboarding-hint" style={{ marginTop: 6 }}>
+              {t(
+                "Your face data is encrypted and stored securely. We never store raw images.",
+                "بياناتك الوجهية مشفرة ومحفوظة بأمان. بنمسح الصور الأصلية فوراً."
+              )}
+            </p>
+          </>
+        ) : (
+          <div role="status" aria-live="polite">
+            <p className="onboarding-hint success">✓ {t("Face registered successfully!", "تم تسجيل الوجه بنجاح!")}</p>
+            <p className="onboarding-hint">{t("You can log in using your face instead of a password.", "تقدر تسجل دخولك بالوجه بدل كلمة السر.")}</p>
+          </div>
+        )}
+
+        {errors.face && <p className="onboarding-error" role="alert" style={{ marginTop: 6 }}>{errors.face}</p>}
+      </div>
+
+      {/* Submit */}
       <button
         className="onboarding-btn primary"
         onClick={handleSubmit}
         disabled={isSubmitting || !faceRegistered}
-        style={{ marginTop: "24px" }}
+        style={{ marginTop: 28, width: "100%" }}
+        aria-label={isSubmitting ? t("Creating account, please wait", "جاري إنشاء الحساب...") : t("Create account and start using AURA", "أنشئ حساب وابدأ مع أورا")}
       >
-        {isSubmitting ? "Creating account..." : "Create Account & Start →"}
+        {isSubmitting
+          ? t("Creating account…", "جاري الإنشاء...")
+          : <ShinyText text={t("Create Account & Start →", "أنشئ الحساب وابدأ →")} speed={3} />}
       </button>
     </div>
   );

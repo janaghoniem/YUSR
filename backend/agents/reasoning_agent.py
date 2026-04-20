@@ -2,11 +2,13 @@ import os
 import asyncio
 import logging
 import json
+import re
 from typing import Dict, Any
 from dotenv import load_dotenv
 
-# Groq & LangChain Imports
+# Model & LangChain Imports
 from langchain_groq import ChatGroq
+import requests
 
 # Project Utilities
 from agents.utils.protocol import Channels, AgentMessage, MessageType, AgentType
@@ -17,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 REASONING_MODEL = "llama-3.3-70b-versatile"
+MISTRAL_REASONING_MODEL = os.getenv("MISTRAL_MODEL", "mistral-medium-latest")
 
 
 def _build_personalization_instruction(user_profile: Dict[str, Any], target_lang: str) -> str:
@@ -76,6 +80,10 @@ def _build_personalization_instruction(user_profile: Dict[str, Any], target_lang
     if not lines:
         return ""
 
+    user_name = user_profile.get("username", "") or user_profile.get("name", "")
+    if user_name:
+        lines.append(f"The user's name is {user_name}. Always act on their behalf when generating content (e.g. sign off emails using their name).")
+
     block = "\n".join(lines)
     return f"\nPERSONALIZATION (adapt output accordingly):\n{block}\n"
 
@@ -86,7 +94,8 @@ class ReasoningAgent:
             model=REASONING_MODEL,
             temperature=0.2,
             groq_api_key=GROQ_API_KEY
-        )
+        ) if GROQ_API_KEY else None
+        self.mistral_api_key = MISTRAL_API_KEY  # Store API key for REST calls
 
         self.base_system_prompt = """You are the REASONING AGENT – the cognitive brain of the AURA multi-agent system.
 
@@ -132,6 +141,158 @@ STRICT OPERATIONAL RULES:
 
 You are an internal reasoning component, not a user-facing assistant.
 Your goal is correctness, clarity, and usefulness to the system."""
+
+    @staticmethod
+    def _extract_mistral_text(response_obj: Any) -> str:
+        try:
+            choices = getattr(response_obj, "choices", None) or []
+            if not choices:
+                return str(response_obj)
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", "") if message is not None else ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(getattr(item, "text", item)))
+                content = "".join(parts)
+            return str(content or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """Extract the first balanced JSON object substring from text."""
+        if not text:
+            return ""
+        start = text.find("{")
+        if start == -1:
+            return ""
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return ""
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove chat-style markdown artifacts so downstream agents receive plain text."""
+        if not text:
+            return ""
+        cleaned = str(text)
+        cleaned = re.sub(r"```[a-zA-Z]*", "", cleaned)
+        cleaned = cleaned.replace("```", "")
+        cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"__(.*?)__", r"\1", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+        cleaned = re.sub(r"^[ \t]*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = cleaned.replace("*", "")
+        cleaned = cleaned.replace("_", "")
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
+    @classmethod
+    def _sanitize_result_content(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: cls._sanitize_result_content(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [cls._sanitize_result_content(v) for v in value]
+        if isinstance(value, str):
+            return cls._strip_markdown(value)
+        return value
+
+    @staticmethod
+    def _extract_email_field(text: str, field: str) -> str:
+        """Best-effort extractor for malformed JSON email payloads (handles triple-quoted BODY)."""
+        if not text:
+            return ""
+        pattern = rf'"{field}"\s*:\s*("""|"|\')(.*?)\1'
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if not match:
+            return ""
+        return match.group(2).strip()
+
+    @classmethod
+    def _build_email_fallback_json(cls, raw: str) -> Dict[str, Any]:
+        subject = cls._extract_email_field(raw, "SUBJECT")
+        body = cls._extract_email_field(raw, "BODY")
+        if not subject and not body:
+            return {}
+        return {
+            "result": {
+                "SUBJECT": cls._strip_markdown(subject),
+                "BODY": cls._strip_markdown(body),
+            },
+            "metadata": {
+                "confidence": 0.6,
+                "notes": "Recovered structured email content from malformed model output",
+            },
+        }
+
+    async def _invoke_with_fallback(self, prompt: str) -> str:
+        if self.llm:
+            try:
+                response = await self.llm.ainvoke(prompt)
+                return response.content if hasattr(response, "content") else str(response)
+            except Exception as groq_err:
+                logger.warning(f"⚠️ Groq reasoning call failed, trying Mistral fallback: {groq_err}")
+        else:
+            logger.warning("⚠️ GROQ_API_KEY missing for reasoning agent; trying Mistral fallback")
+
+        if not self.mistral_api_key:
+            logger.error("❌ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+            return ""
+
+        try:
+            # Use REST API directly instead of client library
+            url = "https://api.mistral.ai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.mistral_api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": MISTRAL_REASONING_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+            }
+            
+            response = await asyncio.to_thread(
+                lambda: requests.post(url, json=payload, headers=headers, timeout=30)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                text = result['choices'][0]['message']['content']
+                if text:
+                    logger.info(f"✅ Reasoning fallback succeeded with Mistral ({MISTRAL_REASONING_MODEL})")
+                return text
+            else:
+                logger.error(f"❌ Mistral API error: {response.status_code} - {response.text}")
+                return ""
+        except Exception as mistral_err:
+            logger.error(f"❌ Mistral reasoning fallback failed: {mistral_err}")
+            return ""
 
     def _build_system_prompt(self, user_profile: Dict[str, Any], target_lang: str) -> str:
         """Combine base system prompt with dynamic personalization instruction."""
@@ -222,8 +383,14 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     f"\n\nPlease respond with valid JSON only."
                 )
 
-            response = await self.llm.ainvoke(full_prompt)
-            response_text = response.content if hasattr(response, 'content') else str(response)
+            response_text = await self._invoke_with_fallback(full_prompt)
+            if not response_text:
+                return {
+                    "task_id": task_payload.get("task_id"),
+                    "status": "failed",
+                    "error": "Both Groq and Mistral reasoning calls failed",
+                    "content": "",
+                }
             logger.info(f"🤖 REASONING RESPONSE ({len(response_text)} chars): {response_text[:200]}...")
 
             # ── Strip markdown code fences before parsing ──────────────────────────
@@ -242,9 +409,15 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     inner_lines = inner_lines[:-1]
                 clean_response = "\n".join(inner_lines).strip()
 
+            # Keep only the first JSON object if any prose wrappers leaked in.
+            extracted_json = self._extract_first_json_object(clean_response)
+            if extracted_json:
+                clean_response = extracted_json
+
             # Parse JSON response
             try:
                 parsed_response = json.loads(clean_response)
+                parsed_response = self._sanitize_result_content(parsed_response)
                 result_content = parsed_response.get("result", parsed_response)
                 if isinstance(result_content, (dict, list)):
                     result_content = json.dumps(result_content, ensure_ascii=False)
@@ -259,8 +432,18 @@ Your goal is correctness, clarity, and usefulness to the system."""
                     "metadata": parsed_response.get("metadata", {})
                 }
             except json.JSONDecodeError:
-                # Last resort: if still not parseable, return failed status.
-                # This prevents downstream tasks from receiving raw unstructured data instead of expected JSON.
+                # Last resort: recover common malformed email JSON payloads from fallback model output.
+                recovered = self._build_email_fallback_json(clean_response)
+                if recovered:
+                    logger.warning("⚠️ Recovered malformed reasoning JSON using email field extractor")
+                    recovered = self._sanitize_result_content(recovered)
+                    return {
+                        "task_id": task_payload.get("task_id"),
+                        "status": "success",
+                        "content": json.dumps(recovered.get("result", {}), ensure_ascii=False),
+                        "metadata": recovered.get("metadata", {}),
+                    }
+
                 logger.warning("⚠️ Response was not valid JSON, returning failure")
                 return {
                     "task_id": task_payload.get("task_id"),
@@ -282,7 +465,7 @@ Your goal is correctness, clarity, and usefulness to the system."""
 
 async def start_reasoning_agent():
     agent = ReasoningAgent()
-    logger.info(f"✅ Reasoning Agent (Groq) started using {REASONING_MODEL}")
+    logger.info(f"✅ Reasoning Agent started (Groq primary: {REASONING_MODEL}, Mistral fallback: {MISTRAL_REASONING_MODEL})")
 
     async def handle_reasoning_request(message: AgentMessage):
         """

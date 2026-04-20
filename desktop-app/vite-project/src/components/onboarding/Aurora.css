@@ -1,0 +1,31 @@
+.aurora-bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
+  background: 
+    radial-gradient(ellipse at 100% 0%, rgba(255, 61, 154, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 0% 100%, rgba(255, 61, 154, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(255, 61, 154, 0.03) 0%, transparent 60%);
+  animation: aurora-shift 15s ease-in-out infinite alternate;
+  pointer-events: none;
+  opacity: 0.6;
+  mix-blend-mode: screen;
+}
+
+@keyframes aurora-shift {
+  0% {
+    background-position: 0% 50%;
+    transform: scale(1);
+  }
+  50% {
+    background-position: 100% 50%;
+    transform: scale(1.1);
+  }
+  100% {
+    background-position: 0% 50%;
+    transform: scale(1);
+  }
+}

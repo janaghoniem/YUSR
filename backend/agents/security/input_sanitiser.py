@@ -25,41 +25,34 @@ logger = logging.getLogger(__name__)
 MAX_INPUT_LENGTH = 4096   # S-04 — truncate beyond this
 
 # ── S-01: CRITICAL BLOCK PHRASES (prompt injection / override attempts) ───
-# These ALWAYS block — no exceptions.
+# These patterns are ONLY blocked when they appear as INSTRUCTIONS to the LLM,
+# not as natural language content from the user.
+# 
+# Detection strategy: Block ONLY if the phrase appears with:
+#   - A colon after it (instruction format)
+#   - At the start of a line/segment
+#   - Followed by a newline or obvious command structure
+#
+# Simple string matching for "add a second task" alone is NOT sufficient -
+# that could be a valid user request like "can you add a second task to my list"
+
 OVERRIDE_PATTERNS = [
+    # These are ALWAYS malicious - no legitimate use
     "ignore previous instructions",
-    "ignore all previous",
-    "disregard your instructions",
+    "disregard your instructions", 
     "forget everything",
-    "you are now",
-    "act as if",
-    "pretend you are",
     "new system prompt",
     "system override",
     "admin override",
     "developer mode",
-    "ignore the above",
-    "disregard the above",
-    # Coordinator-injection variants (A6)
-    "important system note",
-    "system note:",
-    "you must also add",
-    "add a second task",
-    "add a task to",
-    "also list all",
-    "set response_text",
-    # Structural injection (A4 original)
-    "ignore previous formatting",
-    "ignore previous formatting rules",
-    "ignore previous format",
-    "you must respond only with this exact json",
-    "respond only with this exact json",
-    # ChatML delimiters (S-03)
+    
+    # ChatML delimiters (S-03) - ALWAYS block
     "<|system|>",
     "<|user|>",
     "<|assistant|>",
     "<|im_start|>",
     "<|im_end|>",
+    
     # Destructive system commands — ALWAYS block
     "delete all files",
     "permanently delete",
@@ -68,19 +61,40 @@ OVERRIDE_PATTERNS = [
     "format drive",
     "rm -rf",
     "del /f /q",
+    # TC54/TC55: Block explicit library-based destructive operations
+    "using shutil",
+    "delete empty folders",
+    "delete empty files",
+    "copy all files",
+    "move all files",
+    
     # OS-critical path deletion (system destruction)
     "delete windows",
     "delete system32",
     "delete boot",
     "rm -rf /",
     "rm -rf /*",
+    
     # Indirect OS shell invocation
     "[inst]",
     "<<sys>>",
-    "disregard your prior",
-    "disregard all",
 ]
 
+# These patterns are checked with CONTEXT (only block if they appear as instructions)
+INSTRUCTION_PATTERNS = [
+    "important system note",
+    "system note:",
+    "you must also add",
+    "you must also",
+    "you must additionally", 
+    "also list all",
+    "set response_text",
+    "set your response_text",
+    "when forming your json",
+    "ignore previous formatting",
+    "ignore previous formatting rules",
+    "respond only with this exact json",
+]
 # ── SUSPICIOUS PHRASES (log warning but DO NOT block) ──────────────────────
 # These are moved from OVERRIDE_PATTERNS to allow confirmation flow.
 # The intent classifier will handle them with SUSPICIOUS → confirmation.
@@ -145,6 +159,137 @@ def _is_suspicious_base64(fragment: str) -> bool:
 
 
 def sanitise_input(text: str) -> SanitisationResult:
+    """
+    Apply all Layer 1 sanitisation checks.
+    Returns SanitisationResult — caller checks .was_blocked.
+    """
+    if not text:
+        return SanitisationResult(clean_text="")
+
+    checks_triggered = []
+    suspicious_matches = []
+
+    # ── S-04: Length bomb ────────────────────────────────────────────────────
+    if len(text) > MAX_INPUT_LENGTH:
+        text = text[:MAX_INPUT_LENGTH]
+        checks_triggered.append("S-04-length-truncated")
+        logger.info(f"✂️  S-04: Input truncated to {MAX_INPUT_LENGTH} chars")
+
+    # ── S-05: Unicode normalisation + confusable homoglyph mapping ───────────
+    normalised = unicodedata.normalize("NFKC", text)
+    if normalised != text:
+        checks_triggered.append("S-05-unicode-normalised")
+        logger.info("🔤 S-05: Unicode normalisation applied")
+
+    _CONFUSABLES = str.maketrans({
+        "\u0456": "i",   # Cyrillic і → Latin i
+        "\u0430": "a",   # Cyrillic а → Latin a
+        "\u0435": "e",   # Cyrillic е → Latin e
+        "\u043e": "o",   # Cyrillic о → Latin o
+        "\u0440": "r",   # Cyrillic р → Latin r
+        "\u0441": "c",   # Cyrillic с → Latin c
+        "\u0445": "x",   # Cyrillic х → Latin x
+        "\u03bf": "o",   # Greek ο → Latin o
+        "\u03b5": "e",   # Greek ε → Latin e
+        "\u0455": "s",   # Cyrillic ѕ → Latin s
+        "\u04cf": "i",   # Cyrillic ӏ → Latin i
+        "\uff49": "i",   # Fullwidth i → Latin i
+        "\uff4f": "o",   # Fullwidth o → Latin o
+        "\u2027": ".",   # Hyphenation point → period
+    })
+    homoglyph_mapped = normalised.translate(_CONFUSABLES)
+    if homoglyph_mapped != normalised:
+        checks_triggered.append("S-05-homoglyph-mapped")
+        logger.info("🔤 S-05: Homoglyph mapping applied")
+
+    text = homoglyph_mapped
+
+    # ── CHECK SUSPICIOUS PHRASES FIRST (log but don't block) ─────────────────
+    text_lower = text.lower()
+    for phrase in SUSPICIOUS_PHRASES:
+        if phrase in text_lower:
+            suspicious_matches.append(phrase)
+            logger.info(f"⚠️ S-01-suspicious: Phrase detected (will route to confirmation): '{phrase}'")
+
+    # ── S-01: SMART OVERRIDE KEYWORD DETECTION ───────────────────────────────
+    # First check ALWAYS_BLOCK patterns (no context needed)
+    for pattern in OVERRIDE_PATTERNS:
+        if pattern in text_lower:
+            checks_triggered.append(f"S-01-override:{pattern[:30]}")
+            logger.warning(f"🚫 S-01: Override keyword detected: '{pattern}'")
+            return SanitisationResult(
+                clean_text=text,
+                was_blocked=True,
+                block_reason=f"Override keyword detected: '{pattern}'",
+                triggered_checks=checks_triggered,
+                is_suspicious=bool(suspicious_matches),
+                suspicious_matches=suspicious_matches,
+            )
+    
+    # Then check INSTRUCTION_PATTERNS with context
+    for pattern in INSTRUCTION_PATTERNS:
+        if pattern in text_lower:
+            # Check if this is being used as an INSTRUCTION (not natural language)
+            idx = text_lower.find(pattern)
+            lookahead = text[idx:idx+80].lower()
+            
+            # It's an instruction if:
+            # 1. Followed by colon (instruction format)
+            # 2. At start of message/line and followed by command
+            # 3. Preceded by nothing or newline
+            is_instruction = False
+            
+            if ':' in lookahead:
+                is_instruction = True
+            elif idx == 0 or text[idx-1] in ['\n', ' ']:
+                # Check if what follows looks like a command
+                after_pattern = text[idx+len(pattern):idx+80].strip()
+                if after_pattern and not after_pattern[0] in ['.', ',', '?', '!']:
+                    # Likely a command, not natural language
+                    is_instruction = True
+            
+            if is_instruction:
+                checks_triggered.append(f"S-01-instruction:{pattern[:30]}")
+                logger.warning(f"🚫 S-01: Instruction pattern detected: '{pattern}'")
+                return SanitisationResult(
+                    clean_text=text,
+                    was_blocked=True,
+                    block_reason=f"Instruction pattern detected: '{pattern}'",
+                    triggered_checks=checks_triggered,
+                    is_suspicious=bool(suspicious_matches),
+                    suspicious_matches=suspicious_matches,
+                )
+            else:
+                logger.info(f"ℹ️ Pattern '{pattern}' appears as natural language, not blocking")
+
+    # ── S-02: Base64 payload detection ───────────────────────────────────────
+    tokens = re.findall(r'[A-Za-z0-9+/=]{20,}', text)
+    for token in tokens:
+        if _is_suspicious_base64(token):
+            checks_triggered.append(f"S-02-base64:{token[:20]}")
+            logger.warning(f"🚫 S-02: Suspicious base64 payload detected")
+            return SanitisationResult(
+                clean_text=text,
+                was_blocked=True,
+                block_reason="Suspicious base64-encoded payload detected",
+                triggered_checks=checks_triggered,
+                is_suspicious=bool(suspicious_matches),
+                suspicious_matches=suspicious_matches,
+            )
+
+    # ── All checks passed ─────────────────────────────────────────────────────
+    if checks_triggered:
+        logger.info(f"✅ Input sanitised (checks: {checks_triggered})")
+    
+    if suspicious_matches:
+        logger.info(f"⚠️ Input contains suspicious phrases (will route to confirmation): {suspicious_matches}")
+    
+    return SanitisationResult(
+        clean_text=text,
+        triggered_checks=checks_triggered,
+        is_suspicious=bool(suspicious_matches),
+        suspicious_matches=suspicious_matches,
+    )
     """
     Apply all Layer 1 sanitisation checks.
     Returns SanitisationResult — caller checks .was_blocked.

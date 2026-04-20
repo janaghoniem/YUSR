@@ -1,0 +1,157 @@
+import React, { useEffect, useRef } from "react";
+import * as THREE from "three";
+
+const CinematicIntro = ({ width = "100%", height = "100%" }) => {
+  const mountRef = useRef(null);
+
+  useEffect(() => {
+    let animationFrameId;
+    
+    // Scene setup
+    const scene = new THREE.Scene();
+    
+    // Camera setup
+    const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+    camera.position.z = 30;
+
+    // Renderer setup
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    
+    // Calculate aspect ratio & resize
+    const updateSize = () => {
+      if (!mountRef.current) return;
+      const w = mountRef.current.clientWidth;
+      const h = mountRef.current.clientHeight;
+      if (w === 0 || h === 0) return;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    };
+
+    if (mountRef.current) {
+      mountRef.current.appendChild(renderer.domElement);
+      updateSize();
+      window.addEventListener('resize', updateSize);
+    }
+
+    // Colors based on Aura Design System
+    const colorPink400 = new THREE.Color("#FF3D9A");
+    const colorPink200 = new THREE.Color("#FFAEDD");
+    const colorPink600 = new THREE.Color("#C4006B");
+
+    // Particle geometry
+    const particleCount = 2000;
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(particleCount * 3);
+    const colors = new Float32Array(particleCount * 3);
+    const sizes = new Float32Array(particleCount);
+
+    for (let i = 0; i < particleCount; i++) {
+        // Spherical distribution
+        const r = 15 * Math.cbrt(Math.random());
+        const theta = Math.random() * 2 * Math.PI;
+        const phi = Math.acos(2 * Math.random() - 1);
+        
+        const x = r * Math.sin(phi) * Math.cos(theta);
+        const y = r * Math.sin(phi) * Math.sin(theta);
+        const z = r * Math.cos(phi);
+
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = y;
+        positions[i * 3 + 2] = z;
+
+        // Color variation
+        const mixedColor = colorPink400.clone().lerp(
+            Math.random() > 0.5 ? colorPink200 : colorPink600, 
+            Math.random()
+        );
+
+        colors[i * 3] = mixedColor.r;
+        colors[i * 3 + 1] = mixedColor.g;
+        colors[i * 3 + 2] = mixedColor.b;
+
+        sizes[i] = Math.random() * 0.8 + 0.2;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+    // Custom shader material for soft glowing particles
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        time: { value: 0 }
+      },
+      vertexShader: `
+        attribute float size;
+        attribute vec3 color;
+        varying vec3 vColor;
+        uniform float time;
+        void main() {
+          vColor = color;
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          float pulse = sin(time + length(position)) * 0.5 + 0.5;
+          gl_PointSize = size * (300.0 / -mvPosition.z) * (1.0 + pulse * 2.0);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        void main() {
+          float dist = length(gl_PointCoord - vec2(0.5));
+          if (dist > 0.5) discard;
+          // Soft radial gradient
+          float alpha = (0.5 - dist) * 2.0;
+          gl_FragColor = vec4(vColor, alpha * 0.8);
+        }
+      `,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+
+    const particles = new THREE.Points(geometry, material);
+    scene.add(particles);
+
+    // Animation loop
+    const clock = new THREE.Clock();
+
+    const animate = () => {
+      animationFrameId = requestAnimationFrame(animate);
+      const elapsedTime = clock.getElapsedTime();
+
+      // Rotate sphere
+      particles.rotation.y = elapsedTime * 0.1;
+      particles.rotation.x = elapsedTime * 0.05;
+
+      // Update time uniform for pulsating size
+      material.uniforms.time.value = elapsedTime;
+
+      // Breathing movement
+      const scale = 1 + Math.sin(elapsedTime * 0.5) * 0.1;
+      particles.scale.set(scale, scale, scale);
+
+      renderer.render(scene, camera);
+    };
+
+    // Ensure it renders if width/height are populated later
+    setTimeout(updateSize, 100);
+
+    animate();
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      window.removeEventListener('resize', updateSize);
+      if (mountRef.current && mountRef.current.contains(renderer.domElement)) {
+        mountRef.current.removeChild(renderer.domElement);
+      }
+      geometry.dispose();
+      material.dispose();
+      renderer.dispose();
+    };
+  }, []);
+
+  return <div ref={mountRef} style={{ width, height }} aria-hidden="true" />;
+};
+
+export default CinematicIntro;

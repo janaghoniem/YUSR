@@ -70,9 +70,9 @@ desktop.ini
 
 # Project specific
 audit.json
-*.png
-*.jpg
-*.jpeg
+# *.png
+# *.jpg
+# *.jpeg
 
 # Temporary files
 *.tmp
@@ -225,19 +225,10 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
-
-/.venv
-
-**tmpclaude**
-
-
-backend/agents/execution_agent/RAG/analysis
 .venv/
-*.bin
-*.sqlite3-journal
-*.pickle
 
 backend/face_recognition_models
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
 backend/agents/execution_agent/RAG/web/models/playwright/embedding_model/config_sentence_transformers.json
+conversations.jsonl

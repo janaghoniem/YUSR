@@ -124,6 +124,28 @@ def _infer_app_from_text(ai_prompt: str, overall_goal: str) -> str:
         return "youtube"
     if any(k in t for k in ("maps", "directions", "navigate to", "location")):
         return "maps"
+    if any(k in t for k in (
+        "google docs", " docs ", "google document", "write in doc", "type in doc",
+        "create doc", "open doc", "new doc", "thesis", "essay", "research paper",
+        "document",
+    )):
+        return "google docs"
+    if any(k in t for k in ("google sheets", "spreadsheet", "excel", "table")):
+        return "google sheets"
+    if any(k in t for k in ("google slides", "presentation", "slide deck")):
+        return "google slides"
+    if any(k in t for k in ("google drive", "drive", "upload file")):
+        return "google drive"
+    if any(k in t for k in ("google photos", "photos")):
+        return "google photos"
+    if any(k in t for k in ("google meet", "meet", "video meeting")):
+        return "google meet"
+    if any(k in t for k in ("google keep", "keep", "note", "notes")):
+        return "google keep"
+    if any(k in t for k in ("google calendar", "calendar", "schedule", "event")):
+        return "google calendar"
+    if any(k in t for k in ("google tasks", "tasks", "todo", "to-do")):
+        return "google tasks"
     if any(k in t for k in ("chrome", "browser", "google.com", "search the web", "pharmacy")):
         return "chrome"
     return ""
@@ -152,6 +174,17 @@ _APP_PACKAGE_ALIASES: Dict[str, List[str]] = {
     "spotify": ["spotify"],
     "notes": ["notes", "keep", "memo", "notepad"],
     "settings": ["settings"],
+    "google docs": ["docs", "googledocs", "document", "documents"],
+    "google sheets": ["sheets", "googlesheets", "spreadsheet"],
+    "google slides": ["slides", "googleslides", "presentation"],
+    "google drive": ["drive", "googledrive"],
+    "google photos": ["photos", "googlephotos"],
+    "google meet": ["meet", "googlemeet"],
+    "google keep": ["keep", "googlekeep"],
+    "google calendar": ["calendar", "googlecalendar"],
+    "google tasks": ["tasks"],
+    "files": ["files", "filepicker", "filemanager", "myfiles"],
+    "calculator": ["calculator", "calc"],
 }
 
 # ── Coordinator-internal extra_params keys ─────────────────────────────────
@@ -308,6 +341,8 @@ class MobileReActStrategy:
         self._search_needs_confirm: bool                        = False
         self._search_confirm_app: str                           = ""
         self._search_pre_element_count: int                     = 0
+        self._entered_search_queries: Set[str]                  = set()
+        self._clock_pad_tap_index: int                          = 0
         self._email_just_sent: bool                             = False
         self._t2_completed_steps:  List[Dict]                   = []
         self._last_t2_hint_record_id: Optional[str]             = None
@@ -557,6 +592,14 @@ class MobileReActStrategy:
             "clock": "clock",
             "play": "play store",
             "vending": "play store",
+            "docs": "google docs",
+            "sheets": "google sheets",
+            "slides": "google slides",
+            "drive": "google drive",
+            "photos": "google photos",
+            "keep": "google keep",
+            "calendar": "google calendar",
+            "calculator": "calculator",
         }
         for k, v in deterministic_map.items():
             if k in lower_pkg:
@@ -1618,10 +1661,10 @@ class MobileReActStrategy:
         if not ui_tree or not ui_tree.elements:
             return None
 
-        # Clock time entry owns the entire interaction in Android Clock.
-        clock_time = self._tier1_clock_time_entry(task, ui_tree)
-        if clock_time:
-            return clock_time
+        # ── Clock time entry — must be first so T3 never touches picker fields ──
+        clock_entry = self._tier1_clock_time_entry(task, ui_tree)
+        if clock_entry:
+            return clock_entry
 
         # Search suggestion clicker — highest priority
         suggestion_click = self._find_and_click_first_suggestion(ui_tree)
@@ -1812,10 +1855,28 @@ class MobileReActStrategy:
             return None
 
         # Always check if app is visible first regardless of phase
+        target_lower = target.lower().strip()
+        accepted_labels: Set[str] = {target_lower}
+        for token in target_lower.split():
+            if len(token) >= 3:
+                accepted_labels.add(token)
+        for canonical, aliases in _APP_PACKAGE_ALIASES.items():
+            if canonical == target_lower or target_lower in aliases:
+                accepted_labels.add(canonical)
+                accepted_labels.update(aliases)
+                break
+
+        def _label_matches(elem: Any) -> bool:
+            label = f"{elem.text or ''} {elem.content_description or ''}".lower().strip()
+            if not label:
+                return False
+            if target_lower in label:
+                return True
+            return any(alias and alias in label for alias in accepted_labels)
+
         clickable_targets = [
             elem for elem in ui_tree.elements
-            if elem.clickable and target.lower() in 
-            f"{elem.text or ''} {elem.content_description or ''}".lower()
+            if elem.clickable and _label_matches(elem)
         ]
         if clickable_targets:
             chosen = clickable_targets[0]
@@ -2231,50 +2292,83 @@ Action: {{"action_type": "complete"}}"""
         ui_tree: SemanticUITree,
     ) -> Optional[Dict[str, Any]]:
         """
-        Android Clock uses a sequential digit pad, not separate hour/minute fields.
-        Typing must be done as a single stream: 5:30 → type "0530" once.
-        This T1 handler owns all time entry in the clock app entirely.
+        Android Clock digit pad: tap individual digit buttons (0-9) in sequence.
+        Does NOT use type actions — the pad ignores ADB keyboard input entirely.
+        Sequence for 3:30 PM → taps: 0, 3, 3, 0 (always 4 digits, zero-padded hour)
         """
         if not self._is_in_time_picker(ui_tree):
             return None
 
-        extra = task.extra_params or {}
-        goal_text = f"{task.ai_prompt} {extra.get('time', '')} {extra.get('overall_goal', '')}".lower()
-        time_match = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", goal_text, re.IGNORECASE)
-        if not time_match:
+        # Parse target time
+        goal_text = " ".join([
+            task.ai_prompt,
+            task.extra_params.get("time", ""),
+            task.extra_params.get("overall_goal", ""),
+            task.extra_params.get("goal", ""),
+        ]).lower()
+        tm = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", goal_text, re.IGNORECASE)
+        if not tm:
             return None
 
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2))
-        am_pm = (time_match.group(3) or "").upper()
-        pad_sequence = f"{hour:02d}{minute:02d}"
+        hour = int(tm.group(1))
+        minute = int(tm.group(2))
 
-        digit_field = None
+        # Build 4-digit tap sequence (always zero-pad: 3:30 → [0, 3, 3, 0])
+        pad_sequence = [int(d) for d in f"{hour:02d}{minute:02d}"]
+
+        # ── Find digit buttons on the pad ────────────────────────────────
+        digit_buttons: Dict[int, Any] = {}
         for e in ui_tree.elements:
-            if e.focusable and e.enabled:
-                blob = (e.hint_text or e.content_description or e.resource_id or "").lower()
-                if any(kw in blob for kw in ("hour", "minute", "time", "clock")):
-                    digit_field = e
-                    break
-            if e.focusable and e.enabled and e.type in ("textfield",):
-                digit_field = e
-                break
+            if not e.clickable:
+                continue
+            label = (e.text or "").strip()
+            if label.isdigit() and len(label) == 1:
+                digit_buttons[int(label)] = e
 
-        if digit_field is None:
+        if len(digit_buttons) < 9:
+            logger.debug(f"[T1] Clock: digit pad not ready ({len(digit_buttons)} buttons found)")
             return None
 
-        already_typed_sequence = any(v == pad_sequence for v in self.typed_texts.values())
-        if already_typed_sequence:
-            return None
-
-        logger.info(f"[T1] Clock number pad: typing '{pad_sequence}' for {hour}:{minute:02d} {am_pm}")
-        return {
-            "thought": f"entering time {hour}:{minute:02d} {am_pm} as pad sequence '{pad_sequence}'",
-            "action_type": "type",
-            "element_id": digit_field.element_id,
-            "text": pad_sequence,
-            "clear_first": True,
+        # ── Check completion via displayed time text ─────────────────────
+        hour_str = f"{hour:02d}"
+        minute_str = f"{minute:02d}"
+        displayed_texts = {
+            (e.text or "").strip()
+            for e in ui_tree.elements
+            if (e.text or "").strip()
         }
+        hour_shown = str(hour) in displayed_texts or hour_str in displayed_texts
+        minute_shown = minute_str in displayed_texts
+
+        current_index = getattr(self, "_clock_pad_tap_index", 0)
+        if current_index >= len(pad_sequence):
+            logger.info(f"[T1] Clock: all {len(pad_sequence)} digits tapped — done")
+            return None
+
+        if hour_shown and minute_shown and current_index == 0:
+            logger.info(f"[T1] Clock: time already shows {hour}:{minute:02d}")
+            setattr(self, "_clock_pad_tap_index", len(pad_sequence))
+            return None
+
+        digit_to_tap = pad_sequence[current_index]
+        btn = digit_buttons.get(digit_to_tap)
+        if btn is None:
+            logger.warning(f"[T1] Clock: digit button '{digit_to_tap}' not found on pad")
+            return None
+
+        setattr(self, "_clock_pad_tap_index", current_index + 1)
+        logger.info(
+            f"[T1] Clock: tapping digit '{digit_to_tap}' "
+            f"(step {current_index+1}/{len(pad_sequence)}) "
+            f"for {hour:02d}:{minute:02d} → id={btn.element_id}"
+        )
+        return {
+            "thought": f"tapping digit '{digit_to_tap}' on clock pad (step {current_index+1}/4)",
+            "action_type": "click",
+            "element_id": btn.element_id,
+        }
+
+        return None
 
     def _detect_search_results_screen(
         self,
@@ -2414,23 +2508,23 @@ Action: {{"action_type": "complete"}}"""
         ui_tree: SemanticUITree,
     ) -> Optional[Dict[str, Any]]:
         """
-        After a type action on a search field, press ENTER if IME didn't auto-submit.
-        Fires only once per type sequence. Universal across any app.
+        Press ENTER after typing on a search field if IME didn't auto-submit.
+        Guards:
+        - Only fires once per unique typed query (per-query dedup set).
+        - Won't fire if ENTER already in last 6 actions.
+        - Won't fire while search confirmation is pending.
         """
         if not self.action_history:
             return None
 
-        last = self.action_history[-1]
-        last_action = last.get("action", {})
+        last_action = self.action_history[-1].get("action", {})
         if last_action.get("action_type") != "type":
             return None
 
-        # Only fire if typed text is non-trivial
         typed_text = (last_action.get("text") or "").strip()
         if not typed_text or len(typed_text) < 2:
             return None
 
-        # Only fire if the field looks like a search/URL/query field
         eid = last_action.get("element_id")
         if eid is None:
             return None
@@ -2457,26 +2551,34 @@ Action: {{"action_type": "complete"}}"""
         if not is_search_field:
             return None
 
-        # Don't fire if IME already submitted (flag was set)
+        # Guard 1: IME already submitted or confirmation pending
         if self._search_just_submitted or self._search_needs_confirm:
             return None
 
-        # Don't fire if text is already verified as applied and screen changed
+        # Guard 2: This exact query was already submitted in this task
+        query_key = typed_text.lower().strip()
+        if query_key in self._entered_search_queries:
+            logger.debug(f"[T1] ENTER guard: '{query_key[:40]}' already submitted — skipping")
+            return None
+
+        # Guard 3: ENTER already in recent history (extended window)
+        enter_already = any(
+            h.get("action", {}).get("action_type") == "global_action"
+            and h.get("action", {}).get("global_action") == "ENTER"
+            for h in self.action_history[-6:]
+        )
+        if enter_already:
+            return None
+
+        # Guard 4: screen already changed after last type (IME worked silently)
         if self._search_pre_element_count > 0:
             return None
 
-        # Don't fire if we already pressed enter this sequence
-        enter_already_pressed = any(
-            h.get("action", {}).get("action_type") == "global_action"
-            and h.get("action", {}).get("global_action") == "ENTER"
-            for h in self.action_history[-3:]
-        )
-        if enter_already_pressed:
-            return None
-
+        # All guards passed — submit and record
+        self._entered_search_queries.add(query_key)
         logger.info(f"[T1] Post-type ENTER: submitting search for '{typed_text[:40]}'")
         return {
-            "thought": f"typed query is ready — pressing ENTER to submit",
+            "thought": "typed query is ready — pressing ENTER to submit",
             "action_type": "global_action",
             "global_action": "ENTER",
         }
@@ -2877,13 +2979,20 @@ Action: {{"action_type": "complete"}}"""
                 if any(alias in state for alias in aliases):
                     return True
 
+        if normalized in {
+            "google docs", "google sheets", "google slides", "google drive",
+            "google photos", "google meet", "google keep", "google calendar",
+            "google tasks",
+        }:
+            return any(alias in state for alias in _APP_PACKAGE_ALIASES.get(normalized, []))
+
         return False
 
     def _is_click_task(self, goal: str) -> bool:
         return bool(re.search(r"\b(click|tap|press)\b", goal.lower()))
 
     def _typed_value_applied(self, action_json: Dict[str, Any], ui_tree: SemanticUITree) -> bool:
-        eid = action_json.get("element_id")
+        eid  = action_json.get("element_id")
         text = (action_json.get("text") or "").strip()
         if eid is None or not text:
             return True
@@ -2893,11 +3002,19 @@ Action: {{"action_type": "complete"}}"""
             elem = None
         if not elem:
             return False
+
         class_name = (elem.class_name or "").lower()
-        elem_type = (elem.type or "").lower()
+        elem_type  = (elem.type or "").lower()
         if class_name == "android.webkit.webview" or elem_type == "webview":
-            logger.debug(f"[T3] Type verify skipped — WebView element {eid}")
             return True
+
+        # Clock picker fields: tolerate leading-zero variants if a type action
+        # still targets the time picker from a non-T1 path.
+        if self._is_in_time_picker(ui_tree):
+            live = (elem.text or "").strip()
+            if live == text or live == f"0{text}" or (text.startswith("0") and live == text.lstrip("0")):
+                return True
+
         live = (elem.text or "").strip()
         return live == text or text in live
 
@@ -2958,6 +3075,8 @@ Action: {{"action_type": "complete"}}"""
         self._search_needs_confirm    = False
         self._search_confirm_app      = ""
         self._search_pre_element_count = 0
+        self._entered_search_queries  = set()
+        self._clock_pad_tap_index     = 0
         self._email_just_sent         = False
         self.token_usage = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls          = 0

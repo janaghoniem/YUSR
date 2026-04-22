@@ -1,0 +1,90 @@
+# Core framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.0
+
+# HTTP & Async
+httpx>=0.27.0
+requests>=2.32.0
+aiohttp>=3.9.0
+
+# Core dependencies
+protobuf>=5.26.1
+googleapis-common-protos>=1.65.0
+grpcio>=1.68.1
+grpcio-status>=1.68.1
+google-api-core>=2.23.0
+
+# LLM and AI integrations
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-google-genai>=4.2.0
+google-genai>=0.3.0
+langchain_groq
+langchain-chroma>=0.1.0
+chromadb
+
+# Google APIs
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+google-cloud-speech>=2.20.0
+google-cloud-texttospeech>=2.14.0
+
+# Memory & Database
+langgraph-checkpoint-sqlite>=2.0.0
+langgraph-checkpoint-mongodb>=0.3.0
+langchain-mongodb>=0.2.0
+pymongo>=4.10.0
+motor>=3.6.0
+dnspython>=2.7.0
+
+# Vector DB
+mem0ai>=1.0.2
+qdrant-client>=1.12.0
+
+# LLM SDKs
+openai>=1.50.0
+anthropic
+google-genai>=0.3.0
+
+# LangGraph
+langgraph>=0.2.0
+langgraph-checkpoint>=2.0.0
+
+# Data handling
+pydantic>=2.10.0
+pydantic-core>=2.27.0
+typing-extensions>=4.12.0
+numpy>=1.26.0
+
+# Utilities
+tenacity>=8.5.0
+langsmith>=0.1.0
+jsonschema>=4.20.0
+pyyaml>=6.0.0
+python-multipart
+
+# Windows-specific
+pywin32>=226; sys_platform == 'win32'
+
+# ML/Vision (pre-built wheels only)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.30.0
+pillow>=9.0.0
+opencv-python>=4.7.0
+ultralytics>=8.0.0
+gtts
+sentence-transformers
+
+# Browser automation
+playwright
+docker
+
+# Text processing
+rapidfuzz
+
+# Cerebras SDK
+cerebras-cloud-sdk

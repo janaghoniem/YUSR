@@ -1,0 +1,811 @@
+Collecting fastapi>=0.115.0 (from -r requirements.txt (line 2))
+  Using cached fastapi-0.136.0-py3-none-any.whl.metadata (28 kB)
+Collecting uvicorn>=0.30.0 (from uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached uvicorn-0.44.0-py3-none-any.whl.metadata (6.7 kB)
+Collecting python-dotenv>=1.0.0 (from -r requirements.txt (line 4))
+  Using cached python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+Collecting httpx>=0.27.0 (from -r requirements.txt (line 7))
+  Using cached httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+Collecting requests>=2.32.0 (from -r requirements.txt (line 8))
+  Using cached requests-2.33.1-py3-none-any.whl.metadata (4.8 kB)
+Collecting aiohttp>=3.9.0 (from -r requirements.txt (line 9))
+  Using cached aiohttp-3.13.5-cp312-cp312-win_amd64.whl.metadata (8.4 kB)
+Collecting protobuf>=5.26.1 (from -r requirements.txt (line 12))
+  Using cached protobuf-7.34.1-cp310-abi3-win_amd64.whl.metadata (595 bytes)
+Collecting googleapis-common-protos>=1.65.0 (from -r requirements.txt (line 13))
+  Using cached googleapis_common_protos-1.74.0-py3-none-any.whl.metadata (9.2 kB)
+Collecting grpcio>=1.68.1 (from -r requirements.txt (line 14))
+  Using cached grpcio-1.80.0-cp312-cp312-win_amd64.whl.metadata (3.9 kB)
+Collecting grpcio-status>=1.68.1 (from -r requirements.txt (line 15))
+  Using cached grpcio_status-1.80.0-py3-none-any.whl.metadata (1.3 kB)
+Collecting google-api-core>=2.23.0 (from -r requirements.txt (line 16))
+  Using cached google_api_core-2.30.3-py3-none-any.whl.metadata (3.1 kB)
+Collecting langchain>=0.3.0 (from -r requirements.txt (line 19))
+  Using cached langchain-1.2.15-py3-none-any.whl.metadata (5.8 kB)
+Collecting langchain-core>=0.3.0 (from -r requirements.txt (line 20))
+  Using cached langchain_core-1.3.0-py3-none-any.whl.metadata (4.4 kB)
+Collecting langchain-google-genai>=4.2.0 (from -r requirements.txt (line 21))
+  Using cached langchain_google_genai-4.2.2-py3-none-any.whl.metadata (2.7 kB)
+Collecting google-genai>=0.3.0 (from -r requirements.txt (line 22))
+  Using cached google_genai-1.73.1-py3-none-any.whl.metadata (52 kB)
+Collecting langchain_groq (from -r requirements.txt (line 24))
+  Using cached langchain_groq-1.1.2-py3-none-any.whl.metadata (2.4 kB)
+Collecting google-api-python-client>=2.100.0 (from -r requirements.txt (line 32))
+  Using cached google_api_python_client-2.194.0-py3-none-any.whl.metadata (7.0 kB)
+Collecting google-auth>=2.23.0 (from -r requirements.txt (line 33))
+  Using cached google_auth-2.49.2-py3-none-any.whl.metadata (6.2 kB)
+Collecting google-auth-httplib2>=0.2.0 (from -r requirements.txt (line 34))
+  Using cached google_auth_httplib2-0.3.1-py3-none-any.whl.metadata (3.0 kB)
+Collecting google-auth-oauthlib>=1.2.0 (from -r requirements.txt (line 35))
+  Using cached google_auth_oauthlib-1.3.1-py3-none-any.whl.metadata (2.6 kB)
+Collecting google-cloud-speech>=2.20.0 (from -r requirements.txt (line 38))
+  Using cached google_cloud_speech-2.38.0-py3-none-any.whl.metadata (9.6 kB)
+Collecting google-cloud-texttospeech>=2.14.0 (from -r requirements.txt (line 39))
+  Using cached google_cloud_texttospeech-2.36.0-py3-none-any.whl.metadata (9.8 kB)
+Collecting langgraph-checkpoint-sqlite>=2.0.0 (from -r requirements.txt (line 42))
+  Using cached langgraph_checkpoint_sqlite-3.0.3-py3-none-any.whl.metadata (2.8 kB)
+Collecting langgraph-checkpoint-mongodb>=0.3.0 (from -r requirements.txt (line 43))
+  Using cached langgraph_checkpoint_mongodb-0.3.1-py3-none-any.whl.metadata (2.8 kB)
+Collecting langchain-chroma>=0.1.0 (from -r requirements.txt (line 44))
+  Using cached langchain_chroma-1.1.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting langchain-mongodb>=0.2.0 (from -r requirements.txt (line 45))
+  Using cached langchain_mongodb-0.11.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting pymongo>=4.10.0 (from -r requirements.txt (line 48))
+  Using cached pymongo-4.16.0-cp312-cp312-win_amd64.whl.metadata (10.0 kB)
+Collecting motor>=3.6.0 (from -r requirements.txt (line 49))
+  Using cached motor-3.7.1-py3-none-any.whl.metadata (21 kB)
+Collecting dnspython>=2.7.0 (from -r requirements.txt (line 50))
+  Using cached dnspython-2.8.0-py3-none-any.whl.metadata (5.7 kB)
+Collecting mem0ai>=1.0.2 (from -r requirements.txt (line 53))
+  Using cached mem0ai-2.0.0-py3-none-any.whl.metadata (11 kB)
+Collecting qdrant-client>=1.12.0 (from -r requirements.txt (line 54))
+  Using cached qdrant_client-1.17.1-py3-none-any.whl.metadata (11 kB)
+Collecting openai>=1.50.0 (from -r requirements.txt (line 55))
+  Using cached openai-2.32.0-py3-none-any.whl.metadata (31 kB)
+Collecting langgraph>=0.2.0 (from -r requirements.txt (line 58))
+  Using cached langgraph-1.1.7-py3-none-any.whl.metadata (8.0 kB)
+Collecting langgraph-checkpoint>=2.0.0 (from -r requirements.txt (line 59))
+  Using cached langgraph_checkpoint-4.0.2-py3-none-any.whl.metadata (5.2 kB)
+Collecting pydantic>=2.10.0 (from -r requirements.txt (line 62))
+  Using cached pydantic-2.13.2-py3-none-any.whl.metadata (108 kB)
+Collecting pydantic-core>=2.27.0 (from -r requirements.txt (line 63))
+  Using cached pydantic_core-2.46.2-cp312-cp312-win_amd64.whl.metadata (6.7 kB)
+Collecting typing-extensions>=4.12.0 (from -r requirements.txt (line 64))
+  Using cached typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting numpy>=1.26.0 (from -r requirements.txt (line 65))
+  Using cached numpy-2.4.4-cp312-cp312-win_amd64.whl.metadata (6.6 kB)
+Collecting tenacity>=8.5.0 (from -r requirements.txt (line 68))
+  Using cached tenacity-9.1.4-py3-none-any.whl.metadata (1.2 kB)
+Collecting langsmith>=0.1.0 (from -r requirements.txt (line 69))
+  Using cached langsmith-0.7.32-py3-none-any.whl.metadata (15 kB)
+Collecting jsonschema>=4.20.0 (from -r requirements.txt (line 70))
+  Using cached jsonschema-4.26.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting pyyaml>=6.0.0 (from -r requirements.txt (line 71))
+  Using cached pyyaml-6.0.3-cp312-cp312-win_amd64.whl.metadata (2.4 kB)
+Collecting pywin32>=226 (from -r requirements.txt (line 74))
+  Using cached pywin32-311-cp312-cp312-win_amd64.whl.metadata (10 kB)
+Collecting sentence-transformers (from -r requirements.txt (line 76))
+  Using cached sentence_transformers-5.4.1-py3-none-any.whl.metadata (17 kB)
+Collecting torch>=2.0.0 (from -r requirements.txt (line 79))
+  Using cached torch-2.11.0-cp312-cp312-win_amd64.whl.metadata (29 kB)
+Collecting torchvision>=0.15.0 (from -r requirements.txt (line 80))
+  Using cached torchvision-0.26.0-cp312-cp312-win_amd64.whl.metadata (5.5 kB)
+Collecting transformers>=4.30.0 (from -r requirements.txt (line 81))
+  Using cached transformers-5.5.4-py3-none-any.whl.metadata (32 kB)
+Collecting pillow>=9.0.0 (from -r requirements.txt (line 82))
+  Using cached pillow-12.2.0-cp312-cp312-win_amd64.whl.metadata (9.0 kB)
+Collecting opencv-python>=4.7.0 (from -r requirements.txt (line 83))
+  Using cached opencv_python-4.13.0.92-cp37-abi3-win_amd64.whl.metadata (20 kB)
+Collecting ultralytics>=8.0.0 (from -r requirements.txt (line 84))
+  Using cached ultralytics-8.4.38-py3-none-any.whl.metadata (39 kB)
+Collecting gtts (from -r requirements.txt (line 85))
+  Using cached gTTS-2.5.4-py3-none-any.whl.metadata (4.1 kB)
+Collecting anthropic (from -r requirements.txt (line 88))
+  Using cached anthropic-0.96.0-py3-none-any.whl.metadata (3.1 kB)
+Collecting face-recognition (from -r requirements.txt (line 93))
+  Using cached face_recognition-1.3.0-py2.py3-none-any.whl.metadata (21 kB)
+Collecting python-multipart (from -r requirements.txt (line 96))
+  Using cached python_multipart-0.0.26-py3-none-any.whl.metadata (2.1 kB)
+Collecting pywinauto (from -r requirements.txt (line 97))
+  Using cached pywinauto-0.6.9-py2.py3-none-any.whl.metadata (2.0 kB)
+Collecting pyautogui (from -r requirements.txt (line 98))
+  Using cached PyAutoGUI-0.9.54.tar.gz (61 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pytesseract (from -r requirements.txt (line 99))
+  Using cached pytesseract-0.3.13-py3-none-any.whl.metadata (11 kB)
+Collecting playwright (from -r requirements.txt (line 101))
+  Using cached playwright-1.58.0-py3-none-win_amd64.whl.metadata (3.5 kB)
+Collecting docker (from -r requirements.txt (line 102))
+  Using cached docker-7.1.0-py3-none-any.whl.metadata (3.8 kB)
+Collecting chromadb (from -r requirements.txt (line 103))
+  Using cached chromadb-1.5.8-cp39-abi3-win_amd64.whl.metadata (5.1 kB)
+Collecting uiautomator2 (from -r requirements.txt (line 104))
+  Using cached uiautomator2-3.5.0-py3-none-any.whl.metadata (42 kB)
+Collecting adbutils (from -r requirements.txt (line 105))
+  Using cached adbutils-2.12.0-py3-none-win_amd64.whl.metadata (1.1 kB)
+Collecting apkutils (from -r requirements.txt (line 106))
+  Using cached apkutils-2.0.5-py3-none-any.whl.metadata (2.2 kB)
+Collecting adb (from -r requirements.txt (line 107))
+  Using cached adb-1.3.0-py3-none-any.whl
+Collecting rapidfuzz (from -r requirements.txt (line 109))
+  Using cached rapidfuzz-3.14.5-cp312-cp312-win_amd64.whl.metadata (12 kB)
+Collecting cerebras-cloud-sdk (from -r requirements.txt (line 112))
+  Using cached cerebras_cloud_sdk-1.67.0-py3-none-any.whl.metadata (19 kB)
+Collecting starlette>=0.46.0 (from fastapi>=0.115.0->-r requirements.txt (line 2))
+  Using cached starlette-1.0.0-py3-none-any.whl.metadata (6.3 kB)
+Collecting typing-inspection>=0.4.2 (from fastapi>=0.115.0->-r requirements.txt (line 2))
+  Using cached typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting annotated-doc>=0.0.2 (from fastapi>=0.115.0->-r requirements.txt (line 2))
+  Using cached annotated_doc-0.0.4-py3-none-any.whl.metadata (6.6 kB)
+Collecting click>=7.0 (from uvicorn>=0.30.0->uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached click-8.3.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting h11>=0.8 (from uvicorn>=0.30.0->uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting anyio (from httpx>=0.27.0->-r requirements.txt (line 7))
+  Using cached anyio-4.13.0-py3-none-any.whl.metadata (4.5 kB)
+Collecting certifi (from httpx>=0.27.0->-r requirements.txt (line 7))
+  Using cached certifi-2026.2.25-py3-none-any.whl.metadata (2.5 kB)
+Collecting httpcore==1.* (from httpx>=0.27.0->-r requirements.txt (line 7))
+  Using cached httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Collecting idna (from httpx>=0.27.0->-r requirements.txt (line 7))
+  Using cached idna-3.11-py3-none-any.whl.metadata (8.4 kB)
+Collecting charset_normalizer<4,>=2 (from requests>=2.32.0->-r requirements.txt (line 8))
+  Using cached charset_normalizer-3.4.7-cp312-cp312-win_amd64.whl.metadata (41 kB)
+Collecting urllib3<3,>=1.26 (from requests>=2.32.0->-r requirements.txt (line 8))
+  Using cached urllib3-2.6.3-py3-none-any.whl.metadata (6.9 kB)
+Collecting aiohappyeyeballs>=2.5.0 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached aiohappyeyeballs-2.6.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiosignal>=1.4.0 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting attrs>=17.3.0 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting frozenlist>=1.1.1 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached frozenlist-1.8.0-cp312-cp312-win_amd64.whl.metadata (21 kB)
+Collecting multidict<7.0,>=4.5 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached multidict-6.7.1-cp312-cp312-win_amd64.whl.metadata (5.5 kB)
+Collecting propcache>=0.2.0 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached propcache-0.4.1-cp312-cp312-win_amd64.whl.metadata (14 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp>=3.9.0->-r requirements.txt (line 9))
+  Using cached yarl-1.23.0-cp312-cp312-win_amd64.whl.metadata (82 kB)
+Collecting protobuf>=5.26.1 (from -r requirements.txt (line 12))
+  Using cached protobuf-6.33.6-cp310-abi3-win_amd64.whl.metadata (593 bytes)
+Collecting proto-plus<2.0.0,>=1.22.3 (from google-api-core>=2.23.0->-r requirements.txt (line 16))
+  Using cached proto_plus-1.27.2-py3-none-any.whl.metadata (2.2 kB)
+Collecting pyasn1-modules>=0.2.1 (from google-auth>=2.23.0->-r requirements.txt (line 33))
+  Using cached pyasn1_modules-0.4.2-py3-none-any.whl.metadata (3.5 kB)
+Collecting cryptography>=38.0.3 (from google-auth>=2.23.0->-r requirements.txt (line 33))
+  Using cached cryptography-46.0.7-cp311-abi3-win_amd64.whl.metadata (5.7 kB)
+Collecting jsonpatch<2.0.0,>=1.33.0 (from langchain-core>=0.3.0->-r requirements.txt (line 20))
+  Using cached jsonpatch-1.33-py2.py3-none-any.whl.metadata (3.0 kB)
+Requirement already satisfied: packaging>=23.2.0 in .\venv_new\Lib\site-packages (from langchain-core>=0.3.0->-r requirements.txt (line 20)) (26.1)
+Collecting uuid-utils<1.0,>=0.12.0 (from langchain-core>=0.3.0->-r requirements.txt (line 20))
+  Using cached uuid_utils-0.14.1-cp39-abi3-win_amd64.whl.metadata (4.9 kB)
+Collecting langgraph-prebuilt<1.1.0,>=1.0.9 (from langgraph>=0.2.0->-r requirements.txt (line 58))
+  Using cached langgraph_prebuilt-1.0.9-py3-none-any.whl.metadata (5.2 kB)
+Collecting langgraph-sdk<0.4.0,>=0.3.0 (from langgraph>=0.2.0->-r requirements.txt (line 58))
+  Using cached langgraph_sdk-0.3.13-py3-none-any.whl.metadata (1.6 kB)
+Collecting xxhash>=3.5.0 (from langgraph>=0.2.0->-r requirements.txt (line 58))
+  Using cached xxhash-3.6.0-cp312-cp312-win_amd64.whl.metadata (13 kB)
+Collecting ormsgpack>=1.12.0 (from langgraph-checkpoint>=2.0.0->-r requirements.txt (line 59))
+  Using cached ormsgpack-1.12.2-cp312-cp312-win_amd64.whl.metadata (3.3 kB)
+Collecting annotated-types>=0.6.0 (from pydantic>=2.10.0->-r requirements.txt (line 62))
+  Using cached annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+Collecting orjson>=3.9.14 (from langsmith>=0.1.0->-r requirements.txt (line 69))
+  Using cached orjson-3.11.8-cp312-cp312-win_amd64.whl.metadata (43 kB)
+Collecting requests-toolbelt>=1.0.0 (from langsmith>=0.1.0->-r requirements.txt (line 69))
+  Using cached requests_toolbelt-1.0.0-py2.py3-none-any.whl.metadata (14 kB)
+Collecting zstandard>=0.23.0 (from langsmith>=0.1.0->-r requirements.txt (line 69))
+  Using cached zstandard-0.25.0-cp312-cp312-win_amd64.whl.metadata (3.3 kB)
+Collecting jsonpointer>=1.9 (from jsonpatch<2.0.0,>=1.33.0->langchain-core>=0.3.0->-r requirements.txt (line 20))
+  Using cached jsonpointer-3.1.1-py3-none-any.whl.metadata (2.4 kB)
+Collecting filetype<2.0.0,>=1.2.0 (from langchain-google-genai>=4.2.0->-r requirements.txt (line 21))
+  Using cached filetype-1.2.0-py2.py3-none-any.whl.metadata (6.5 kB)
+Collecting websockets<17.0,>=13.0.0 (from google-genai>=0.3.0->-r requirements.txt (line 22))
+  Using cached websockets-16.0-cp312-cp312-win_amd64.whl.metadata (7.0 kB)
+Collecting distro<2,>=1.7.0 (from google-genai>=0.3.0->-r requirements.txt (line 22))
+  Using cached distro-1.9.0-py3-none-any.whl.metadata (6.8 kB)
+Collecting sniffio (from google-genai>=0.3.0->-r requirements.txt (line 22))
+  Using cached sniffio-1.3.1-py3-none-any.whl.metadata (3.9 kB)
+Collecting groq<1.0.0,>=0.30.0 (from langchain_groq->-r requirements.txt (line 24))
+  Using cached groq-0.37.1-py3-none-any.whl.metadata (16 kB)
+Collecting httplib2<1.0.0,>=0.19.0 (from google-api-python-client>=2.100.0->-r requirements.txt (line 32))
+  Using cached httplib2-0.31.2-py3-none-any.whl.metadata (2.2 kB)
+Collecting uritemplate<5,>=3.0.1 (from google-api-python-client>=2.100.0->-r requirements.txt (line 32))
+  Using cached uritemplate-4.2.0-py3-none-any.whl.metadata (2.6 kB)
+Collecting pyparsing<4,>=3.1 (from httplib2<1.0.0,>=0.19.0->google-api-python-client>=2.100.0->-r requirements.txt (line 32))
+  Using cached pyparsing-3.3.2-py3-none-any.whl.metadata (5.8 kB)
+Collecting requests-oauthlib>=0.7.0 (from google-auth-oauthlib>=1.2.0->-r requirements.txt (line 35))
+  Using cached requests_oauthlib-2.0.0-py2.py3-none-any.whl.metadata (11 kB)
+Collecting aiosqlite>=0.20 (from langgraph-checkpoint-sqlite>=2.0.0->-r requirements.txt (line 42))
+  Using cached aiosqlite-0.22.1-py3-none-any.whl.metadata (4.3 kB)
+Collecting sqlite-vec>=0.1.6 (from langgraph-checkpoint-sqlite>=2.0.0->-r requirements.txt (line 42))
+  Using cached sqlite_vec-0.1.9-py3-none-win_amd64.whl.metadata (198 bytes)
+Collecting pymongo>=4.10.0 (from -r requirements.txt (line 48))
+  Using cached pymongo-4.15.5-cp312-cp312-win_amd64.whl.metadata (22 kB)
+Collecting build>=1.0.3 (from chromadb->-r requirements.txt (line 103))
+  Using cached build-1.4.3-py3-none-any.whl.metadata (5.8 kB)
+Collecting pydantic-settings>=2.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached pydantic_settings-2.13.1-py3-none-any.whl.metadata (3.4 kB)
+Collecting pybase64>=1.4.1 (from chromadb->-r requirements.txt (line 103))
+  Using cached pybase64-1.4.3-cp312-cp312-win_amd64.whl.metadata (9.1 kB)
+Collecting onnxruntime>=1.14.1 (from chromadb->-r requirements.txt (line 103))
+  Using cached onnxruntime-1.24.4-cp312-cp312-win_amd64.whl.metadata (5.4 kB)
+Collecting opentelemetry-api>=1.2.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_api-1.41.0-py3-none-any.whl.metadata (1.5 kB)
+Collecting opentelemetry-exporter-otlp-proto-grpc>=1.2.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_exporter_otlp_proto_grpc-1.41.0-py3-none-any.whl.metadata (2.6 kB)
+Collecting opentelemetry-sdk>=1.2.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_sdk-1.41.0-py3-none-any.whl.metadata (1.7 kB)
+Collecting tokenizers>=0.13.2 (from chromadb->-r requirements.txt (line 103))
+  Using cached tokenizers-0.22.2-cp39-abi3-win_amd64.whl.metadata (7.4 kB)
+Collecting pypika>=0.48.9 (from chromadb->-r requirements.txt (line 103))
+  Using cached pypika-0.51.1-py2.py3-none-any.whl.metadata (51 kB)
+Collecting tqdm>=4.65.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached tqdm-4.67.3-py3-none-any.whl.metadata (57 kB)
+Collecting overrides>=7.3.1 (from chromadb->-r requirements.txt (line 103))
+  Using cached overrides-7.7.0-py3-none-any.whl.metadata (5.8 kB)
+Collecting importlib-resources (from chromadb->-r requirements.txt (line 103))
+  Using cached importlib_resources-7.1.0-py3-none-any.whl.metadata (4.0 kB)
+Collecting bcrypt>=4.0.1 (from chromadb->-r requirements.txt (line 103))
+  Using cached bcrypt-5.0.0-cp39-abi3-win_amd64.whl.metadata (10 kB)
+Collecting typer>=0.9.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached typer-0.24.1-py3-none-any.whl.metadata (16 kB)
+Collecting kubernetes>=28.1.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached kubernetes-35.0.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting mmh3>=4.0.1 (from chromadb->-r requirements.txt (line 103))
+  Using cached mmh3-5.2.1-cp312-cp312-win_amd64.whl.metadata (15 kB)
+Collecting rich>=10.11.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+Collecting langchain-classic>=1.0 (from langchain-mongodb>=0.2.0->-r requirements.txt (line 45))
+  Using cached langchain_classic-1.0.4-py3-none-any.whl.metadata (4.8 kB)
+Collecting langchain-text-splitters>=1.0 (from langchain-mongodb>=0.2.0->-r requirements.txt (line 45))
+  Using cached langchain_text_splitters-1.1.2-py3-none-any.whl.metadata (3.3 kB)
+Collecting lark<2.0.0,>=1.1.9 (from langchain-mongodb>=0.2.0->-r requirements.txt (line 45))
+  Using cached lark-1.3.1-py3-none-any.whl.metadata (1.8 kB)
+Collecting pymongo-search-utils>=0.2.1 (from langchain-mongodb>=0.2.0->-r requirements.txt (line 45))
+  Using cached pymongo_search_utils-0.3.0-py3-none-any.whl.metadata (14 kB)
+Collecting posthog>=4.5.0 (from mem0ai>=1.0.2->-r requirements.txt (line 53))
+  Using cached posthog-7.12.0-py3-none-any.whl.metadata (6.5 kB)
+Collecting pytz>=2024.1 (from mem0ai>=1.0.2->-r requirements.txt (line 53))
+  Using cached pytz-2026.1.post1-py2.py3-none-any.whl.metadata (22 kB)
+Collecting sqlalchemy>=2.0.31 (from mem0ai>=1.0.2->-r requirements.txt (line 53))
+  Using cached sqlalchemy-2.0.49-cp312-cp312-win_amd64.whl.metadata (9.8 kB)
+Collecting portalocker<4.0,>=2.7.0 (from qdrant-client>=1.12.0->-r requirements.txt (line 54))
+  Using cached portalocker-3.2.0-py3-none-any.whl.metadata (8.7 kB)
+Collecting jiter<1,>=0.10.0 (from openai>=1.50.0->-r requirements.txt (line 55))
+  Using cached jiter-0.14.0-cp312-cp312-win_amd64.whl.metadata (5.3 kB)
+Collecting jsonschema-specifications>=2023.03.6 (from jsonschema>=4.20.0->-r requirements.txt (line 70))
+  Using cached jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
+Collecting referencing>=0.28.4 (from jsonschema>=4.20.0->-r requirements.txt (line 70))
+  Using cached referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+Collecting rpds-py>=0.25.0 (from jsonschema>=4.20.0->-r requirements.txt (line 70))
+  Using cached rpds_py-0.30.0-cp312-cp312-win_amd64.whl.metadata (4.2 kB)
+Collecting huggingface-hub>=0.23.0 (from sentence-transformers->-r requirements.txt (line 76))
+  Using cached huggingface_hub-1.11.0-py3-none-any.whl.metadata (14 kB)
+Collecting scikit-learn>=0.22.0 (from sentence-transformers->-r requirements.txt (line 76))
+  Using cached scikit_learn-1.8.0-cp312-cp312-win_amd64.whl.metadata (11 kB)
+Collecting scipy>=1.0.0 (from sentence-transformers->-r requirements.txt (line 76))
+  Using cached scipy-1.17.1-cp312-cp312-win_amd64.whl.metadata (60 kB)
+Collecting regex>=2025.10.22 (from transformers>=4.30.0->-r requirements.txt (line 81))
+  Using cached regex-2026.4.4-cp312-cp312-win_amd64.whl.metadata (41 kB)
+Collecting safetensors>=0.4.3 (from transformers>=4.30.0->-r requirements.txt (line 81))
+  Using cached safetensors-0.7.0-cp38-abi3-win_amd64.whl.metadata (4.2 kB)
+Collecting filelock>=3.10.0 (from huggingface-hub>=0.23.0->sentence-transformers->-r requirements.txt (line 76))
+  Using cached filelock-3.28.0-py3-none-any.whl.metadata (2.0 kB)
+Collecting fsspec>=2023.5.0 (from huggingface-hub>=0.23.0->sentence-transformers->-r requirements.txt (line 76))
+  Using cached fsspec-2026.3.0-py3-none-any.whl.metadata (10 kB)
+Collecting hf-xet<2.0.0,>=1.4.3 (from huggingface-hub>=0.23.0->sentence-transformers->-r requirements.txt (line 76))
+  Using cached hf_xet-1.4.3-cp37-abi3-win_amd64.whl.metadata (4.9 kB)
+Collecting setuptools<82 (from torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached setuptools-81.0.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting sympy>=1.13.3 (from torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached sympy-1.14.0-py3-none-any.whl.metadata (12 kB)
+Collecting networkx>=2.5.1 (from torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached networkx-3.6.1-py3-none-any.whl.metadata (6.8 kB)
+Collecting jinja2 (from torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached jinja2-3.1.6-py3-none-any.whl.metadata (2.9 kB)
+Collecting matplotlib>=3.3.0 (from ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached matplotlib-3.10.8-cp312-cp312-win_amd64.whl.metadata (52 kB)
+Collecting psutil>=5.8.0 (from ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached psutil-7.2.2-cp37-abi3-win_amd64.whl.metadata (22 kB)
+Collecting polars>=0.20.0 (from ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached polars-1.39.3-py3-none-any.whl.metadata (10 kB)
+Collecting ultralytics-thop>=2.0.18 (from ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached ultralytics_thop-2.0.18-py3-none-any.whl.metadata (14 kB)
+Collecting click>=7.0 (from uvicorn>=0.30.0->uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached click-8.1.8-py3-none-any.whl.metadata (2.3 kB)
+Collecting colorama (from click>=7.0->uvicorn>=0.30.0->uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached colorama-0.4.6-py2.py3-none-any.whl.metadata (17 kB)
+Collecting docstring-parser<1,>=0.15 (from anthropic->-r requirements.txt (line 88))
+  Using cached docstring_parser-0.18.0-py3-none-any.whl.metadata (3.5 kB)
+Collecting face-recognition-models>=0.3.0 (from face-recognition->-r requirements.txt (line 93))
+  Using cached face_recognition_models-0.3.0.tar.gz (100.1 MB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting dlib>=19.7 (from face-recognition->-r requirements.txt (line 93))
+  Using cached dlib-20.0.1.tar.gz (3.3 MB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting six (from pywinauto->-r requirements.txt (line 97))
+  Using cached six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting comtypes (from pywinauto->-r requirements.txt (line 97))
+  Using cached comtypes-1.4.16-py3-none-any.whl.metadata (7.8 kB)
+Collecting pymsgbox (from pyautogui->-r requirements.txt (line 98))
+  Using cached pymsgbox-2.0.1-py3-none-any.whl.metadata (4.4 kB)
+Collecting pytweening>=1.0.4 (from pyautogui->-r requirements.txt (line 98))
+  Using cached pytweening-1.2.0.tar.gz (171 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pyscreeze>=0.1.21 (from pyautogui->-r requirements.txt (line 98))
+  Using cached pyscreeze-1.0.1.tar.gz (27 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pygetwindow>=0.0.5 (from pyautogui->-r requirements.txt (line 98))
+  Using cached PyGetWindow-0.0.9.tar.gz (9.7 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting mouseinfo (from pyautogui->-r requirements.txt (line 98))
+  Using cached MouseInfo-0.1.3.tar.gz (10 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pyee<14,>=13 (from playwright->-r requirements.txt (line 101))
+  Using cached pyee-13.0.1-py3-none-any.whl.metadata (3.0 kB)
+Collecting greenlet<4.0.0,>=3.1.1 (from playwright->-r requirements.txt (line 101))
+  Using cached greenlet-3.4.0-cp312-cp312-win_amd64.whl.metadata (3.8 kB)
+Collecting lxml (from uiautomator2->-r requirements.txt (line 104))
+  Using cached lxml-6.0.4-cp312-cp312-win_amd64.whl.metadata (3.2 kB)
+Collecting retry2<0.10.0,>=0.9.5 (from uiautomator2->-r requirements.txt (line 104))
+  Using cached retry2-0.9.5-py2.py3-none-any.whl.metadata (6.4 kB)
+Collecting deprecation<3.0,>=2.0.6 (from adbutils->-r requirements.txt (line 105))
+  Using cached deprecation-2.1.0-py2.py3-none-any.whl.metadata (4.6 kB)
+Collecting decorator>=3.4.2 (from retry2<0.10.0,>=0.9.5->uiautomator2->-r requirements.txt (line 104))
+  Using cached decorator-5.2.1-py3-none-any.whl.metadata (3.9 kB)
+Collecting pygments<3.0.0,>=2.12.0 (from apkutils->-r requirements.txt (line 106))
+  Using cached pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting beautifulsoup4<5.0.0,>=4.10.0 (from apkutils->-r requirements.txt (line 106))
+  Using cached beautifulsoup4-4.14.3-py3-none-any.whl.metadata (3.8 kB)
+Collecting pyelftools<0.28,>=0.27 (from apkutils->-r requirements.txt (line 106))
+  Using cached pyelftools-0.27-py2.py3-none-any.whl.metadata (408 bytes)
+Collecting pyftype<2.0.0,>=1.2.4 (from apkutils->-r requirements.txt (line 106))
+  Using cached pyftype-1.2.4-py3-none-any.whl.metadata (2.7 kB)
+Collecting colorlog<7.0.0,>=6.7.0 (from apkutils->-r requirements.txt (line 106))
+  Using cached colorlog-6.10.1-py3-none-any.whl.metadata (11 kB)
+Collecting soupsieve>=1.6.1 (from beautifulsoup4<5.0.0,>=4.10.0->apkutils->-r requirements.txt (line 106))
+  Using cached soupsieve-2.8.3-py3-none-any.whl.metadata (4.6 kB)
+Collecting libusb1>=1.0.16 (from adb->-r requirements.txt (line 107))
+  Using cached libusb1-3.3.1-py3-none-win_amd64.whl.metadata (16 kB)
+Collecting M2Crypto<=0.26.4,>=0.21.1 (from adb->-r requirements.txt (line 107))
+  Using cached M2Crypto-0.26.4.tar.gz (1.1 MB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting typing (from M2Crypto<=0.26.4,>=0.21.1->adb->-r requirements.txt (line 107))
+  Using cached typing-3.7.4.1-py3-none-any.whl.metadata (1.8 kB)
+Collecting h2<5,>=3 (from httpx[http2]>=0.20.0->qdrant-client>=1.12.0->-r requirements.txt (line 54))
+  Using cached h2-4.3.0-py3-none-any.whl.metadata (5.1 kB)
+Collecting hyperframe<7,>=6.1 (from h2<5,>=3->httpx[http2]>=0.20.0->qdrant-client>=1.12.0->-r requirements.txt (line 54))
+  Using cached hyperframe-6.1.0-py3-none-any.whl.metadata (4.3 kB)
+Collecting hpack<5,>=4.1 (from h2<5,>=3->httpx[http2]>=0.20.0->qdrant-client>=1.12.0->-r requirements.txt (line 54))
+  Using cached hpack-4.1.0-py3-none-any.whl.metadata (4.6 kB)
+Collecting pyproject_hooks (from build>=1.0.3->chromadb->-r requirements.txt (line 103))
+  Using cached pyproject_hooks-1.2.0-py3-none-any.whl.metadata (1.3 kB)
+Collecting cffi>=2.0.0 (from cryptography>=38.0.3->google-auth>=2.23.0->-r requirements.txt (line 33))
+  Using cached cffi-2.0.0-cp312-cp312-win_amd64.whl.metadata (2.6 kB)
+Collecting pycparser (from cffi>=2.0.0->cryptography>=38.0.3->google-auth>=2.23.0->-r requirements.txt (line 33))
+  Using cached pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+Collecting python-dateutil>=2.5.3 (from kubernetes>=28.1.0->chromadb->-r requirements.txt (line 103))
+  Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting websocket-client!=0.40.0,!=0.41.*,!=0.42.*,>=0.32.0 (from kubernetes>=28.1.0->chromadb->-r requirements.txt (line 103))
+  Using cached websocket_client-1.9.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting durationpy>=0.7 (from kubernetes>=28.1.0->chromadb->-r requirements.txt (line 103))
+  Using cached durationpy-0.10-py3-none-any.whl.metadata (340 bytes)
+Collecting contourpy>=1.0.1 (from matplotlib>=3.3.0->ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached contourpy-1.3.3-cp312-cp312-win_amd64.whl.metadata (5.5 kB)
+Collecting cycler>=0.10 (from matplotlib>=3.3.0->ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached cycler-0.12.1-py3-none-any.whl.metadata (3.8 kB)
+Collecting fonttools>=4.22.0 (from matplotlib>=3.3.0->ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached fonttools-4.62.1-cp312-cp312-win_amd64.whl.metadata (119 kB)
+Collecting kiwisolver>=1.3.1 (from matplotlib>=3.3.0->ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached kiwisolver-1.5.0-cp312-cp312-win_amd64.whl.metadata (5.2 kB)
+Collecting flatbuffers (from onnxruntime>=1.14.1->chromadb->-r requirements.txt (line 103))
+  Using cached flatbuffers-25.12.19-py2.py3-none-any.whl.metadata (1.0 kB)
+Collecting importlib-metadata<8.8.0,>=6.0 (from opentelemetry-api>=1.2.0->chromadb->-r requirements.txt (line 103))
+  Using cached importlib_metadata-8.7.1-py3-none-any.whl.metadata (4.7 kB)
+Collecting zipp>=3.20 (from importlib-metadata<8.8.0,>=6.0->opentelemetry-api>=1.2.0->chromadb->-r requirements.txt (line 103))
+  Using cached zipp-3.23.1-py3-none-any.whl.metadata (3.6 kB)
+Collecting opentelemetry-exporter-otlp-proto-common==1.41.0 (from opentelemetry-exporter-otlp-proto-grpc>=1.2.0->chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_exporter_otlp_proto_common-1.41.0-py3-none-any.whl.metadata (1.9 kB)
+Collecting opentelemetry-proto==1.41.0 (from opentelemetry-exporter-otlp-proto-grpc>=1.2.0->chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_proto-1.41.0-py3-none-any.whl.metadata (2.4 kB)
+Collecting opentelemetry-semantic-conventions==0.62b0 (from opentelemetry-sdk>=1.2.0->chromadb->-r requirements.txt (line 103))
+  Using cached opentelemetry_semantic_conventions-0.62b0-py3-none-any.whl.metadata (2.5 kB)
+Collecting polars-runtime-32==1.39.3 (from polars>=0.20.0->ultralytics>=8.0.0->-r requirements.txt (line 84))
+  Using cached polars_runtime_32-1.39.3-cp310-abi3-win_amd64.whl.metadata (1.5 kB)
+Collecting backoff>=1.10.0 (from posthog>=4.5.0->mem0ai>=1.0.2->-r requirements.txt (line 53))
+  Using cached backoff-2.2.1-py3-none-any.whl.metadata (14 kB)
+Collecting pyasn1<0.7.0,>=0.6.1 (from pyasn1-modules>=0.2.1->google-auth>=2.23.0->-r requirements.txt (line 33))
+  Using cached pyasn1-0.6.3-py3-none-any.whl.metadata (8.4 kB)
+Collecting pyrect (from pygetwindow>=0.0.5->pyautogui->-r requirements.txt (line 98))
+  Using cached PyRect-0.2.0.tar.gz (17 kB)
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting oauthlib>=3.0.0 (from requests-oauthlib>=0.7.0->google-auth-oauthlib>=1.2.0->-r requirements.txt (line 35))
+  Using cached oauthlib-3.3.1-py3-none-any.whl.metadata (7.9 kB)
+Collecting markdown-it-py>=2.2.0 (from rich>=10.11.0->chromadb->-r requirements.txt (line 103))
+  Using cached markdown_it_py-4.0.0-py3-none-any.whl.metadata (7.3 kB)
+Collecting mdurl~=0.1 (from markdown-it-py>=2.2.0->rich>=10.11.0->chromadb->-r requirements.txt (line 103))
+  Using cached mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+Collecting joblib>=1.3.0 (from scikit-learn>=0.22.0->sentence-transformers->-r requirements.txt (line 76))
+  Using cached joblib-1.5.3-py3-none-any.whl.metadata (5.5 kB)
+Collecting threadpoolctl>=3.2.0 (from scikit-learn>=0.22.0->sentence-transformers->-r requirements.txt (line 76))
+  Using cached threadpoolctl-3.6.0-py3-none-any.whl.metadata (13 kB)
+Collecting mpmath<1.4,>=1.1.0 (from sympy>=1.13.3->torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached mpmath-1.3.0-py3-none-any.whl.metadata (8.6 kB)
+INFO: pip is looking at multiple versions of typer to determine which version is compatible with other requirements. This could take a while.
+Collecting typer>=0.9.0 (from chromadb->-r requirements.txt (line 103))
+  Using cached typer-0.24.0-py3-none-any.whl.metadata (16 kB)
+  Using cached typer-0.23.2-py3-none-any.whl.metadata (16 kB)
+  Using cached typer-0.23.1-py3-none-any.whl.metadata (16 kB)
+Collecting shellingham>=1.3.0 (from typer>=0.9.0->chromadb->-r requirements.txt (line 103))
+  Using cached shellingham-1.5.4-py2.py3-none-any.whl.metadata (3.5 kB)
+Collecting httptools>=0.6.3 (from uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached httptools-0.7.1-cp312-cp312-win_amd64.whl.metadata (3.6 kB)
+Collecting watchfiles>=0.20 (from uvicorn[standard]>=0.30.0->-r requirements.txt (line 3))
+  Using cached watchfiles-1.1.1-cp312-cp312-win_amd64.whl.metadata (5.0 kB)
+Collecting MarkupSafe>=2.0 (from jinja2->torch>=2.0.0->-r requirements.txt (line 79))
+  Using cached markupsafe-3.0.3-cp312-cp312-win_amd64.whl.metadata (2.8 kB)
+Collecting pyperclip (from mouseinfo->pyautogui->-r requirements.txt (line 98))
+  Using cached pyperclip-1.11.0-py3-none-any.whl.metadata (2.4 kB)
+Using cached fastapi-0.136.0-py3-none-any.whl (117 kB)
+Using cached uvicorn-0.44.0-py3-none-any.whl (69 kB)
+Using cached python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Using cached httpx-0.28.1-py3-none-any.whl (73 kB)
+Using cached httpcore-1.0.9-py3-none-any.whl (78 kB)
+Using cached requests-2.33.1-py3-none-any.whl (64 kB)
+Using cached charset_normalizer-3.4.7-cp312-cp312-win_amd64.whl (159 kB)
+Using cached idna-3.11-py3-none-any.whl (71 kB)
+Using cached urllib3-2.6.3-py3-none-any.whl (131 kB)
+Using cached aiohttp-3.13.5-cp312-cp312-win_amd64.whl (460 kB)
+Using cached multidict-6.7.1-cp312-cp312-win_amd64.whl (46 kB)
+Using cached yarl-1.23.0-cp312-cp312-win_amd64.whl (87 kB)
+Using cached googleapis_common_protos-1.74.0-py3-none-any.whl (300 kB)
+Using cached grpcio-1.80.0-cp312-cp312-win_amd64.whl (4.9 MB)
+Using cached typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Using cached grpcio_status-1.80.0-py3-none-any.whl (14 kB)
+Using cached protobuf-6.33.6-cp310-abi3-win_amd64.whl (437 kB)
+Using cached google_api_core-2.30.3-py3-none-any.whl (173 kB)
+Using cached google_auth-2.49.2-py3-none-any.whl (240 kB)
+Using cached proto_plus-1.27.2-py3-none-any.whl (50 kB)
+Using cached langchain-1.2.15-py3-none-any.whl (112 kB)
+Using cached langchain_core-1.3.0-py3-none-any.whl (515 kB)
+Using cached langgraph-1.1.7-py3-none-any.whl (173 kB)
+Using cached langgraph_checkpoint-4.0.2-py3-none-any.whl (51 kB)
+Using cached pydantic-2.13.2-py3-none-any.whl (471 kB)
+Using cached pydantic_core-2.46.2-cp312-cp312-win_amd64.whl (2.1 MB)
+Using cached tenacity-9.1.4-py3-none-any.whl (28 kB)
+Using cached langsmith-0.7.32-py3-none-any.whl (378 kB)
+Using cached pyyaml-6.0.3-cp312-cp312-win_amd64.whl (154 kB)
+Using cached jsonpatch-1.33-py2.py3-none-any.whl (12 kB)
+Using cached langgraph_prebuilt-1.0.9-py3-none-any.whl (35 kB)
+Using cached langgraph_sdk-0.3.13-py3-none-any.whl (96 kB)
+Using cached uuid_utils-0.14.1-cp39-abi3-win_amd64.whl (187 kB)
+Using cached langchain_google_genai-4.2.2-py3-none-any.whl (67 kB)
+Using cached google_genai-1.73.1-py3-none-any.whl (783 kB)
+Using cached anyio-4.13.0-py3-none-any.whl (114 kB)
+Using cached distro-1.9.0-py3-none-any.whl (20 kB)
+Using cached filetype-1.2.0-py2.py3-none-any.whl (19 kB)
+Using cached websockets-16.0-cp312-cp312-win_amd64.whl (178 kB)
+Using cached langchain_groq-1.1.2-py3-none-any.whl (19 kB)
+Using cached groq-0.37.1-py3-none-any.whl (137 kB)
+Using cached google_api_python_client-2.194.0-py3-none-any.whl (15.0 MB)
+Using cached google_auth_httplib2-0.3.1-py3-none-any.whl (9.5 kB)
+Using cached httplib2-0.31.2-py3-none-any.whl (91 kB)
+Using cached pyparsing-3.3.2-py3-none-any.whl (122 kB)
+Using cached uritemplate-4.2.0-py3-none-any.whl (11 kB)
+Using cached google_auth_oauthlib-1.3.1-py3-none-any.whl (19 kB)
+Using cached google_cloud_speech-2.38.0-py3-none-any.whl (346 kB)
+Using cached google_cloud_texttospeech-2.36.0-py3-none-any.whl (200 kB)
+Using cached langgraph_checkpoint_sqlite-3.0.3-py3-none-any.whl (33 kB)
+Using cached langgraph_checkpoint_mongodb-0.3.1-py3-none-any.whl (8.1 kB)
+Using cached pymongo-4.15.5-cp312-cp312-win_amd64.whl (910 kB)
+Using cached dnspython-2.8.0-py3-none-any.whl (331 kB)
+Using cached langchain_chroma-1.1.0-py3-none-any.whl (12 kB)
+Using cached chromadb-1.5.8-cp39-abi3-win_amd64.whl (23.4 MB)
+Using cached langchain_mongodb-0.11.0-py3-none-any.whl (62 kB)
+Using cached lark-1.3.1-py3-none-any.whl (113 kB)
+Using cached motor-3.7.1-py3-none-any.whl (74 kB)
+Using cached mem0ai-2.0.0-py3-none-any.whl (298 kB)
+Using cached qdrant_client-1.17.1-py3-none-any.whl (389 kB)
+Using cached portalocker-3.2.0-py3-none-any.whl (22 kB)
+Using cached openai-2.32.0-py3-none-any.whl (1.2 MB)
+Using cached jiter-0.14.0-cp312-cp312-win_amd64.whl (201 kB)
+Using cached numpy-2.4.4-cp312-cp312-win_amd64.whl (12.3 MB)
+Using cached jsonschema-4.26.0-py3-none-any.whl (90 kB)
+Using cached pywin32-311-cp312-cp312-win_amd64.whl (9.5 MB)
+Using cached sentence_transformers-5.4.1-py3-none-any.whl (571 kB)
+Using cached transformers-5.5.4-py3-none-any.whl (10.2 MB)
+Using cached huggingface_hub-1.11.0-py3-none-any.whl (645 kB)
+Using cached hf_xet-1.4.3-cp37-abi3-win_amd64.whl (3.7 MB)
+Using cached tokenizers-0.22.2-cp39-abi3-win_amd64.whl (2.7 MB)
+Using cached torch-2.11.0-cp312-cp312-win_amd64.whl (114.6 MB)
+Using cached setuptools-81.0.0-py3-none-any.whl (1.1 MB)
+Using cached torchvision-0.26.0-cp312-cp312-win_amd64.whl (4.3 MB)
+Using cached pillow-12.2.0-cp312-cp312-win_amd64.whl (7.1 MB)
+Using cached opencv_python-4.13.0.92-cp37-abi3-win_amd64.whl (40.2 MB)
+Using cached ultralytics-8.4.38-py3-none-any.whl (1.2 MB)
+Using cached gTTS-2.5.4-py3-none-any.whl (29 kB)
+Using cached click-8.1.8-py3-none-any.whl (98 kB)
+Using cached anthropic-0.96.0-py3-none-any.whl (635 kB)
+Using cached docstring_parser-0.18.0-py3-none-any.whl (22 kB)
+Using cached face_recognition-1.3.0-py2.py3-none-any.whl (15 kB)
+Using cached python_multipart-0.0.26-py3-none-any.whl (28 kB)
+Using cached pywinauto-0.6.9-py2.py3-none-any.whl (363 kB)
+Using cached pytesseract-0.3.13-py3-none-any.whl (14 kB)
+Using cached playwright-1.58.0-py3-none-win_amd64.whl (36.8 MB)
+Using cached greenlet-3.4.0-cp312-cp312-win_amd64.whl (238 kB)
+Using cached pyee-13.0.1-py3-none-any.whl (15 kB)
+Using cached docker-7.1.0-py3-none-any.whl (147 kB)
+Using cached uiautomator2-3.5.0-py3-none-any.whl (5.2 MB)
+Using cached adbutils-2.12.0-py3-none-win_amd64.whl (3.3 MB)
+Using cached deprecation-2.1.0-py2.py3-none-any.whl (11 kB)
+Using cached retry2-0.9.5-py2.py3-none-any.whl (6.0 kB)
+Using cached apkutils-2.0.5-py3-none-any.whl (492 kB)
+Using cached beautifulsoup4-4.14.3-py3-none-any.whl (107 kB)
+Using cached colorlog-6.10.1-py3-none-any.whl (11 kB)
+Using cached pyelftools-0.27-py2.py3-none-any.whl (151 kB)
+Using cached pyftype-1.2.4-py3-none-any.whl (13 kB)
+Using cached pygments-2.20.0-py3-none-any.whl (1.2 MB)
+Using cached rapidfuzz-3.14.5-cp312-cp312-win_amd64.whl (1.5 MB)
+Using cached cerebras_cloud_sdk-1.67.0-py3-none-any.whl (97 kB)
+Using cached h2-4.3.0-py3-none-any.whl (61 kB)
+Using cached hpack-4.1.0-py3-none-any.whl (34 kB)
+Using cached hyperframe-6.1.0-py3-none-any.whl (13 kB)
+Using cached aiohappyeyeballs-2.6.1-py3-none-any.whl (15 kB)
+Using cached aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Using cached aiosqlite-0.22.1-py3-none-any.whl (17 kB)
+Using cached annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
+Using cached annotated_types-0.7.0-py3-none-any.whl (13 kB)
+Using cached attrs-26.1.0-py3-none-any.whl (67 kB)
+Using cached bcrypt-5.0.0-cp39-abi3-win_amd64.whl (150 kB)
+Using cached build-1.4.3-py3-none-any.whl (26 kB)
+Using cached certifi-2026.2.25-py3-none-any.whl (153 kB)
+Using cached cryptography-46.0.7-cp311-abi3-win_amd64.whl (3.5 MB)
+Using cached cffi-2.0.0-cp312-cp312-win_amd64.whl (183 kB)
+Using cached decorator-5.2.1-py3-none-any.whl (9.2 kB)
+Using cached filelock-3.28.0-py3-none-any.whl (39 kB)
+Using cached frozenlist-1.8.0-cp312-cp312-win_amd64.whl (44 kB)
+Using cached fsspec-2026.3.0-py3-none-any.whl (202 kB)
+Using cached h11-0.16.0-py3-none-any.whl (37 kB)
+Using cached jsonpointer-3.1.1-py3-none-any.whl (7.7 kB)
+Using cached jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+Using cached kubernetes-35.0.0-py2.py3-none-any.whl (2.0 MB)
+Using cached durationpy-0.10-py3-none-any.whl (3.9 kB)
+Using cached langchain_classic-1.0.4-py3-none-any.whl (1.0 MB)
+Using cached langchain_text_splitters-1.1.2-py3-none-any.whl (35 kB)
+Using cached sqlalchemy-2.0.49-cp312-cp312-win_amd64.whl (2.1 MB)
+Using cached libusb1-3.3.1-py3-none-win_amd64.whl (141 kB)
+Using cached lxml-6.0.4-cp312-cp312-win_amd64.whl (4.0 MB)
+Using cached matplotlib-3.10.8-cp312-cp312-win_amd64.whl (8.1 MB)
+Using cached contourpy-1.3.3-cp312-cp312-win_amd64.whl (226 kB)
+Using cached cycler-0.12.1-py3-none-any.whl (8.3 kB)
+Using cached fonttools-4.62.1-cp312-cp312-win_amd64.whl (2.3 MB)
+Using cached kiwisolver-1.5.0-cp312-cp312-win_amd64.whl (73 kB)
+Using cached mmh3-5.2.1-cp312-cp312-win_amd64.whl (41 kB)
+Using cached networkx-3.6.1-py3-none-any.whl (2.1 MB)
+Using cached onnxruntime-1.24.4-cp312-cp312-win_amd64.whl (12.6 MB)
+Using cached opentelemetry_api-1.41.0-py3-none-any.whl (69 kB)
+Using cached importlib_metadata-8.7.1-py3-none-any.whl (27 kB)
+Using cached opentelemetry_exporter_otlp_proto_grpc-1.41.0-py3-none-any.whl (20 kB)
+Using cached opentelemetry_exporter_otlp_proto_common-1.41.0-py3-none-any.whl (18 kB)
+Using cached opentelemetry_proto-1.41.0-py3-none-any.whl (72 kB)
+Using cached opentelemetry_sdk-1.41.0-py3-none-any.whl (180 kB)
+Using cached opentelemetry_semantic_conventions-0.62b0-py3-none-any.whl (231 kB)
+Using cached orjson-3.11.8-cp312-cp312-win_amd64.whl (127 kB)
+Using cached ormsgpack-1.12.2-cp312-cp312-win_amd64.whl (117 kB)
+Using cached overrides-7.7.0-py3-none-any.whl (17 kB)
+Using cached polars-1.39.3-py3-none-any.whl (823 kB)
+Using cached polars_runtime_32-1.39.3-cp310-abi3-win_amd64.whl (47.0 MB)
+Using cached posthog-7.12.0-py3-none-any.whl (226 kB)
+Using cached backoff-2.2.1-py3-none-any.whl (15 kB)
+Using cached propcache-0.4.1-cp312-cp312-win_amd64.whl (41 kB)
+Using cached psutil-7.2.2-cp37-abi3-win_amd64.whl (137 kB)
+Using cached pyasn1_modules-0.4.2-py3-none-any.whl (181 kB)
+Using cached pyasn1-0.6.3-py3-none-any.whl (83 kB)
+Using cached pybase64-1.4.3-cp312-cp312-win_amd64.whl (35 kB)
+Using cached pydantic_settings-2.13.1-py3-none-any.whl (58 kB)
+Using cached pymongo_search_utils-0.3.0-py3-none-any.whl (19 kB)
+Using cached pypika-0.51.1-py2.py3-none-any.whl (60 kB)
+Using cached python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Using cached pytz-2026.1.post1-py2.py3-none-any.whl (510 kB)
+Using cached referencing-0.37.0-py3-none-any.whl (26 kB)
+Using cached regex-2026.4.4-cp312-cp312-win_amd64.whl (277 kB)
+Using cached requests_oauthlib-2.0.0-py2.py3-none-any.whl (24 kB)
+Using cached oauthlib-3.3.1-py3-none-any.whl (160 kB)
+Using cached requests_toolbelt-1.0.0-py2.py3-none-any.whl (54 kB)
+Using cached rich-15.0.0-py3-none-any.whl (310 kB)
+Using cached markdown_it_py-4.0.0-py3-none-any.whl (87 kB)
+Using cached mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Using cached rpds_py-0.30.0-cp312-cp312-win_amd64.whl (240 kB)
+Using cached safetensors-0.7.0-cp38-abi3-win_amd64.whl (341 kB)
+Using cached scikit_learn-1.8.0-cp312-cp312-win_amd64.whl (8.0 MB)
+Using cached joblib-1.5.3-py3-none-any.whl (309 kB)
+Using cached scipy-1.17.1-cp312-cp312-win_amd64.whl (36.5 MB)
+Using cached six-1.17.0-py2.py3-none-any.whl (11 kB)
+Using cached soupsieve-2.8.3-py3-none-any.whl (37 kB)
+Using cached sqlite_vec-0.1.9-py3-none-win_amd64.whl (292 kB)
+Using cached starlette-1.0.0-py3-none-any.whl (72 kB)
+Using cached sympy-1.14.0-py3-none-any.whl (6.3 MB)
+Using cached mpmath-1.3.0-py3-none-any.whl (536 kB)
+Using cached threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
+Using cached tqdm-4.67.3-py3-none-any.whl (78 kB)
+Using cached typer-0.23.1-py3-none-any.whl (56 kB)
+Using cached shellingham-1.5.4-py2.py3-none-any.whl (9.8 kB)
+Using cached typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Using cached ultralytics_thop-2.0.18-py3-none-any.whl (28 kB)
+Using cached colorama-0.4.6-py2.py3-none-any.whl (25 kB)
+Using cached httptools-0.7.1-cp312-cp312-win_amd64.whl (86 kB)
+Using cached watchfiles-1.1.1-cp312-cp312-win_amd64.whl (288 kB)
+Using cached websocket_client-1.9.0-py3-none-any.whl (82 kB)
+Using cached xxhash-3.6.0-cp312-cp312-win_amd64.whl (31 kB)
+Using cached zipp-3.23.1-py3-none-any.whl (10 kB)
+Using cached zstandard-0.25.0-cp312-cp312-win_amd64.whl (506 kB)
+Using cached comtypes-1.4.16-py3-none-any.whl (296 kB)
+Using cached flatbuffers-25.12.19-py2.py3-none-any.whl (26 kB)
+Using cached importlib_resources-7.1.0-py3-none-any.whl (37 kB)
+Using cached jinja2-3.1.6-py3-none-any.whl (134 kB)
+Using cached markupsafe-3.0.3-cp312-cp312-win_amd64.whl (15 kB)
+Using cached pycparser-3.0-py3-none-any.whl (48 kB)
+Using cached pymsgbox-2.0.1-py3-none-any.whl (10.0 kB)
+Using cached pyperclip-1.11.0-py3-none-any.whl (11 kB)
+Using cached pyproject_hooks-1.2.0-py3-none-any.whl (10 kB)
+Using cached sniffio-1.3.1-py3-none-any.whl (10 kB)
+Using cached typing-3.7.4.1-py3-none-any.whl (25 kB)
+Building wheels for collected packages: pyautogui, M2Crypto, dlib, face-recognition-models, pygetwindow, pyscreeze, pytweening, mouseinfo, pyrect
+  Building wheel for pyautogui (pyproject.toml): started
+  Building wheel for pyautogui (pyproject.toml): finished with status 'done'
+  Created wheel for pyautogui: filename=pyautogui-0.9.54-py3-none-any.whl size=37707 sha256=42fed35bdcbc7a37bdbda44b96b7b08efe7e65460100e1c87b7ae3dadf76d91c
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\d9\d6\47\04075995b093ecc87c212c9a3dbd34e59456c6fe504d65c3e4
+  Building wheel for M2Crypto (pyproject.toml): started
+  Building wheel for M2Crypto (pyproject.toml): finished with status 'error'
+  error: subprocess-exited-with-error
+  
+  Building wheel for M2Crypto (pyproject.toml) did not run successfully.
+  exit code: 1
+  
+  [59 lines of output]
+  <string>:72: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  C:\Users\a\AppData\Local\Temp\pip-build-env-gky8xe62\overlay\Lib\site-packages\setuptools\_distutils\dist.py:287: UserWarning: Unknown distribution option: 'test_suite'
+    warnings.warn(msg)
+  running bdist_wheel
+  <string>:74: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  running build
+  running build_py
+  copying M2Crypto\ASN1.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\AuthCookie.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\BIO.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\BN.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\callback.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\DH.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\DSA.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\EC.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\Engine.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\Err.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\EVP.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\ftpslib.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\httpslib.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\m2.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\m2crypto.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\m2urllib.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\m2urllib2.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\m2xmlrpclib.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\Rand.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\RC4.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\RSA.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\six.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\SMIME.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\threading.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\util.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\X509.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  copying M2Crypto\__init__.py -> build\lib.win-amd64-cpython-312\M2Crypto
+  creating build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\constants.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\packet.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\PublicKey.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\PublicKeyRing.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\RSA.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  copying M2Crypto\PGP\__init__.py -> build\lib.win-amd64-cpython-312\M2Crypto\PGP
+  creating build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\cb.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\Checker.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\Cipher.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\Connection.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\Context.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\Session.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\SSLServer.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\ssl_dispatcher.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\timeout.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\TwistedProtocolWrapper.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  copying M2Crypto\SSL\__init__.py -> build\lib.win-amd64-cpython-312\M2Crypto\SSL
+  running build_ext
+  building 'M2Crypto._m2crypto' extension
+  creating build\temp.win-amd64-cpython-312\Release\SWIG
+  "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX86\x64\cl.exe" /c /nologo /O2 /W3 /GL /DNDEBUG /MD -ID:\AURA\backend\venv_new\include -IC:\Users\a\AppData\Local\Programs\Python\Python312\include -IC:\Users\a\AppData\Local\Programs\Python\Python312\Include "-IC:\Program Files\OpenSSL\include" -IC:\Users\a\AppData\Local\Temp\pip-install-z4v040c3\m2crypto_31e50dc62cd54f31a0df48b6c8fec231\SWIG "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\ATLMFC\include" "-IC:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include" "-IC:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\winrt" "-IC:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\cppwinrt" "-IC:\Program Files (x86)\Windows Kits\NETFXSDK\4.8\include\um" /TcSWIG/_m2crypto_wrap.c /Fobuild\temp.win-amd64-cpython-312\Release\SWIG\_m2crypto_wrap.obj -DTHREADING -D_CRT_SECURE_NO_WARNINGS -Wno-deprecated-declarations
+  cl : Command line error D8021 : invalid numeric argument '/Wno-deprecated-declarations'
+  error: command 'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX86\\x64\\cl.exe' failed with exit code 2
+  [end of output]
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+  ERROR: Failed building wheel for M2Crypto
+  Building wheel for dlib (pyproject.toml): started
+  Building wheel for dlib (pyproject.toml): still running...
+  Building wheel for dlib (pyproject.toml): still running...
+  Building wheel for dlib (pyproject.toml): finished with status 'done'
+  Created wheel for dlib: filename=dlib-20.0.1-cp312-cp312-win_amd64.whl size=2750323 sha256=b91b282febc342b513aacabb8daf892f9ea8218b553dcb9aee3782aa46edd808
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\0d\a3\e4\89c1a393cbb86433554f89465e1f2b4c647bca9f256b454b62
+  Building wheel for face-recognition-models (pyproject.toml): started
+  Building wheel for face-recognition-models (pyproject.toml): finished with status 'done'
+  Created wheel for face-recognition-models: filename=face_recognition_models-0.3.0-py2.py3-none-any.whl size=100566259 sha256=ab32d14edd23e03b2c12f74f474ed1ee53964fc1d203e27e250008fccf4572c6
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\8f\47\c8\f44c5aebb7507f7c8a2c0bd23151d732d0f0bd6884ad4ac635
+  Building wheel for pygetwindow (pyproject.toml): started
+  Building wheel for pygetwindow (pyproject.toml): finished with status 'done'
+  Created wheel for pygetwindow: filename=pygetwindow-0.0.9-py3-none-any.whl size=11134 sha256=d25fcac59d7907198916d1da4ddb456a74297ceba211874dac9b561af87817a7
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\b3\39\81\34dd7a2eca5f885f1f6e2796761970daf66a2d98ac1904f5f4
+  Building wheel for pyscreeze (pyproject.toml): started
+  Building wheel for pyscreeze (pyproject.toml): finished with status 'done'
+  Created wheel for pyscreeze: filename=pyscreeze-1.0.1-py3-none-any.whl size=14479 sha256=3d640ab831b41f25f938ae805bbf8b0913137b0dbc01178daea66a0089cca440
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\cd\3a\c2\7f2839239a069aa3c9564f6777cbb29d733720ef673f104f0d
+  Building wheel for pytweening (pyproject.toml): started
+  Building wheel for pytweening (pyproject.toml): finished with status 'done'
+  Created wheel for pytweening: filename=pytweening-1.2.0-py3-none-any.whl size=8134 sha256=af80c52c269811495d45625c4c4efd76c852df10bfe59b977a593eb39e731bad
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\23\d5\13\4e9bdadbfe3c78e47c675e7410c0eed2fbb63c5ea6cf1b40e7
+  Building wheel for mouseinfo (pyproject.toml): started
+  Building wheel for mouseinfo (pyproject.toml): finished with status 'done'
+  Created wheel for mouseinfo: filename=mouseinfo-0.1.3-py3-none-any.whl size=10966 sha256=b78b24781bfd36fb5c65e83c303e2d12b83779f34bec9c3eb2e5459234e69530
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\b1\9b\f3\08650eb7f00af32f07789f3c6a101e0d7fc762b9891ae843bb
+  Building wheel for pyrect (pyproject.toml): started
+  Building wheel for pyrect (pyproject.toml): finished with status 'done'
+  Created wheel for pyrect: filename=pyrect-0.2.0-py2.py3-none-any.whl size=11304 sha256=b0bd9fa209e31b0422123fb479768cd2cc2d7fb1f6e550c519bc9ec6189cc9c5
+  Stored in directory: c:\users\a\appdata\local\pip\cache\wheels\0b\1e\d7\0c74bd8f60b39c14d84e307398786002aa7ddc905927cc03c5
+Successfully built pyautogui dlib face-recognition-models pygetwindow pyscreeze pytweening mouseinfo pyrect
+Failed to build M2Crypto
+error: failed-wheel-build-for-install
+
+Failed to build installable wheels for some pyproject.toml based projects
+
+M2Crypto

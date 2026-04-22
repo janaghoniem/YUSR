@@ -733,6 +733,29 @@ class CoordinatorRAGBridge:
                         else:
                             func_def = template_code.strip()
 
+                        # Fix wrapper function calls - LLM might generate a wrapper instead of using template
+                        # Extract the actual template function name and replace any wrapper calls
+                        from agents.execution_agent.RAG.cache_mini_prompt import extract_function_name
+                        actual_func_name = extract_function_name(template_code)
+
+                        # Replace common wrapper patterns (function_name_application, function_name_app, etc.)
+                        import re
+                        wrapper_patterns = [
+                            f'{actual_func_name}_application',
+                            f'{actual_func_name}_app',
+                            f'{actual_func_name}_task',
+                            f'{actual_func_name}_execute'
+                        ]
+
+                        for wrapper_name in wrapper_patterns:
+                            # Replace wrapper function call with actual template function
+                            # Match: success = wrapper_name() or result = wrapper_name()
+                            main_code = re.sub(
+                                rf'(\w+)\s*=\s*{wrapper_name}\s*\(',
+                                rf'\1 = {actual_func_name}(',
+                                main_code
+                            )
+
                         filled_code = f"{func_def}\n\n{main_code}"
 
                         logger.info(f"📝 Generated __main__ section ({len(main_code)} chars)")

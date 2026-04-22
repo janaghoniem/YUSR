@@ -45,6 +45,14 @@ llm = ChatGroq(
     groq_api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
+# Separate instance for task decomposition — needs more tokens for multi-task JSON output
+llm_decompose = ChatGroq(
+    model=LLM_MODEL,
+    temperature=0.05,
+    max_tokens=4096,
+    groq_api_key=GROQ_API_KEY
+) if GROQ_API_KEY else None
+
 mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
 
 
@@ -68,7 +76,7 @@ def _extract_mistral_text(response_obj: Any) -> str:
         return ""
 
 
-async def llm_invoke_with_fallback(prompt: str) -> str:
+async def llm_invoke_with_fallback(prompt: str, max_tokens: int = 2048) -> str:
     if llm:
         try:
             response = await llm.ainvoke(prompt)
@@ -88,7 +96,7 @@ async def llm_invoke_with_fallback(prompt: str) -> str:
             model=MISTRAL_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.05,
-            max_tokens=2048,
+            max_tokens=max_tokens,
         )
         text = _extract_mistral_text(response)
         if text:
@@ -96,6 +104,38 @@ async def llm_invoke_with_fallback(prompt: str) -> str:
         return text
     except Exception as mistral_err:
         logger.error(f"❌ Coordinator Mistral fallback failed: {mistral_err}")
+        return ""
+
+
+async def llm_decompose_invoke_with_fallback(prompt: str) -> str:
+    """High-token fallback for decomposition (tasks that need complete JSON arrays)"""
+    if llm_decompose:
+        try:
+            response = await llm_decompose.ainvoke(prompt)
+            return response.content if hasattr(response, "content") else str(response)
+        except Exception as groq_err:
+            logger.warning(f"⚠️ Coordinator Groq decompose call failed, trying Mistral fallback: {groq_err}")
+    else:
+        logger.warning("⚠️ Coordinator Groq decompose client unavailable: GROQ_API_KEY is not set")
+
+    if not mistral_client:
+        logger.error("❌ Coordinator Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+        return ""
+
+    try:
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model=MISTRAL_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.05,
+            max_tokens=4096,
+        )
+        text = _extract_mistral_text(response)
+        if text:
+            logger.info(f"✅ Coordinator decompose fallback succeeded with Mistral ({MISTRAL_MODEL})")
+        return text
+    except Exception as mistral_err:
+        logger.error(f"❌ Coordinator Mistral decompose fallback failed: {mistral_err}")
         return ""
 
 
@@ -1046,6 +1086,21 @@ async def decompose_task_to_actions(
     else:
          device_hint += "No browser page is currently open.\n\n"
     
+    # ✅ TEMPORAL CONTEXT: Add current date so LLM uses correct year for calendar/date fields
+    from datetime import datetime
+    current_date = datetime.now()
+    temporal_hint = f"""⏰ TEMPORAL CONTEXT:
+Today's date: {current_date.strftime('%B %d, %Y')} ({current_date.strftime('%A')})
+Current year: {current_date.year}
+
+CRITICAL FOR DATE/CALENDAR TASKS:
+- When user provides a date WITHOUT a year (e.g., "May 21st", "tomorrow", "next month"), 
+  ALWAYS assume the CURRENT YEAR ({current_date.year}) unless context clearly indicates otherwise.
+- When generating calendar_create or date-based tasks, always use {current_date.year} as the default year.
+- Example: If user says "Set a calendar event for May 21st", use "2026-05-21" NOT "2024-05-21".
+
+"""
+    
     # ✅ FIX 3 + Fix 5: Build conversation history context with active app/page state
     history_context = ""
     if conversation_history:
@@ -1078,7 +1133,7 @@ async def decompose_task_to_actions(
     _clean_request = {k: v for k, v in user_request.items()
                       if not k.startswith("_icrl_")}
 
-    prompt = f"""{device_hint}You are the AURA Task Decomposition Agent. Convert user requests into low-level executable tasks.
+    prompt = f"""{device_hint}{temporal_hint}You are the AURA Task Decomposition Agent. Convert user requests into low-level executable tasks.
 
 # USER REQUEST
 {json.dumps(_clean_request, indent=2)}
@@ -1533,7 +1588,7 @@ User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
   context: local
   target_agent: action
   extra_params:
-    recipient: sara@gmail.com
+    to: sara@gmail.com
   depends_on: ["task_3"]
 
 - task_id: task_5
@@ -1716,7 +1771,7 @@ Return ONLY valid JSON array of tasks (no markdown, no explanations):
 Generate the task decomposition now:"""
 
     try:
-        response_text = await llm_invoke_with_fallback(prompt)
+        response_text = await llm_decompose_invoke_with_fallback(prompt)
         response_text = response_text.strip()
 
         # ── ROBUST JSON EXTRACTION ─────────────────────────────────────────────
@@ -1768,18 +1823,83 @@ Generate the task decomposition now:"""
 
         json_array_str = _extract_first_json_array(response_text)
 
+        # Fix literal newlines/tabs inside JSON string values
+        def _fix_newlines_in_json_strings(s: str) -> str:
+            out = []
+            in_str = False
+            esc = False
+            for ch in s:
+                if esc:
+                    out.append(ch)
+                    esc = False
+                    continue
+                if ch == '\\' and in_str:
+                    out.append(ch)
+                    esc = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    out.append(ch)
+                    continue
+                if in_str:
+                    if ch == '\n':
+                        out.append('\\n')
+                        continue
+                    if ch == '\r':
+                        out.append('\\r')
+                        continue
+                    if ch == '\t':
+                        out.append('\\t')
+                        continue
+                out.append(ch)
+            return ''.join(out)
+
+        # Strip JavaScript-style // comments outside of JSON string values
+        def _strip_js_comments(s: str) -> str:
+            out = []
+            i = 0
+            in_str = False
+            esc = False
+            while i < len(s):
+                ch = s[i]
+                if esc:
+                    out.append(ch)
+                    esc = False
+                    i += 1
+                    continue
+                if ch == '\\' and in_str:
+                    out.append(ch)
+                    esc = True
+                    i += 1
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    out.append(ch)
+                    i += 1
+                    continue
+                if not in_str and ch == '/' and i + 1 < len(s) and s[i + 1] == '/':
+                    while i < len(s) and s[i] != '\n':
+                        i += 1
+                    continue
+                out.append(ch)
+                i += 1
+            return ''.join(out)
+
+        def _sanitize_json(s: str) -> str:
+            return _strip_js_comments(_fix_newlines_in_json_strings(s))
+
         # Step C: also try top-level dict with "tasks" key as fallback
         parsed = None
         if json_array_str:
             try:
-                parsed = json.loads(json_array_str)
+                parsed = json.loads(_sanitize_json(json_array_str))
             except json.JSONDecodeError:
                 pass
 
         if parsed is None:
             # Try the whole (stripped) text as a dict
             try:
-                candidate = json.loads(response_text.strip())
+                candidate = json.loads(_sanitize_json(response_text.strip()))
                 if isinstance(candidate, dict) and "tasks" in candidate:
                     parsed = candidate["tasks"]
                 elif isinstance(candidate, list):
@@ -1850,6 +1970,8 @@ Generate the task decomposition now:"""
         # ── LLM VALIDATION PASS ────────────────────────────────────────────────
         validation_prompt = f"""You are the AURA Task Decomposition Validator. Review the proposed decomposition for the user request.
 
+{temporal_hint}
+
 USER REQUEST:
 {json.dumps(user_request, indent=2)}
 
@@ -1882,7 +2004,9 @@ If the plan violates this common‑sense device logic, you MAY add missing steps
 Return ONLY a valid JSON array of tasks (same format as input). Do not include markdown or explanations.
 """
         try:
-            val_text = await llm_invoke_with_fallback(validation_prompt)
+            # Brief pause to avoid back-to-back rate limit hits
+            await asyncio.sleep(2)
+            val_text = await llm_decompose_invoke_with_fallback(validation_prompt)
             val_text = val_text.strip()
             
             # Step A: strip markdown fences
@@ -3955,11 +4079,14 @@ async def execute_single_task(
     task_payload["extra_params"] = extra_params
 
     if task.target_agent == "email":
-        for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query",
+        for key in ["operation", "to", "recipient", "subject", "body", "attachments", "max_results", "query",
                      "search_query", "video_url", "title", "start_time", "end_time",
                      "description", "file_path", "parent_folder_id"]:
             if key not in task_payload and key in extra_params:
                 task_payload[key] = extra_params[key]
+        # Normalize: always ensure 'to' is set (accept both 'to' and 'recipient')
+        if not task_payload.get('to') and task_payload.get('recipient'):
+            task_payload['to'] = task_payload['recipient']
         if "operation" not in task_payload:
             task_payload["operation"] = "send"
 

@@ -1162,6 +1162,10 @@ class CoordinatorWebRAGBridge:
             except Exception as e:
                 logger.error(f"❌ Exception during web execution: {e}")
                 error_context = str(e)
+            
+            # Brief delay before retry to let browser/driver recover
+            if attempt < max_retries:
+                await asyncio.sleep(2)
         
         logger.error(f"❌ Web task {task.task_id} failed after {max_retries} attempts")
         return TaskResult(
@@ -1343,8 +1347,13 @@ async def initialize_execution_agent_for_server(broker_instance):
             web_pipeline = WebExecutionPipeline(web_config)
             
             # ✅ SHARE Groq client from desktop RAG to avoid API key issues
-            web_pipeline.shared_groq_client = desktop_rag.llm.client
-            logger.info("🔗 Shared Groq client from desktop RAG to web pipeline")
+            # Only share if it's a real Groq SDK client (not a string like "mistral_rest")
+            desktop_client = desktop_rag.llm.client
+            if desktop_client is not None and not isinstance(desktop_client, str):
+                web_pipeline.shared_groq_client = desktop_client
+                logger.info("🔗 Shared Groq client from desktop RAG to web pipeline")
+            else:
+                logger.info(f"ℹ️ Desktop RAG uses {desktop_rag.config.llm_provider} — web pipeline will init its own Groq client")
             
             await web_pipeline.initialize()
             

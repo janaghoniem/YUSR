@@ -34,7 +34,7 @@ class PlaywrightRAGConfig:
     llm_provider: str = "groq"
     llm_model: str = "llama-3.3-70b-versatile"  # ✅ Same as desktop RAG
     temperature: float = 0.4  # ✅ Same as desktop RAG
-    max_tokens: int = 1024  # ✅ Same as desktop RAG
+    max_tokens: int = 2048  # ✅ Increased from 1024 to prevent truncation of multi-function code
     
     # Code generation settings
     max_context_length: int = 4000  # ✅ FIXED: Increased context
@@ -249,7 +249,7 @@ class PlaywrightLLM:
             return self._generate_openai(prompt, system_prompt)
     
     def _generate_groq(self, prompt: str, system_prompt: str = None) -> str:
-        """Generate using Groq"""
+        """Generate using Groq with Mistral fallback"""
         messages = []
         
         if system_prompt:
@@ -266,7 +266,7 @@ class PlaywrightLLM:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"❌ Groq API call failed: {e}")
+            print(f"⚠️ Groq API call failed: {e}")
             if "401" in str(e) or "Unauthorized" in str(e):
                 print("⚠️  API key issue, reinitializing...")
                 self._initialize_client()
@@ -277,7 +277,41 @@ class PlaywrightLLM:
                     max_tokens=self.config.max_tokens,
                 )
                 return response.choices[0].message.content
-            raise
+            # Fallback to Mistral on rate limit or other errors
+            print("🔄 Falling back to Mistral for code generation...")
+            return self._generate_mistral_fallback(prompt, system_prompt)
+    
+    def _generate_mistral_fallback(self, prompt: str, system_prompt: str = None) -> str:
+        """Fallback to Mistral REST API when Groq is unavailable"""
+        import requests
+        
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError("MISTRAL_API_KEY not found for fallback")
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        url = "https://api.mistral.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "codestral-latest",
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        result = data["choices"][0]["message"]["content"]
+        print("✅ Mistral fallback succeeded for code generation")
+        return result
     
     def _generate_openai(self, prompt: str, system_prompt: str = None) -> str:
         """Generate using OpenAI"""

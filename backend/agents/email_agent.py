@@ -1157,7 +1157,8 @@ class EmailAgent:
     # ────────────────────────────────────────────────────────────────────────
     
     async def calendar_create(self, user_id: str, title: str, start_time: str, 
-                             end_time: str, description: str = "") -> EmailResult:
+                             end_time: str, description: str = "",
+                             all_day: bool = False) -> EmailResult:
         """Create a Google Calendar event"""
         try:
             creds = await self._get_credentials_mongodb(user_id)
@@ -1174,18 +1175,27 @@ class EmailAgent:
             # Get timezone from environment, default to UTC
             timezone = os.getenv("CALENDAR_TIMEZONE", "UTC")
             
-            event = {
-                'summary': title,
-                'description': description,
-                'start': {
-                    'dateTime': start_time,
-                    'timeZone': timezone
-                },
-                'end': {
-                    'dateTime': end_time,
-                    'timeZone': timezone
-                },
-            }
+            # All-day events use 'date' (YYYY-MM-DD), timed events use 'dateTime'
+            if all_day or (len(start_time) == 10 and 'T' not in start_time):
+                event = {
+                    'summary': title,
+                    'description': description,
+                    'start': {'date': start_time[:10]},
+                    'end': {'date': end_time[:10]},
+                }
+            else:
+                event = {
+                    'summary': title,
+                    'description': description,
+                    'start': {
+                        'dateTime': start_time,
+                        'timeZone': timezone
+                    },
+                    'end': {
+                        'dateTime': end_time,
+                        'timeZone': timezone
+                    },
+                }
             
             result = calendar.events().insert(calendarId='primary', body=event).execute()
             
@@ -1437,7 +1447,7 @@ async def start_email_agent(broker_instance=None):
             if operation == 'send':
                 result = await agent.send_email(
                     user_id=user_id,
-                    to=payload.get('to'),
+                    to=payload.get('to') or payload.get('recipient'),  # Accept both field names
                     subject=payload.get('subject'),
                     body=payload.get('body'),
                     attachments=payload.get('attachments')
@@ -1465,7 +1475,7 @@ async def start_email_agent(broker_instance=None):
             elif operation == 'youtube_search':
                 result = await agent.youtube_search(
                     user_id=user_id,
-                    query=payload.get('search_query', ''),
+                    query=payload.get('query', '') or payload.get('search_query', ''),
                     max_results=payload.get('max_results', 10)
                 )
             
@@ -1479,8 +1489,9 @@ async def start_email_agent(broker_instance=None):
                 result = await agent.calendar_create(
                     user_id=user_id,
                     title=payload.get('title', ''),
-                    start_time=payload.get('start_time', ''),
-                    end_time=payload.get('end_time', ''),
+                    start_time=payload.get('start_time', '') or payload.get('start_date', ''),
+                    end_time=payload.get('end_time', '') or payload.get('end_date', ''),
+                    all_day=payload.get('all_day', False),
                     description=payload.get('description', '')
                 )
             

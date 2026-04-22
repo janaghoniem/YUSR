@@ -2329,10 +2329,18 @@ class WebExecutionPipeline:
 
     async def _ensure_browser(self):
         """Lazy-launch the browser on first use."""
-        if self._initialized:
+        if self._initialized and self.context is not None:
             return
-        self._initialized = True
-        await self._do_initialize()
+        self._initialized = False
+        try:
+            await self._do_initialize()
+            self._initialized = True
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Playwright: {e}")
+            self._initialized = False
+            self.context = None
+            self.browser = None
+            raise
 
     async def _do_initialize(self):
         """Initialize Playwright — launch real Chrome via CDP or fall back."""
@@ -3216,22 +3224,40 @@ class WebExecutionPipeline:
                 page_state_before = await observe_page_state(page)
                 
                 # ✅ FIXED: action_type comes from web_params, never from ai_prompt
-                action_type = task.get('web_params', {}).get('action', 'unknown')
-                can_proceed, reason = validate_action_context(
-                    page_state_before, action_type, clean_prompt
-                )
-                
-                if not can_proceed:
-                    logger.warning(f"⚠️ Context validation failed: {reason}")
-                    return WebExecutionResult(
-                        validation_passed=False,
-                        security_passed=True,
-                        error=f"Context validation failed: {reason}",
-                        page_state_before=page_state_before,
-                        execution_time=(datetime.now() - start_time).total_seconds()
-                    )
+# ✅ FIXED: Extract action_type with fallback to ai_prompt inference
+            web_params = task.get('web_params') or {}
+            action_type = web_params.get('action', 'unknown')
             
-            action_type = task.get('web_params', {}).get('action', 'unknown')
+            # Safety net: infer action_type from ai_prompt if missing
+            if action_type == 'unknown':
+                prompt_lower = task.get('ai_prompt', '').lower()
+                if any(w in prompt_lower for w in ['navigate', 'go to', 'open', 'visit']):
+                    action_type = 'navigate'
+                elif any(w in prompt_lower for w in ['fill', 'type', 'enter', 'search']):
+                    action_type = 'fill'
+                elif any(w in prompt_lower for w in ['click', 'press', 'submit', 'tap']):
+                    action_type = 'click'
+                elif any(w in prompt_lower for w in ['extract', 'get', 'read', 'scrape']):
+                    action_type = 'extract'
+                if action_type != 'unknown':
+                    logger.info(f"📝 Inferred action_type='{action_type}' from ai_prompt (web_params missing)")
+            
+            can_proceed, reason = validate_action_context(
+                page_state_before, action_type, clean_prompt
+            )
+            
+            if not can_proceed:
+                logger.warning(f"⚠️ Context validation failed: {reason}")
+                return WebExecutionResult(
+                    validation_passed=False,
+                    security_passed=True,
+                    error=f"Context validation failed: {reason}",
+                    page_state_before=page_state_before,
+                    execution_time=(datetime.now() - start_time).total_seconds()
+                )
+            
+            # Already extracted above, no need to re-extract
+            # action_type = task.get('web_params', {}).get('action', 'unknown')
             
             # Check if navigation (invalidate cache)
             if action_type == 'navigate':

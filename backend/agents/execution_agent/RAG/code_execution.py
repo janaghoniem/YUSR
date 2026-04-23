@@ -1009,7 +1009,8 @@ class CoordinatorRAGBridge:
             try:
                 # Step 1: Generate code using RAG
                 logger.info(f"🤖 Generating code with RAG...")
-                rag_result = self.rag.generate_code(
+                rag_result = await asyncio.to_thread(
+                    self.rag.generate_code,
                     enhanced_query,
                     cache_key=task.ai_prompt,  # Use original prompt for cache key
                     start_context_index=start_context_index,
@@ -1043,7 +1044,8 @@ class CoordinatorRAGBridge:
 
                 # Step 2: Execute in LOCAL sandbox
                 logger.info(f"🔧 Executing code in local sandbox...")
-                exec_result = self.sandbox.execute_code(
+                exec_result = await asyncio.to_thread(
+                    self.sandbox.execute_code,
                     code=generated_code,
                     use_docker=False,
                     retry_on_failure=False,
@@ -1185,7 +1187,8 @@ class CoordinatorRAGBridge:
                             logger.info("🔄 Executing OmniParser-assisted code...")
                             logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
 
-                            exec_result = self.sandbox.execute_code(
+                            exec_result = await asyncio.to_thread(
+                                self.sandbox.execute_code,
                                 code=new_code,
                                 use_docker=False,
                                 retry_on_failure=False,

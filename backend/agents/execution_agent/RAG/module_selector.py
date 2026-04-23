@@ -252,357 +252,199 @@ Import: {self.library_import}
 
 # Pre-defined module overrides
 MODULES = {
-    "word": ModuleGuidance(
-        module_name="Word",
-        library_name="python-docx",
-        library_import="from docx import Document",
-        keywords=["word", "document", "docx", "page", "paragraph", "heading", "table", "text formatting"],
-        guidance=f"""
-Work with .docx files using python-docx. Identify TASK TYPE first, then follow ONLY that branch.
+"word": ModuleGuidance(
+    module_name="Word",
+    library_name="python-docx",
+    library_import="from docx import Document",
+    keywords=["word", "document", "docx", "page", "paragraph", "heading", "table", "text formatting"],
+    guidance="""
+Use ONLY these word_tools functions. Never import python-docx directly. Never use pyautogui.
 
-{CRITICAL_DATA_EXTRACTION_RULES}
+IMPORT (copy exactly):
+try:
+    from agents.execution_agent.RAG.scripts.word_tools import (
+        doc_create, doc_open, doc_find, doc_load,
+        doc_add_heading, doc_add_paragraph, doc_add_table,
+        doc_save, doc_launch
+    )
+except ImportError:
+    from scripts.word_tools import (
+        doc_create, doc_open, doc_find, doc_load,
+        doc_add_heading, doc_add_paragraph, doc_add_table,
+        doc_save, doc_launch
+    )
 
-SETUP:
-import os, glob
-from docx import Document
-from datetime import datetime
+ACTIVE FILE RESOLUTION (do this first, every time):
+if "[ACTIVE FILE:" in PROMPT:
+    active_file = "<extract path from [ACTIVE FILE: ...]>"
+else:
+    active_file = None  # word_tools will use latest .docx in docs folder
 
-# Dynamic folder detection - fully dynamic for team compatibility
-possible_paths = [
-    os.path.expanduser("~/OneDrive/Desktop/agent/docs"),
-    os.path.expanduser("~/Desktop/agent/docs"),
-    os.path.expanduser("~/Documents/agent/docs"),
-]
+TASK → EXACT EXECUTION PATTERN:
 
-folder = None
-for path in possible_paths:
-    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
-        folder = path
-        break
+[LAUNCH] task says "open word", "launch word", "start word" (no filename):
+    doc_launch()
 
-# Final fallback
-if not folder:
-    folder = os.path.join(os.path.expanduser("~"), "agent", "docs")
+[OPEN] task says "open <filename>":
+    path = doc_find("<filename>")
+    doc_open(path)
 
-os.makedirs(folder, exist_ok=True)
-files = glob.glob(os.path.join(folder, '*.docx'))
-latest = max(files, key=os.path.getctime) if files else None
-ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-# Read [ACTIVE FILE] from prompt if present:
-active_file = '<path from [ACTIVE FILE: ...]>' if '[ACTIVE FILE:' in PROMPT else latest
+[CREATE] task says "create", "new document", "make a doc":
+    path = doc_create("<descriptive_name_from_task>")
+    # DO NOT open. Stop here. Let next task do edits.
 
-TASK TYPE — match ONE, execute ONLY that branch:
+[EDIT] task says "write", "add", "insert", "type", "put":
+    doc = doc_load(active_file)
+    # chain only what the task asks for:
+    doc = doc_add_heading(doc, "<text>", level=1)   # only if heading needed
+    doc = doc_add_paragraph(doc, "<text>")           # only if paragraph needed
+    doc = doc_add_table(doc, ["H1","H2"], [["r1c1","r1c2"]])  # only if table needed
+    path = doc_save(doc, active_file)
 
-[1] LAUNCH APP — task says "open word application", "open microsoft word", "launch word", "start word"
-    AND does NOT mention a specific document/file to edit:
-    os.system('start winword')
-    print("EXECUTION_SUCCESS")
-    # Done. No file operations.
+[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    doc_open(active_file)
+    # DO NOT call doc_save(). File is already saved. Just open it.
 
-[2] OPEN FILE — task mentions a specific filename or path (e.g. "open report.docx", "open existing file named X"):
-    target = 'exact_filename_from_task.docx'  # extract from task description
-    if os.path.isabs(target) and os.path.exists(target):
-        found_path = target
-    else:
-        search_roots = [
-            os.path.expanduser('~\\Desktop'),
-            os.path.expanduser('~\\OneDrive\\Desktop'),
-            os.path.expanduser('~\\Documents'),
-            os.path.expanduser('~\\Downloads'),
-            folder,
-        ]
-        found_path = None
-        for root in search_roots:
-            if not os.path.exists(root):
-                continue
-            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
-            if matches:
-                found_path = matches[0]
-                break
-    if not found_path:
-        raise FileNotFoundError(f"Could not find file: {{target}}")
-    os.startfile(found_path)
-    print(f"[FILE]: {{found_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done.
-
-[3] CREATE — task says "create/new/make/generate" + document/file:
-    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.docx')
-    doc = Document()
-    doc.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
-
-[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
-    "confirm saving", "press enter to confirm":
-    check_path = active_file
-    if check_path and os.path.exists(check_path):
-        os.startfile(check_path)  # Open in Word now that all edits are done
-        print(f"[FILE]: {{check_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. NO doc.save() call.
-
-[5] DEFAULT — task says write/type/add/modify/edit/set/insert/format/heading/paragraph:
-    doc = Document(active_file) if active_file and os.path.exists(active_file) else Document()
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'document_{{ts}}.docx')
-    # ... apply changes using python-docx ...
-    try:
-        doc.save(save_path)
-    except PermissionError:
-        save_path = os.path.splitext(save_path)[0] + '_v2.docx'
-        doc.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    # Automatically open the file after editing operations are complete
-    os.startfile(save_path)
-    print("EXECUTION_SUCCESS")
-
-Key python-docx patterns:
-- doc.add_heading('Title', level=0)   # document title
-- doc.add_heading('Section', level=1) # section heading
-- doc.add_paragraph('text')           # body paragraph
-- p.add_run('bold').bold = True
-
-AVOID: subprocess, pyautogui, Word UI, mouse/keyboard events
+RULES:
+- Always call doc_save() at the end of any EDIT task — never leave a doc unsaved
+- Never call doc_open() inside an EDIT task — doc_save() opens it automatically
+- Never hardcode folder paths — word_tools handles folder detection internally
+- doc_load() does not print anything — that is expected behaviour
+- If active_file is None and task is EDIT, call doc_create() first to get a path
 """
-    ),
-    "excel": ModuleGuidance(
-        module_name="Excel",
-        library_name="openpyxl",
-        library_import="from openpyxl import Workbook",
-        keywords=["excel", "spreadsheet", "xlsx", "sheet", "cell", "row", "column", "formula", "data table"],
-        guidance=f"""
-Work with .xlsx files using openpyxl. Identify TASK TYPE first, then follow ONLY that branch.
+),
+"excel": ModuleGuidance(
+    module_name="Excel",
+    library_name="openpyxl",
+    library_import="from openpyxl import Workbook",
+    keywords=["excel", "spreadsheet", "xlsx", "sheet", "cell", "row", "column", "formula", "data table"],
+    guidance="""
+Use ONLY these excel_tools functions. Never import openpyxl directly. Never use pyautogui.
 
-{CRITICAL_DATA_EXTRACTION_RULES}
+IMPORT (copy exactly):
+try:
+    from agents.execution_agent.RAG.scripts.excel_tools import (
+        xl_create, xl_open, xl_find, xl_load,
+        xl_set_cell, xl_write_headers, xl_write_row,
+        xl_set_formula, xl_save, xl_launch
+    )
+except ImportError:
+    from scripts.excel_tools import (
+        xl_create, xl_open, xl_find, xl_load,
+        xl_set_cell, xl_write_headers, xl_write_row,
+        xl_set_formula, xl_save, xl_launch
+    )
 
-SETUP:
-import os, glob
-from openpyxl import Workbook, load_workbook
-from datetime import datetime
+ACTIVE FILE RESOLUTION (do this first, every time):
+if "[ACTIVE FILE:" in PROMPT:
+    active_file = "<extract path from [ACTIVE FILE: ...]>"
+else:
+    active_file = None  # excel_tools will use latest .xlsx in excel folder
 
-# Dynamic folder detection - fully dynamic for team compatibility
-possible_paths = [
-    os.path.expanduser("~/OneDrive/Desktop/agent/excel"),
-    os.path.expanduser("~/Desktop/agent/excel"),
-    os.path.expanduser("~/Documents/agent/excel"),
-]
+TASK → EXACT EXECUTION PATTERN:
 
-folder = None
-for path in possible_paths:
-    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
-        folder = path
-        break
+[LAUNCH] task says "open excel", "launch excel", "start excel" (no filename):
+    xl_launch()
 
-# Final fallback
-if not folder:
-    folder = os.path.join(os.path.expanduser("~"), "agent", "excel")
+[OPEN] task says "open <filename>":
+    path = xl_find("<filename>")
+    xl_open(path)
 
-os.makedirs(folder, exist_ok=True)
-files = glob.glob(os.path.join(folder, '*.xlsx'))
-latest = max(files, key=os.path.getctime) if files else None
-ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-# Read [ACTIVE FILE] from prompt if present:
-active_file = '<path from [ACTIVE FILE: ...]>' if '[ACTIVE FILE:' in PROMPT else latest
+[CREATE] task says "create", "new spreadsheet", "make a sheet":
+    path = xl_create("<descriptive_name_from_task>")
+    # DO NOT open. Stop here. Let next task do edits.
 
-TASK TYPE — match ONE, execute ONLY that branch:
-
-[1] LAUNCH APP — task says "open excel application", "open microsoft excel", "launch excel", "start excel"
-    AND does NOT mention a specific file to edit:
-    os.system('start excel')
-    print("EXECUTION_SUCCESS")
-    # Done. No file operations.
-
-[2] OPEN FILE — task mentions a specific filename or path (e.g. "open sales.xlsx", "open acm_export.csv"):
-    target = 'exact_filename_from_task.xlsx'  # extract from task description (.xlsx or .csv)
-    if os.path.isabs(target) and os.path.exists(target):
-        found_path = target
-    else:
-        search_roots = [
-            os.path.expanduser('~\\Desktop'),
-            os.path.expanduser('~\\OneDrive\\Desktop'),
-            os.path.expanduser('~\\Documents'),
-            os.path.expanduser('~\\Downloads'),
-            folder,
-        ]
-        found_path = None
-        for root in search_roots:
-            if not os.path.exists(root):
-                continue
-            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
-            if matches:
-                found_path = matches[0]
-                break
-    if not found_path:
-        raise FileNotFoundError(f"Could not find file: {{target}}")
-    os.startfile(found_path)
-    print(f"[FILE]: {{found_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done.
-
-[3] CREATE — task says "create/new/make/generate" + spreadsheet/file:
-    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.xlsx')
-    wb = Workbook()
+[EDIT] task says "write", "fill", "add", "insert", "enter", "update":
+    wb = xl_load(active_file)
     ws = wb.active
-    wb.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
+    # chain only what the task asks for:
+    ws = xl_write_headers(ws, ["H1","H2"])           # only if headers needed
+    ws = xl_write_row(ws, 2, ["val1","val2"])         # only if row data needed
+    ws = xl_set_cell(ws, 1, 1, "value")               # only if single cell needed
+    ws = xl_set_formula(ws, 1, 3, "=A1+B1")          # only if formula needed
+    path = xl_save(wb, active_file)
 
-[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
-    "confirm saving", "press enter to confirm":
-    check_path = active_file
-    if check_path and os.path.exists(check_path):
-        os.startfile(check_path)  # Open in Excel now that all edits are done
-        print(f"[FILE]: {{check_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. NO wb.save() call.
+[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    xl_open(active_file)
+    # DO NOT call xl_save(). File is already saved. Just open it.
 
-[5] DEFAULT — task says write/enter/add/modify/edit/set/insert/update/fill/format:
-    wb = load_workbook(active_file) if active_file and os.path.exists(active_file) else Workbook()
-    ws = wb.active
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'spreadsheet_{{ts}}.xlsx')
-    # ... apply changes using openpyxl ...
-    try:
-        wb.save(save_path)
-    except PermissionError:
-        save_path = os.path.splitext(save_path)[0] + '_v2.xlsx'
-        wb.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    # Automatically open the file after editing operations are complete
-    os.startfile(save_path)
-    print("EXECUTION_SUCCESS")
-
-Key openpyxl patterns:
-- ws['A1'] = 'value'          # set cell
-- ws.cell(row=1, col=1).value = x  # set by row/col
-- ws['C1'] = '=A1+B1'         # formula
-- wb.save(save_path)
-
-AVOID: subprocess, pyautogui, Excel UI, mouse/keyboard events
+RULES:
+- Always call xl_save() at the end of any EDIT task — never leave a workbook unsaved
+- Never call xl_open() inside an EDIT task — xl_save() opens it automatically
+- Never hardcode folder paths — excel_tools handles folder detection internally
+- xl_load() does not print anything — that is expected behaviour
+- If active_file is None and task is EDIT, call xl_create() first to get a path
+- ws = wb.active must be called after xl_load() to get the worksheet
 """
-    ),
-    "powerpoint": ModuleGuidance(
-        module_name="PowerPoint",
-        library_name="python-pptx",
-        library_import="from pptx import Presentation",
-        keywords=["powerpoint", "pptx", "slide", "presentation", "bullet point", "layout", "slide show"],
-        guidance=f"""
-Work with .pptx files using python-pptx. Identify TASK TYPE first, then follow ONLY that branch.
+),
 
-{CRITICAL_DATA_EXTRACTION_RULES}
+"powerpoint": ModuleGuidance(
+    module_name="PowerPoint",
+    library_name="python-pptx",
+    library_import="from pptx import Presentation",
+    keywords=["powerpoint", "pptx", "slide", "presentation", "bullet point", "layout", "slide show"],
+    guidance="""
+Use ONLY these ppt_tools functions. Never import python-pptx directly. Never use pyautogui.
 
-SETUP:
-import os, glob
-from pptx import Presentation
-from datetime import datetime
+IMPORT (copy exactly):
+try:
+    from agents.execution_agent.RAG.scripts.ppt_tools import (
+        ppt_create, ppt_open, ppt_find, ppt_load,
+        ppt_add_title_slide, ppt_add_content_slide,
+        ppt_add_bullet_slide, ppt_save, ppt_launch
+    )
+except ImportError:
+    from scripts.ppt_tools import (
+        ppt_create, ppt_open, ppt_find, ppt_load,
+        ppt_add_title_slide, ppt_add_content_slide,
+        ppt_add_bullet_slide, ppt_save, ppt_launch
+    )
 
-# Dynamic folder detection - user's preferred path first
-possible_paths = [
-    #"D:/OneDrive/Desktop/agent/ppts",  # User's preferred path - FIRST PRIORITY
-    os.path.expanduser("~/OneDrive/Desktop/agent/ppts"),
-    os.path.expanduser("~/Desktop/agent/ppts"),
-    os.path.expanduser("~/Documents/agent/ppts"),
-]
+ACTIVE FILE RESOLUTION (do this first, every time):
+if "[ACTIVE FILE:" in PROMPT:
+    active_file = "<extract path from [ACTIVE FILE: ...]>"
+else:
+    active_file = None  # ppt_tools will use latest .pptx in ppts folder
 
-folder = None
-for path in possible_paths:
-    if os.path.exists(os.path.dirname(path)) or os.path.exists(path):
-        folder = path
-        break
+TASK → EXACT EXECUTION PATTERN:
 
-# Final fallback
-if not folder:
-    folder = os.path.join(os.path.expanduser("~"), "agent", "ppts")
+[LAUNCH] task says "open powerpoint", "launch powerpoint", "start powerpoint" (no filename):
+    ppt_launch()
 
-os.makedirs(folder, exist_ok=True)
-files = glob.glob(os.path.join(folder, '*.pptx'))
-latest = max(files, key=os.path.getctime) if files else None
-ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-# Read [ACTIVE FILE] from prompt if present:
-active_file = '<path from [ACTIVE FILE: ...]>' if '[ACTIVE FILE:' in PROMPT else latest
+[OPEN] task says "open <filename>":
+    path = ppt_find("<filename>")
+    ppt_open(path)
 
-TASK TYPE — match ONE, execute ONLY that branch:
+[CREATE] task says "create", "new presentation", "make a deck":
+    path = ppt_create("<descriptive_name_from_task>")
+    # DO NOT open. Stop here. Let next task do edits.
 
-[1] LAUNCH APP — task says "open powerpoint application", "open microsoft powerpoint", "launch powerpoint", "start powerpoint"
-    AND does NOT mention a specific file to edit:
-    os.system('start powerpnt')
-    print("EXECUTION_SUCCESS")
-    # Done. No file operations.
+[EDIT] task says "add slide", "insert slide", "write", "put", "type":
+    prs = ppt_load(active_file)
+    # chain only what the task asks for:
+    prs = ppt_add_title_slide(prs, "<title>", "<subtitle>")      # only if title slide needed
+    prs = ppt_add_content_slide(prs, "<title>", "<content>")     # only if content slide needed
+    prs = ppt_add_bullet_slide(prs, "<title>", ["b1","b2","b3"]) # only if bullet slide needed
+    path = ppt_save(prs, active_file)
 
-[2] OPEN FILE — task mentions a specific filename or path (e.g. "open slides.pptx", "open existing presentation"):
-    target = 'exact_filename_from_task.pptx'  # extract from task description
-    if os.path.isabs(target) and os.path.exists(target):
-        found_path = target
-    else:
-        search_roots = [
-            os.path.expanduser('~\\Desktop'),
-            os.path.expanduser('~\\OneDrive\\Desktop'),
-            os.path.expanduser('~\\Documents'),
-            os.path.expanduser('~\\Downloads'),
-            folder,
-        ]
-        found_path = None
-        for root in search_roots:
-            if not os.path.exists(root):
-                continue
-            matches = glob.glob(os.path.join(root, '**', target), recursive=True)
-            if matches:
-                found_path = matches[0]
-                break
-    if not found_path:
-        raise FileNotFoundError(f"Could not find file: {{target}}")
-    os.startfile(found_path)
-    print(f"[FILE]: {{found_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done.
+[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    ppt_open(active_file)
+    # DO NOT call ppt_save(). File is already saved. Just open it.
 
-[3] CREATE — task says "create/new/make/generate" + presentation/file:
-    save_path = os.path.join(folder, f'descriptive_name_{{ts}}.pptx')
-    prs = Presentation()
-    prs.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. Do NOT open the file — keep it unlocked for subsequent edit tasks.
-
-[4] SAVE / CONFIRM — task says "save", "press ok", "press save", "click ok", "click save",
-    "confirm saving", "press enter to confirm":
-    check_path = active_file
-    if check_path and os.path.exists(check_path):
-        os.startfile(check_path)  # Open in PowerPoint now that all edits are done
-        print(f"[FILE]: {{check_path}}")
-    print("EXECUTION_SUCCESS")
-    # Done. NO prs.save() call.
-
-[5] DEFAULT — task says write/type/add/modify/edit/set/insert/format/slide/heading/bullet:
-    prs = Presentation(active_file) if active_file and os.path.exists(active_file) else Presentation()
-    save_path = active_file if active_file and os.path.exists(active_file) else os.path.join(folder, f'presentation_{{ts}}.pptx')
-    # ... apply changes using python-pptx ...
-    try:
-        prs.save(save_path)
-    except PermissionError:
-        save_path = os.path.splitext(save_path)[0] + '_v2.pptx'
-        prs.save(save_path)
-    print(f"[FILE]: {{save_path}}")
-    # Automatically open the file after editing operations are complete
-    os.startfile(save_path)
-    print("EXECUTION_SUCCESS")
-
-Key python-pptx patterns:
-- slide = prs.slides.add_slide(prs.slide_layouts[0])   # title slide
-- slide = prs.slides.add_slide(prs.slide_layouts[1])   # title + content
-- slide.shapes.title.text = 'Title'
-- slide.placeholders[1].text = 'Content'
-- tf = slide.placeholders[1].text_frame; tf.text = 'bullet'
-
-AVOID: subprocess, pyautogui, PowerPoint UI, mouse/keyboard events
+RULES:
+- Always call ppt_save() at the end of any EDIT task — never leave a presentation unsaved
+- Never call ppt_open() inside an EDIT task — ppt_save() opens it automatically
+- Never hardcode folder paths — ppt_tools handles folder detection internally
+- ppt_load() does not print anything — that is expected behaviour
+- If active_file is None and task is EDIT, call ppt_create() first to get a path
+- Use ppt_add_title_slide() for the FIRST slide only — use ppt_add_content_slide() or ppt_add_bullet_slide() for all subsequent slides
 """
-    ),
+),
     "file": ModuleGuidance(
         module_name="File",
         library_name="file_agent (smart file search with fuzzy matching)",
         library_import="try:\n    from agents.execution_agent.RAG.file_agent import find_file, open_file\nexcept ImportError:\n    from file_agent import find_file, open_file",
-        keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file", "create file", ".txt", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"],
+        keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file",".pdf", ".xlsx", ".pptx", ".csv"],
         guidance="""
 Use the file_agent module for fast, intelligent file operations with fuzzy matching.
 

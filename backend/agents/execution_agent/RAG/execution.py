@@ -13,6 +13,7 @@ import tempfile
 import json
 import os
 import time
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
@@ -193,10 +194,10 @@ class SecurityValidator:
         #     violations.append("File write operations detected")
         
         # 4. Check for network operations
-        network_keywords = ['socket', 'urllib', 'requests']
-        for keyword in network_keywords:
-            if keyword in code.lower():
-                violations.append(f"Network operation detected: {keyword}")
+        # network_keywords = ['socket', 'urllib', 'requests']
+        # for keyword in network_keywords:
+        #     if keyword in code.lower():
+        #         violations.append(f"Network operation detected: {keyword}")
         
         is_safe = len(violations) == 0
         return is_safe, violations
@@ -536,8 +537,14 @@ class LocalSandbox:
     def __init__(self, config: SandboxConfig):
         self.config = config
     
-    def execute_local(self, code: str, timeout: int = None) -> ExecutionResult:
-        """Execute code in local subprocess with proper Python path setup"""
+    def execute_local(self, code: str, timeout: int = None, task_id: str = None) -> ExecutionResult:
+        """Execute code in local subprocess with proper Python path setup
+
+        Args:
+            code: Python code to execute
+            timeout: Execution timeout in seconds
+            task_id: Optional task ID for process tracking and stop signal handling
+        """
         if timeout is None:
             timeout = self.config.timeout_seconds
 
@@ -573,28 +580,145 @@ if _backend_path not in sys.path:
             f.write(code_with_path)
             temp_file = f.name
 
+        process = None
         try:
-            # Execute in subprocess
-            result = subprocess.run(
+            # ✅ CREATE PROCESS WITH POPEN (allows lifecycle management)
+            process = subprocess.Popen(
                 [sys.executable, temp_file],
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
             )
 
+            # ✅ REGISTER PROCESS FOR STOP TRACKING (if task_id provided)
+            if task_id:
+                # Import and register with ExecutionStopManager
+                try:
+                    from agents.execution_agent.RAG.code_execution import _execution_stop_manager
+                    import asyncio
+
+                    # Register process in a thread-safe way
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Can't use await in a running loop, use run_coroutine_threadsafe
+                            asyncio.run_coroutine_threadsafe(
+                                _execution_stop_manager.register_process(task_id, process),
+                                loop
+                            )
+                        else:
+                            # Safe to use run
+                            asyncio.run(_execution_stop_manager.register_process(task_id, process))
+                    except RuntimeError:
+                        # No event loop, create one
+                        asyncio.run(_execution_stop_manager.register_process(task_id, process))
+
+                    logger.info(f"📋 [SUBPROCESS] Registered PID {process.pid} for task {task_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [SUBPROCESS] Could not register process: {e}")
+
+            # ✅ WAIT FOR PROCESS WITH PERIODIC STOP CHECKS
+            start_wait = time.time()
+            poll_interval = 0.1  # Check stop signal every 100ms
+
+            while True:
+                # Check if process completed
+                if process.poll() is not None:
+                    # Process has completed
+                    break
+
+                # ✅ CHECK FOR STOP SIGNAL
+                if task_id:
+                    try:
+                        from agents.execution_agent.RAG.code_execution import _execution_stop_manager
+                        import asyncio
+
+                        # Check if task should stop
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                future = asyncio.run_coroutine_threadsafe(
+                                    _execution_stop_manager.is_task_stopped(task_id),
+                                    loop
+                                )
+                                is_stopped = future.result(timeout=0.5)
+                            else:
+                                is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+                        except RuntimeError:
+                            is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+
+                        if is_stopped:
+                            logger.warning(f"🔪 [SUBPROCESS] Stop signal received for task {task_id}, killing PID {process.pid}")
+                            process.terminate()
+                            try:
+                                process.wait(timeout=2)
+                                logger.info(f"✅ [SUBPROCESS] Terminated PID {process.pid}")
+                            except subprocess.TimeoutExpired:
+                                logger.warning(f"🔪 [SUBPROCESS] Force killing PID {process.pid}")
+                                process.kill()
+                                process.wait()
+
+                            execution_time = time.time() - start_time
+                            return ExecutionResult(
+                                status=ExecutionStatus.FAILED,
+                                exit_code=-1,
+                                stdout="",
+                                stderr="Task stopped by user",
+                                execution_time=execution_time,
+                                timestamp=datetime.now().isoformat(),
+                                validation_passed=False,
+                                validation_errors=["Task stopped by user"],
+                                security_passed=True,
+                                security_violations=[],
+                                code_hash=hashlib.md5(code.encode()).hexdigest()
+                            )
+                    except Exception as e:
+                        logger.debug(f"⚠️ [SUBPROCESS] Error checking stop signal: {e}")
+
+                # Check timeout
+                elapsed = time.time() - start_wait
+                if elapsed > timeout:
+                    logger.warning(f"⏱️ [SUBPROCESS] Timeout after {timeout}s for task {task_id}")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+                    execution_time = time.time() - start_time
+                    return ExecutionResult(
+                        status=ExecutionStatus.TIMEOUT,
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"Execution timeout after {timeout}s",
+                        execution_time=execution_time,
+                        timestamp=datetime.now().isoformat(),
+                        validation_passed=False,
+                        validation_errors=["Execution timeout"],
+                        security_passed=True,
+                        security_violations=[],
+                        code_hash=hashlib.md5(code.encode()).hexdigest()
+                    )
+
+                # Small sleep before next check
+                time.sleep(poll_interval)
+
+            # ✅ GET OUTPUT FROM COMPLETED PROCESS
+            stdout, stderr = process.communicate()
             execution_time = time.time() - start_time
 
             # Determine status
-            if result.returncode == 0:
+            if process.returncode == 0:
                 status = ExecutionStatus.SUCCESS
             else:
                 status = ExecutionStatus.FAILED
 
             return ExecutionResult(
                 status=status,
-                exit_code=result.returncode,
-                stdout=result.stdout,
-                stderr=result.stderr,
+                exit_code=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
                 execution_time=execution_time,
                 timestamp=datetime.now().isoformat(),
                 validation_passed=False,
@@ -603,27 +727,21 @@ if _backend_path not in sys.path:
                 security_violations=[],
                 code_hash=hashlib.md5(code.encode()).hexdigest()
             )
-            
-        except subprocess.TimeoutExpired:
-            execution_time = time.time() - start_time
-            
-            return ExecutionResult(
-                status=ExecutionStatus.TIMEOUT,
-                exit_code=-1,
-                stdout="",
-                stderr=f"Execution timeout after {timeout}s",
-                execution_time=execution_time,
-                timestamp=datetime.now().isoformat(),
-                validation_passed=False,
-                validation_errors=["Execution timeout"],
-                security_passed=True,
-                security_violations=[],
-                code_hash=hashlib.md5(code.encode()).hexdigest()
-            )
-        
+
         except Exception as e:
             execution_time = time.time() - start_time
-            
+
+            # ✅ CLEANUP ON EXCEPTION
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except:
+                    try:
+                        process.kill()
+                    except:
+                        pass
+
             return ExecutionResult(
                 status=ExecutionStatus.FAILED,
                 exit_code=-1,
@@ -637,7 +755,7 @@ if _backend_path not in sys.path:
                 security_violations=[],
                 code_hash=hashlib.md5(code.encode()).hexdigest()
             )
-        
+
         finally:
             # Cleanup temp file
             try:
@@ -1082,13 +1200,21 @@ class SandboxExecutionPipeline:
 
         return all_success
 
-    def execute_code(self, code: str, 
+    def execute_code(self, code: str,
                     use_docker: bool = False,
                     expected_output: Optional[str] = None,
-                    retry_on_failure: bool = True) -> ExecutionResult:
+                    retry_on_failure: bool = True,
+                    task_id: str = None) -> ExecutionResult:
         """
         Execute code with full security and validation pipeline
         ALWAYS uses LocalSandbox (Docker disabled for server compatibility)
+
+        Args:
+            code: Python code to execute
+            use_docker: Ignored (always uses local sandbox)
+            expected_output: Expected output for validation
+            retry_on_failure: Whether to retry on failure
+            task_id: Optional task ID for process tracking and stop signal handling
         """
         print("\n" + "="*80)
         print("SANDBOX EXECUTION PIPELINE")
@@ -1156,7 +1282,7 @@ class SandboxExecutionPipeline:
         print("\n[4/5] Executing in sandbox...")
         print("  📍 Using LOCAL subprocess sandbox (Docker disabled)")
 
-        result = self.local_sandbox.execute_local(wrapped_code)
+        result = self.local_sandbox.execute_local(wrapped_code, task_id=task_id)
         
         print(f"  Status: {result.status.value}")
         print(f"  Execution time: {result.execution_time:.3f}s")

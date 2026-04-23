@@ -27,6 +27,7 @@ class MessageType(str, Enum):
     PROACTIVE_PROMPT = "proactive_prompt"
     STRUCTURED_RESPONSE = "structured_response"
     TASK_PROGRESS = "task_progress"
+    CONTROL = "control"  # ✅ NEW: Generic control messages (stop, pause, etc.)
 
 class AgentType(str, Enum):
     """Agent types in the system"""
@@ -198,6 +199,7 @@ class Channels:
     EXECUTION_INPUT = "execution.input"
     EXECUTION_OUTPUT = "execution.output"
     EXECUTION_TO_COORDINATOR = "execution.to.coordinator"
+    EXECUTION_STOP_SIGNAL = "execution.stop_signal"  # ✅ NEW: Stop signals from coordinator
     
     REASONING_INPUT = "reasoning.input"
     REASONING_OUTPUT = "reasoning.output"

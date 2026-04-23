@@ -36,7 +36,7 @@ from langchain_groq import ChatGroq
 from mistralai.client import Mistral
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","mistral-medium-latest")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","mistral-large-2411")
 
 llm = ChatGroq(
     model=LLM_MODEL,
@@ -88,6 +88,7 @@ async def llm_invoke_with_fallback(prompt: str) -> str:
             model=MISTRAL_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.05,
+            top_p=0.5,
             max_tokens=2048,
         )
         text = _extract_mistral_text(response)
@@ -1087,7 +1088,7 @@ async def decompose_task_to_actions(
     if _icrl_history_block:
         prompt += f"""
 
-============================
+============================z
 PREVIOUS ATTEMPT HISTORY (In-Context RL — Round {_icrl_round})
 ============================
 Best reward achieved so far: {_icrl_best_reward:.2f} (0.0 = total failure, 1.0 = perfect success)
@@ -4340,7 +4341,48 @@ async def start_coordinator_agent(broker_instance):
             except Exception as e:
                 logger.error(f"❌ Failed to save context snapshot: {e}")
             
+            # Capture in-flight task IDs BEFORE clearing the queue/state.
+            stop_task_ids = set(pending_results.keys())
+            current_task_id = task_queue.current_task_id
+            payload_task_id = message.payload.get("task_id")
+            if current_task_id:
+                stop_task_ids.add(current_task_id)
+            if payload_task_id:
+                stop_task_ids.add(payload_task_id)
+
+            # Stop coordinator queues now (prevents any new dispatch).
             task_queue.stop()
+
+            # ✅ SEND STOP SIGNALS TO EXECUTION AGENT FOR ALL IN-FLIGHT TASKS
+            logger.info("📢 Broadcasting stop signal to execution agent")
+
+            if stop_task_ids:
+                logger.warning(f"🔪 Found {len(stop_task_ids)} in-flight task(s), sending stop signals...")
+                for pending_task_id in list(stop_task_ids):
+                    logger.warning(f"   → Stopping task {pending_task_id}")
+
+                    stop_signal = AgentMessage(
+                        message_type=MessageType.CONTROL,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.EXECUTION,
+                        session_id=message.session_id,
+                        task_id=pending_task_id,
+                        payload={
+                            "command": "stop",
+                            "task_id": pending_task_id,
+                            "reason": "User initiated stop",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    await broker_instance.publish(Channels.EXECUTION_STOP_SIGNAL, stop_signal)
+            else:
+                logger.info("   (No in-flight tasks to stop)")
+
+            # ✅ GIVE EXECUTION AGENT A MOMENT TO RECEIVE AND PROCESS STOP SIGNALS
+            # This ensures the ExecutionStopManager has time to mark tasks as stopped
+            # before we resolve futures and potentially dispatch new tasks
+            import asyncio
+            await asyncio.sleep(0.1)
 
             # Resolve and clear all in-flight futures so execution flow halts quickly.
             for pending_task_id, future in list(pending_results.items()):
@@ -4349,7 +4391,7 @@ async def start_coordinator_agent(broker_instance):
                 try:
                     future.set_result(
                         {
-                            "status": "failed",
+                            "status": "stopped",
                             "error": "Execution stopped by user",
                             "metadata": {"interrupted": True, "command": "stop"},
                         }

@@ -4,10 +4,93 @@ import asyncio
 import os
 import sys
 import re
+import subprocess
 from typing import Dict, Any, Optional
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Execution Stop Manager - Handle interrupt/stop commands
+# ============================================================================
+
+class ExecutionStopManager:
+    """Manages stop signals for running tasks and their subprocesses.
+
+    Notes:
+      - This manager is used from both async and sync contexts (some callers use
+        asyncio.run / run_coroutine_threadsafe). Using a threading lock avoids
+        event-loop affinity issues with asyncio.Lock.
+      - Never hold the lock while waiting on subprocess termination.
+    """
+
+    def __init__(self):
+        import threading
+
+        self._stopped_tasks = set()  # task_ids marked for stop
+        self._running_processes = {}  # task_id -> list[subprocess.Popen]
+        self._lock = threading.RLock()
+
+    async def mark_task_for_stop(self, task_id: str):
+        """Mark a task for stopping and terminate any tracked subprocesses."""
+        with self._lock:
+            logger.warning(f"⏹️ [STOP] Marking task {task_id} for termination")
+            self._stopped_tasks.add(task_id)
+
+        # Kill outside the lock to prevent deadlocks and avoid blocking other calls.
+        await self.kill_task_processes(task_id)
+
+    async def is_task_stopped(self, task_id: str) -> bool:
+        """Check if a task has been marked for stop."""
+        with self._lock:
+            return task_id in self._stopped_tasks
+
+    async def register_process(self, task_id: str, process):
+        """Register a subprocess for tracking."""
+        with self._lock:
+            self._running_processes.setdefault(task_id, []).append(process)
+            logger.debug(f"📋 [STOP] Registered process {process.pid} for task {task_id}")
+
+    async def kill_task_processes(self, task_id: str):
+        """Terminate all tracked subprocesses for a task.
+
+        Kill order: terminate() → wait(timeout=2) → kill() on timeout.
+        Stop-state cleanup is handled by cleanup_task() after the task unwinds.
+        """
+        with self._lock:
+            processes = self._running_processes.pop(task_id, [])
+
+        if not processes:
+            return
+
+        logger.warning(f"🔪 [STOP] Terminating {len(processes)} process(es) for task {task_id}")
+
+        for proc in processes:
+            try:
+                if proc.poll() is None:
+                    logger.warning(f"   → Terminating PID {proc.pid}")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                        logger.info(f"   ✅ Terminated PID {proc.pid}")
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"   🔪 Force killing PID {proc.pid}")
+                        proc.kill()
+                        proc.wait()
+            except Exception as e:
+                pid = getattr(proc, 'pid', '?')
+                logger.error(f"   ❌ Failed to terminate PID {pid}: {e}")
+
+    async def cleanup_task(self, task_id: str):
+        """Clean up stop state and any lingering tracked processes for a task."""
+        with self._lock:
+            self._stopped_tasks.discard(task_id)
+            self._running_processes.pop(task_id, None)
+
+
+# Global stop manager instance
+_execution_stop_manager = ExecutionStopManager()
+
 
 # ============================================================================
 # Task Models
@@ -519,7 +602,8 @@ class CoordinatorRAGBridge:
             exec_result = self.sandbox.execute_code(
                 code=new_code,
                 use_docker=False,
-                retry_on_failure=False
+                retry_on_failure=False,
+                task_id=task.task_id  # ✅ PASS TASK ID FOR SUBPROCESS TRACKING
             )
 
             if exec_result.validation_passed and exec_result.security_passed:
@@ -602,7 +686,8 @@ class CoordinatorRAGBridge:
             exec_result = self.sandbox.execute_code(
                 code=click_code,
                 use_docker=False,
-                retry_on_failure=False
+                retry_on_failure=False,
+                task_id=task.task_id  # ✅ PASS TASK ID FOR SUBPROCESS TRACKING
             )
 
             # Return result
@@ -710,7 +795,8 @@ class CoordinatorRAGBridge:
                             cache_key=None,  # Don't cache the mini prompt response
                             start_context_index=0,
                             num_contexts=1,
-                            screen_state={'active_window': 'N/A', 'process': 'N/A', 'controls': []}
+                            screen_state={'active_window': 'N/A', 'process': 'N/A', 'controls': []},
+                            task_id=task.task_id  # ✅ PASS TASK ID FOR STOP SIGNAL HANDLING
                         )
 
                         main_code = rag_result.get('code', '').strip()
@@ -902,6 +988,14 @@ class CoordinatorRAGBridge:
         start_context_index = 0
         
         while attempt < max_retries:
+            if await _execution_stop_manager.is_task_stopped(task.task_id):
+                logger.warning(f"⏹️ Task {task.task_id} marked for stop, aborting execution loop")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="stopped",
+                    error="Task stopped by user"
+                )
+
             attempt += 1
             logger.info(f"🔍 Attempt {attempt}/{max_retries} for task {task.task_id}")
             
@@ -920,8 +1014,17 @@ class CoordinatorRAGBridge:
                     cache_key=task.ai_prompt,  # Use original prompt for cache key
                     start_context_index=start_context_index,
                     num_contexts=self.rag.config.top_k,
-                    screen_state=screen_state
+                    screen_state=screen_state,
+                    task_id=task.task_id  # ✅ PASS TASK ID FOR STOP SIGNAL HANDLING
                 )
+
+                if await _execution_stop_manager.is_task_stopped(task.task_id):
+                    logger.warning(f"⏹️ Task {task.task_id} marked for stop, aborting after code generation")
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="stopped",
+                        error="Task stopped by user"
+                    )
                 
                 generated_code = rag_result.get('code', '')
                 
@@ -943,8 +1046,17 @@ class CoordinatorRAGBridge:
                 exec_result = self.sandbox.execute_code(
                     code=generated_code,
                     use_docker=False,
-                    retry_on_failure=False
+                    retry_on_failure=False,
+                    task_id=task.task_id  # ✅ PASS TASK ID FOR SUBPROCESS TRACKING
                 )
+
+                if await _execution_stop_manager.is_task_stopped(task.task_id):
+                    logger.warning(f"⏹️ Task {task.task_id} marked for stop, aborting after execution")
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="stopped",
+                        error="Task stopped by user"
+                    )
 
                 # ========================================================================
                 # NEW: Post-Execution Task Validation
@@ -1068,15 +1180,16 @@ class CoordinatorRAGBridge:
                             new_code = self._regenerate_code_with_coordinates(
                                 task, coords, element_desc
                             )
-                            
+
                             # Execute the new code
                             logger.info("🔄 Executing OmniParser-assisted code...")
                             logger.debug(f"Generated code:\n{new_code}")  # Use debug level, not info
-                            
+
                             exec_result = self.sandbox.execute_code(
                                 code=new_code,
                                 use_docker=False,
-                                retry_on_failure=False
+                                retry_on_failure=False,
+                                task_id=task.task_id  # ✅ PASS TASK ID FOR SUBPROCESS TRACKING
                             )
                             
                             if exec_result.validation_passed and exec_result.security_passed:
@@ -1131,6 +1244,14 @@ class CoordinatorWebRAGBridge:
         error_context = ""
         
         while attempt < max_retries:
+            if await _execution_stop_manager.is_task_stopped(task.task_id):
+                logger.warning(f"⏹️ Web task {task.task_id} marked for stop, aborting execution loop")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="stopped",
+                    error="Task stopped by user"
+                )
+
             attempt += 1
             logger.info(f"🔄 Attempt {attempt}/{max_retries} for task {task.task_id}")
             
@@ -1149,6 +1270,14 @@ class CoordinatorWebRAGBridge:
                 }
                 
                 exec_result = await self.web.execute_web_task(task_dict, session_id)
+
+                if await _execution_stop_manager.is_task_stopped(task.task_id):
+                    logger.warning(f"⏹️ Web task {task.task_id} marked for stop, aborting after execution")
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status="stopped",
+                        error="Task stopped by user"
+                    )
                 
                 # ✅ FIX: exec_result is a WebExecutionResult dataclass, not a dict
                 if exec_result.validation_passed and exec_result.security_passed:
@@ -1200,28 +1329,78 @@ class CoordinatorWebRAGBridge:
 async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_pipeline, web_pipeline):
     desktop_bridge = CoordinatorRAGBridge(desktop_rag, sandbox_pipeline)
     web_bridge = CoordinatorWebRAGBridge(web_pipeline)
-    
+
+    # ════════════════════════════════════════════════════════════════
+    # STOP SIGNAL HANDLER
+    # ════════════════════════════════════════════════════════════════
+    async def handle_execution_stop_signal(message):
+        """Handle stop/interrupt signal from coordinator"""
+        try:
+            task_id = message.payload.get('task_id')
+            command = message.payload.get('command', 'stop')
+
+            if task_id:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for task {task_id}")
+                await _execution_stop_manager.mark_task_for_stop(task_id)
+            else:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for all tasks")
+                # TODO: Implement stop-all logic if needed
+        except Exception as e:
+            logger.error(f"❌ [STOP SIGNAL] Error handling stop signal: {e}")
+
+    # ════════════════════════════════════════════════════════════════
+    # EXECUTION REQUEST HANDLER
+    # ════════════════════════════════════════════════════════════════
     async def handle_execution_request(message):
         try:
             task_data = message.payload
             task_id = message.task_id or task_data.get('task_id', 'unknown')
             session_id = message.session_id
-            
+
             logger.info(f"🎯 Task received: {task_data.get('ai_prompt', 'Unknown')}")
             logger.info(f"   Context: {task_data.get('context', 'NO CONTEXT')}")
             logger.info(f"   Target Agent: {task_data.get('target_agent', 'NO AGENT')}")
-            
+
+            # ✅ CHECK FOR STOP SIGNAL IMMEDIATELY
+            if await _execution_stop_manager.is_task_stopped(task_id):
+                logger.warning(f"⏹️ Task {task_id} marked for stop, aborting execution")
+                result = TaskResult(
+                    task_id=task_id,
+                    status="stopped",
+                    error="Task stopped by user"
+                )
+
+                from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
+
+                response_msg = AgentMessage(
+                    message_type=MessageType.EXECUTION_RESPONSE,
+                    sender=AgentType.EXECUTION,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=session_id,
+                    task_id=task_id,
+                    response_to=message.message_id,
+                    payload=result.dict()
+                )
+
+                await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
+                await _execution_stop_manager.cleanup_task(task_id)
+                return
+
             task = ActionTask.from_dict(task_data)
-            
-            if task.context == "web":
-                logger.info(f"🌐 WEB TASK - Using Playwright pipeline")
-                result = await web_bridge.execute_web_action_task(task, session_id)
-            else:
-                logger.info(f"🖥️ DESKTOP TASK - Using RAG + pyautogui pipeline")
-                result = await desktop_bridge.execute_action_task(task)
-            
+
+            try:
+                if task.context == "web":
+                    logger.info(f"🌐 WEB TASK - Using Playwright pipeline")
+                    result = await web_bridge.execute_web_action_task(task, session_id)
+                else:
+                    logger.info(f"🖥️ DESKTOP TASK - Using RAG + pyautogui pipeline")
+                    result = await desktop_bridge.execute_action_task(task)
+            finally:
+                # ✅ CLEANUP STOP STATE AFTER EXECUTION
+                await _execution_stop_manager.cleanup_task(task_id)
+
             from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
-            
+
             response_msg = AgentMessage(
                 message_type=MessageType.EXECUTION_RESPONSE,
                 sender=AgentType.EXECUTION,
@@ -1231,25 +1410,25 @@ async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_p
                 response_to=message.message_id,
                 payload=result.dict()
             )
-            
+
             await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
             logger.info(f"✅ Sent result for task {task_id}: {result.status}")
-            
+
         except Exception as e:
             logger.error(f"❌ Error processing execution request: {e}")
 
             task_id = message.task_id or getattr(message.payload, 'task_id', 'unknown')
             import traceback
             traceback.print_exc()
-            
+
             error_result = TaskResult(
                 task_id=task_id,
                 status="failed",
                 error=str(e)
             )
-            
+
             from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
-            
+
             error_msg = AgentMessage(
                 message_type=MessageType.EXECUTION_RESPONSE,
                 sender=AgentType.EXECUTION,
@@ -1259,11 +1438,22 @@ async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_p
                 response_to=message.message_id,
                 payload=error_result.dict()
             )
-            
+
             await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, error_msg)
-    
+            await _execution_stop_manager.cleanup_task(task_id)
+
     from agents.utils.protocol import Channels
+
+    # ✅ SUBSCRIBE TO BOTH EXECUTION REQUEST AND STOP SIGNALS
     broker_instance.subscribe(Channels.COORDINATOR_TO_EXECUTION, handle_execution_request)
+
+    # Check if EXECUTION_STOP_SIGNAL channel exists, if not we'll handle it via another mechanism
+    try:
+        broker_instance.subscribe(Channels.EXECUTION_STOP_SIGNAL, handle_execution_stop_signal)
+        logger.info("✅ Stop signal handler registered")
+    except (AttributeError, ValueError) as e:
+        logger.warning(f"⚠️ EXECUTION_STOP_SIGNAL channel not available yet: {e}")
+        logger.info("   (Stop signals will be available once channel is added to protocol.py)")
     
     logger.info("✅ Unified Execution Agent started:")
     logger.info("   🌐 Web tasks → Playwright pipeline")
@@ -1406,24 +1596,71 @@ async def initialize_execution_agent_for_server(broker_instance):
 
 async def start_desktop_only_execution_agent(broker_instance, rag_system, sandbox_pipeline):
     bridge = CoordinatorRAGBridge(rag_system, sandbox_pipeline)
-    
+
+    # ════════════════════════════════════════════════════════════════
+    # STOP SIGNAL HANDLER
+    # ════════════════════════════════════════════════════════════════
+    async def handle_execution_stop_signal(message):
+        """Handle stop/interrupt signal from coordinator"""
+        try:
+            task_id = message.payload.get('task_id')
+            command = message.payload.get('command', 'stop')
+
+            if task_id:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for task {task_id}")
+                await _execution_stop_manager.mark_task_for_stop(task_id)
+            else:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for all tasks")
+        except Exception as e:
+            logger.error(f"❌ [STOP SIGNAL] Error handling stop signal: {e}")
+
     async def handle_execution_request(message):
         try:
             task_data = message.payload
+            task_id = message.task_id or task_data.get('task_id', 'unknown')
             task = ActionTask.from_dict(task_data)
-            
-            if task.context == "web":
-                logger.error("❌ Web tasks not supported (web pipeline not initialized)")
+
+            # ✅ CHECK FOR STOP SIGNAL IMMEDIATELY
+            if await _execution_stop_manager.is_task_stopped(task_id):
+                logger.warning(f"⏹️ Task {task_id} marked for stop, aborting execution")
                 result = TaskResult(
-                    task_id=task.task_id,
-                    status="failed",
-                    error="Web automation not available"
+                    task_id=task_id,
+                    status="stopped",
+                    error="Task stopped by user"
                 )
-            else:
-                result = await bridge.execute_action_task(task)
-            
+
+                from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
+
+                response_msg = AgentMessage(
+                    message_type=MessageType.EXECUTION_RESPONSE,
+                    sender=AgentType.EXECUTION,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=message.session_id,
+                    task_id=task_id,
+                    response_to=message.message_id,
+                    payload=result.dict()
+                )
+
+                await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
+                await _execution_stop_manager.cleanup_task(task_id)
+                return
+
+            try:
+                if task.context == "web":
+                    logger.error("❌ Web tasks not supported (web pipeline not initialized)")
+                    result = TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error="Web automation not available"
+                    )
+                else:
+                    result = await bridge.execute_action_task(task)
+            finally:
+                # ✅ CLEANUP STOP STATE AFTER EXECUTION
+                await _execution_stop_manager.cleanup_task(task_id)
+
             from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
-            
+
             response_msg = AgentMessage(
                 message_type=MessageType.EXECUTION_RESPONSE,
                 sender=AgentType.EXECUTION,
@@ -1433,17 +1670,26 @@ async def start_desktop_only_execution_agent(broker_instance, rag_system, sandbo
                 response_to=message.message_id,
                 payload=result.dict()
             )
-            
+
             await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
-            
+
         except Exception as e:
             logger.error(f"❌ Error in desktop execution: {e}")
-    
+            task_id = message.task_id or getattr(message.payload, 'task_id', 'unknown')
+            await _execution_stop_manager.cleanup_task(task_id)
+
     from agents.utils.protocol import Channels
     broker_instance.subscribe(Channels.COORDINATOR_TO_EXECUTION, handle_execution_request)
-    
+
+    # Check if EXECUTION_STOP_SIGNAL channel exists
+    try:
+        broker_instance.subscribe(Channels.EXECUTION_STOP_SIGNAL, handle_execution_stop_signal)
+        logger.info("✅ Stop signal handler registered")
+    except (AttributeError, ValueError) as e:
+        logger.warning(f"⚠️ EXECUTION_STOP_SIGNAL channel not available yet: {e}")
+
     logger.info("✅ Desktop-Only Execution Agent started")
-    
+
     while True:
         await asyncio.sleep(1)
 
@@ -1453,22 +1699,63 @@ async def start_desktop_only_execution_agent(broker_instance, rag_system, sandbo
 
 async def start_simple_execution_agent(broker_instance):
     from agents.utils.protocol import AgentMessage, MessageType, AgentType, Channels
-    
+
+    # ════════════════════════════════════════════════════════════════
+    # STOP SIGNAL HANDLER
+    # ════════════════════════════════════════════════════════════════
+    async def handle_execution_stop_signal(message):
+        """Handle stop/interrupt signal from coordinator"""
+        try:
+            task_id = message.payload.get('task_id')
+            command = message.payload.get('command', 'stop')
+
+            if task_id:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for task {task_id}")
+                await _execution_stop_manager.mark_task_for_stop(task_id)
+            else:
+                logger.warning(f"⏹️ [STOP SIGNAL] Received command '{command}' for all tasks")
+        except Exception as e:
+            logger.error(f"❌ [STOP SIGNAL] Error handling stop signal: {e}")
+
     async def handle_execution_request(message):
         try:
             task_data = message.payload
             task_id = task_data.get('task_id', 'unknown')
             ai_prompt = task_data.get('ai_prompt', '')
-            
+
             logger.info(f"🎯 Fallback execution agent received task {task_id}: {ai_prompt[:50]}...")
-            
+
+            # ✅ CHECK FOR STOP SIGNAL IMMEDIATELY
+            if await _execution_stop_manager.is_task_stopped(task_id):
+                logger.warning(f"⏹️ Task {task_id} marked for stop, returning stopped status")
+                result = {
+                    'task_id': task_id,
+                    'status': 'stopped',
+                    'content': None,
+                    'error': 'Task stopped by user'
+                }
+
+                response_msg = AgentMessage(
+                    message_type=MessageType.EXECUTION_RESPONSE,
+                    sender=AgentType.EXECUTION,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=message.session_id,
+                    task_id=task_id,
+                    response_to=message.message_id,
+                    payload=result
+                )
+
+                await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
+                await _execution_stop_manager.cleanup_task(task_id)
+                return
+
             result = {
                 'task_id': task_id,
                 'status': 'pending',
                 'content': f"Task '{ai_prompt}' awaiting RAG execution",
                 'error': None
             }
-            
+
             response_msg = AgentMessage(
                 message_type=MessageType.EXECUTION_RESPONSE,
                 sender=AgentType.EXECUTION,
@@ -1478,15 +1765,26 @@ async def start_simple_execution_agent(broker_instance):
                 response_to=message.message_id,
                 payload=result
             )
-            
+
             await broker_instance.publish(Channels.EXECUTION_TO_COORDINATOR, response_msg)
             logger.info(f"⏳ Sent pending status for task {task_id}")
-            
+            await _execution_stop_manager.cleanup_task(task_id)
+
         except Exception as e:
             logger.error(f"❌ Error in fallback execution: {e}")
-    
+            task_id = task_data.get('task_id', 'unknown') if 'task_data' in locals() else 'unknown'
+            await _execution_stop_manager.cleanup_task(task_id)
+
     broker_instance.subscribe(Channels.COORDINATOR_TO_EXECUTION, handle_execution_request)
+
+    # Check if EXECUTION_STOP_SIGNAL channel exists
+    try:
+        broker_instance.subscribe(Channels.EXECUTION_STOP_SIGNAL, handle_execution_stop_signal)
+        logger.info("✅ Stop signal handler registered")
+    except (AttributeError, ValueError) as e:
+        logger.warning(f"⚠️ EXECUTION_STOP_SIGNAL channel not available yet: {e}")
+
     logger.info("✅ Fallback Execution Agent started")
-    
+
     while True:
         await asyncio.sleep(1)

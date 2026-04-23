@@ -31,9 +31,12 @@ from anthropic import Anthropic
 import torch
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 
 from enum import Enum
 import requests
+
+logger = logging.getLogger(__name__)
 
 class RetrievalMode(Enum):
     API = "api"
@@ -475,10 +478,11 @@ class RAGSystem:
                     conversation_context: List[Dict] = None,
                     start_context_index: int = 0,
                     num_contexts: int = None,
-                    use_rag: bool = None, screen_state: Dict = None ) -> Dict:  # ← ADD use_rag parameter
+                    use_rag: bool = None, screen_state: Dict = None,
+                    task_id: str = None) -> Dict:  # ✅ ADD task_id parameter for stop signal handling
         """
         Generate code based on user query using RAG
-        
+
         Args:
             user_query: The user's request/question
             cache_key: Unique identifier for the query (used for caching)
@@ -487,10 +491,43 @@ class RAGSystem:
             start_context_index: Which context to start from (for retries)
             num_contexts: How many contexts to use (default: top_k)
             use_rag: Override to enable/disable RAG (None = use config default)
+            task_id: Optional task ID for stop signal handling
         """
         if num_contexts is None:
             num_contexts = self.config.top_k
-        
+
+        # ✅ CHECK FOR STOP SIGNAL BEFORE STARTING
+        if task_id:
+            try:
+                from agents.execution_agent.RAG.code_execution import _execution_stop_manager
+                import asyncio
+
+                # Check if task should stop
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            _execution_stop_manager.is_task_stopped(task_id),
+                            loop
+                        )
+                        is_stopped = future.result(timeout=1.0)
+                    else:
+                        is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+                except RuntimeError:
+                    is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+
+                if is_stopped:
+                    logger.warning(f"⏹️ [CODE GEN] Stop signal received for task {task_id}, aborting code generation")
+                    return {
+                        'code': '',
+                        'explanation': 'Code generation stopped by user',
+                        'contexts_used': 0,
+                        'top_similarity': 0.0,
+                        'error': 'Task stopped by user'
+                    }
+            except Exception as e:
+                logger.debug(f"⚠️ [CODE GEN] Error checking stop signal before generation: {e}")
+
         # Determine if RAG should be used
         if use_rag is None:
             use_rag = self.config.use_rag  # Use config default
@@ -599,10 +636,73 @@ class RAGSystem:
         # STEP 3: Generate code
         # ============================================================================
         print(f"\n[{'4/3' if use_rag else '3/3'}] 🤖 Generating code with LLM...")
+
+        # ✅ CHECK FOR STOP SIGNAL BEFORE LLM CALL
+        if task_id:
+            try:
+                from agents.execution_agent.RAG.code_execution import _execution_stop_manager
+                import asyncio
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            _execution_stop_manager.is_task_stopped(task_id),
+                            loop
+                        )
+                        is_stopped = future.result(timeout=1.0)
+                    else:
+                        is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+                except RuntimeError:
+                    is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+
+                if is_stopped:
+                    logger.warning(f"⏹️ [CODE GEN] Stop signal received before LLM call for task {task_id}")
+                    return {
+                        'code': '',
+                        'explanation': 'Code generation stopped by user',
+                        'contexts_used': 0,
+                        'top_similarity': 0.0,
+                        'error': 'Task stopped by user'
+                    }
+            except Exception as e:
+                logger.debug(f"⚠️ [CODE GEN] Error checking stop signal before LLM: {e}")
+
         response = self.llm.generate(
             prompt=enriched_prompt,  # ← USE enriched_prompt INSTEAD OF prompt
             system_prompt=self._get_system_prompt()
         )
+
+        # ✅ CHECK FOR STOP SIGNAL AFTER LLM CALL
+        if task_id:
+            try:
+                from agents.execution_agent.RAG.code_execution import _execution_stop_manager
+                import asyncio
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            _execution_stop_manager.is_task_stopped(task_id),
+                            loop
+                        )
+                        is_stopped = future.result(timeout=1.0)
+                    else:
+                        is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+                except RuntimeError:
+                    is_stopped = asyncio.run(_execution_stop_manager.is_task_stopped(task_id))
+
+                if is_stopped:
+                    logger.warning(f"⏹️ [CODE GEN] Stop signal received after LLM call for task {task_id}, discarding generated code")
+                    return {
+                        'code': '',
+                        'explanation': 'Code generation was stopped',
+                        'contexts_used': 0,
+                        'top_similarity': 0.0,
+                        'error': 'Task stopped by user'
+                    }
+            except Exception as e:
+                logger.debug(f"⚠️ [CODE GEN] Error checking stop signal after LLM: {e}")
         
         # Parse response
         result = self._parse_response(response, contexts)

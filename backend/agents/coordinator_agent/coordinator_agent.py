@@ -4283,9 +4283,43 @@ async def start_coordinator_agent(broker_instance):
     async def handle_interrupt_command(message: AgentMessage):
         """Handle pause/stop/resume commands with context snapshot support"""
         command = message.payload.get("command")
+
+        async def _broadcast_execution_control(command_name: str, reason: str):
+            task_ids = set(pending_results.keys())
+            current_task_id = task_queue.current_task_id
+            payload_task_id = message.payload.get("task_id")
+            if current_task_id:
+                task_ids.add(current_task_id)
+            if payload_task_id:
+                task_ids.add(payload_task_id)
+
+            logger.info(f"📢 Broadcasting {command_name} signal to execution agent")
+
+            if task_ids:
+                logger.warning(f"🔪 Found {len(task_ids)} in-flight task(s), sending {command_name} signals...")
+                for task_id in list(task_ids):
+                    logger.warning(f"   → {command_name.title()} task {task_id}")
+
+                    control_signal = AgentMessage(
+                        message_type=MessageType.CONTROL,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.EXECUTION,
+                        session_id=message.session_id,
+                        task_id=task_id,
+                        payload={
+                            "command": command_name,
+                            "task_id": task_id,
+                            "reason": reason,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    )
+                    await broker_instance.publish(Channels.EXECUTION_STOP_SIGNAL, control_signal)
+            else:
+                logger.info(f"   (No in-flight tasks to {command_name})")
         
         if command == "pause":
             task_queue.pause()
+            await _broadcast_execution_control("pause", "User initiated pause")
         elif command == "resume":
             task_queue.resume()
         elif command == "stop":
@@ -4341,42 +4375,11 @@ async def start_coordinator_agent(broker_instance):
             except Exception as e:
                 logger.error(f"❌ Failed to save context snapshot: {e}")
             
-            # Capture in-flight task IDs BEFORE clearing the queue/state.
-            stop_task_ids = set(pending_results.keys())
-            current_task_id = task_queue.current_task_id
-            payload_task_id = message.payload.get("task_id")
-            if current_task_id:
-                stop_task_ids.add(current_task_id)
-            if payload_task_id:
-                stop_task_ids.add(payload_task_id)
-
             # Stop coordinator queues now (prevents any new dispatch).
             task_queue.stop()
 
             # ✅ SEND STOP SIGNALS TO EXECUTION AGENT FOR ALL IN-FLIGHT TASKS
-            logger.info("📢 Broadcasting stop signal to execution agent")
-
-            if stop_task_ids:
-                logger.warning(f"🔪 Found {len(stop_task_ids)} in-flight task(s), sending stop signals...")
-                for pending_task_id in list(stop_task_ids):
-                    logger.warning(f"   → Stopping task {pending_task_id}")
-
-                    stop_signal = AgentMessage(
-                        message_type=MessageType.CONTROL,
-                        sender=AgentType.COORDINATOR,
-                        receiver=AgentType.EXECUTION,
-                        session_id=message.session_id,
-                        task_id=pending_task_id,
-                        payload={
-                            "command": "stop",
-                            "task_id": pending_task_id,
-                            "reason": "User initiated stop",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    )
-                    await broker_instance.publish(Channels.EXECUTION_STOP_SIGNAL, stop_signal)
-            else:
-                logger.info("   (No in-flight tasks to stop)")
+            await _broadcast_execution_control("stop", "User initiated stop")
 
             # ✅ GIVE EXECUTION AGENT A MOMENT TO RECEIVE AND PROCESS STOP SIGNALS
             # This ensures the ExecutionStopManager has time to mark tasks as stopped

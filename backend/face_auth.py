@@ -31,7 +31,7 @@ class FaceAuth:
         # - 0.4-0.45 = fair match
         # - >0.45 = likely different person
         self.max_acceptable_distance = 0.45  # Maximum allowed distance (stricter than 0.6)
-        self.min_confidence_percent = 70.0   # Minimum 70% confidence required
+        self.min_confidence_percent = 60.0   # Minimum 70% confidence required
         
     def process_face_image(self, image_base64):
         """

@@ -2884,7 +2884,7 @@ def create_coordinator_graph():
         plan_total = len(results)
         plan_reward = plan_success_count / max(plan_total, 1)
 
-        if session_id and plan_total > 0:
+        if session_id and plan_total > 0 and not task_queue.is_stopped:
             try:
                 plan_goal = state.get("input", {}).get(
                     "original_input",
@@ -2918,6 +2918,7 @@ def create_coordinator_graph():
             "execution_clarification": clarification_event,
             "status": "completed",
             "session_id": session_id,
+            "_execution_stopped_by_user": task_queue.is_stopped,
             "original_message_id": original_message_id
         }
 
@@ -3595,6 +3596,10 @@ Extract now:"""
                 logger.info("🔄 ICRL: Skipping plan retry — execution stopped for clarification, not failure")
                 return {**current_state, "_icrl_plan_round": icrl_round}
 
+            if current_state.get("_execution_stopped_by_user"):
+                logger.info("🔄 ICRL: Skipping plan retry — execution was stopped by user, not a plan failure")
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
             if icrl_round >= MAX_ICRL_PLAN_RETRIES:
                 logger.info("🔄 ICRL: Max plan retries reached, proceeding to feedback")
                 return {**current_state, "_icrl_plan_round": icrl_round}
@@ -4006,6 +4011,7 @@ async def execute_single_task(
     try:
         result_payload = await asyncio.wait_for(future, timeout=wait_timeout)
         payload_status = result_payload.get("status", "failed")
+        _interrupted = payload_status == "stopped" or bool(result_payload.get("metadata", {}).get("interrupted"))
         if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
             payload_status = "failed"
 
@@ -4038,7 +4044,8 @@ async def execute_single_task(
             session_id
             and task.target_agent == "action"
             and payload_status in ("success", "failed")
-        ):
+            and not _interrupted
+        ):       
             try:
                 icrl_buffer = _get_icrl_buffer(
                     session_id, task.task_id, task.goal or task.ai_prompt

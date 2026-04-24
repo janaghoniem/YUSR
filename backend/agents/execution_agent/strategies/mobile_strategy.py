@@ -68,36 +68,6 @@ logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  HELPER FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def compute_smart_timeout(task_text: str, base_timeout: int = 30) -> int:
-    """
-    Adjust timeout based on task complexity indicators.
-    Returns adjusted timeout in seconds.
-    """
-    adjusted = base_timeout
-    
-    # Keywords that suggest longer operations
-    complex_keywords = {
-        "search": 5,
-        "scroll": 3,
-        "load": 5,
-        "wait": 3,
-        "navigate": 3,
-        "install": 10,
-        "download": 10,
-    }
-    
-    text_lower = (task_text or "").lower()
-    for keyword, extra in complex_keywords.items():
-        if keyword in text_lower:
-            adjusted = max(adjusted, base_timeout + extra)
-    
-    return min(adjusted, 120)  # Cap at 120 seconds
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -155,6 +125,32 @@ _QUERY_RE   = re.compile(
 CACHE_SIM_THRESHOLD: float = 0.55   # Jaccard similarity for cache hit
 CODE_EXEC_TIMEOUT:   int   = 90     # seconds before killing subprocess
 MAX_CODE_RETRIES:    int   = 2      # LLM regeneration attempts on failure
+
+
+def compute_smart_timeout(task_text: str, base_timeout: int = 30) -> int:
+    """
+    Compute a conservative timeout for mobile tasks based on prompt complexity.
+
+    This function is imported by mobile_action_handler and kept for backward
+    compatibility with earlier strategy implementations.
+    """
+    timeout = max(10, int(base_timeout or 30))
+    text = (task_text or "").lower()
+
+    # Slightly extend timeout for operations that often require loading/waiting.
+    if any(k in text for k in ("install", "download", "update")):
+        timeout += 30
+    elif any(k in text for k in ("search", "open", "navigate", "login", "sign in")):
+        timeout += 10
+    elif any(k in text for k in ("alarm", "settings", "clock", "compose")):
+        timeout += 5
+
+    # Extra buffer for potentially multi-step prompts.
+    step_markers = (" then ", " and ", " after ", ",")
+    if any(marker in text for marker in step_markers):
+        timeout += 5
+
+    return min(timeout, 180)
 
 # Keys coming from the coordinator that should not appear in user prompt params
 _INTERNAL_KEYS: Set[str] = {
@@ -681,20 +677,21 @@ class PlaceholderExtractor:
 
 def build_ui_snapshot(
     xml_dump: Any,
-    max_elements: int = 50,
+    max_elements: int = 60,
 ) -> str:
     """
-    Parse a UIAutomator2 XML hierarchy dump and return a concise text snapshot.
+    Parse a UIAutomator2 XML hierarchy dump and return a selector-ready snapshot.
 
-    Format per element:
-        [resource_id_or_class]  "label"  @(cx%,cy%)  [FLAGS]
+    Each interactive element is rendered as one line showing ALL available
+    selector handles so the LLM can pick the best one without guessing:
 
-    The snapshot is included in the LLM prompt once per task.
+        CLASS  rid="<resource-id>"  text="<text>"  desc="<content-desc>"  @(cx%,cy%)  [FLAGS]
+
+    The snapshot is the ONLY source of valid selectors for generated code.
     """
     if not xml_dump:
         return "(no UI data available)"
 
-    # Accept str or bytes
     if isinstance(xml_dump, bytes):
         xml_dump = xml_dump.decode("utf-8", errors="replace")
     if not isinstance(xml_dump, str) or not xml_dump.strip():
@@ -715,7 +712,7 @@ def build_ui_snapshot(
         if not m:
             return None
         return {
-            "left": int(m.group(1)), "top": int(m.group(2)),
+            "left": int(m.group(1)), "top":  int(m.group(2)),
             "right": int(m.group(3)), "bottom": int(m.group(4)),
         }
 
@@ -724,46 +721,60 @@ def build_ui_snapshot(
         if count[0] >= max_elements:
             return
 
-        attrs    = node.attrib
-        bounds   = _parse_bounds(attrs.get("bounds", ""))
+        attrs     = node.attrib
+        bounds    = _parse_bounds(attrs.get("bounds", ""))
         if bounds:
             sw = max(sw, bounds["right"])
             sh = max(sh, bounds["bottom"])
 
-        clickable = attrs.get("clickable",  "false").lower() == "true"
-        focusable = attrs.get("focusable",  "false").lower() == "true"
-        visible   = attrs.get("visible-to-user", "true").lower() != "false"
+        clickable  = attrs.get("clickable",       "false").lower() == "true"
+        focusable  = attrs.get("focusable",       "false").lower() == "true"
+        scrollable = attrs.get("scrollable",      "false").lower() == "true"
+        enabled    = attrs.get("enabled",         "true" ).lower() != "false"
+        visible    = attrs.get("visible-to-user", "true" ).lower() != "false"
 
-        if (clickable or focusable) and visible:
-            text  = attrs.get("text", "")
+        if (clickable or focusable or scrollable) and visible:
+            rid   = attrs.get("resource-id",  "")
+            text  = attrs.get("text",         "")
             desc  = attrs.get("content-desc", "")
-            rid   = attrs.get("resource-id", "")
-            cls   = attrs.get("class", "").rsplit(".", 1)[-1]
-            label = text or desc or "(no text)"
+            cls   = attrs.get("class",        "").rsplit(".", 1)[-1]
 
-            rid_or_cls = rid if rid else cls
+            # Build selector column — show each handle only when non-empty
+            parts: List[str] = [cls]
+            if rid:   parts.append(f'rid="{rid}"')
+            if text:  parts.append(f'text="{text}"')
+            if desc:  parts.append(f'desc="{desc}"')
 
             coord = ""
             if bounds and sw > 0 and sh > 0:
                 cx    = (bounds["left"] + bounds["right"])  // 2
                 cy    = (bounds["top"]  + bounds["bottom"]) // 2
-                coord = f" @({cx * 100 // sw}%, {cy * 100 // sh}%)"
+                coord = f"  @({cx * 100 // sw}%, {cy * 100 // sh}%)"
 
             flags: List[str] = []
-            if clickable:                                         flags.append("CLK")
-            if focusable:                                         flags.append("FOC")
-            if attrs.get("scrollable", "false").lower() == "true": flags.append("SCR")
-            if attrs.get("enabled",    "true").lower()  == "false": flags.append("DISABLED")
-            flag_str = f" [{','.join(flags)}]" if flags else ""
+            if clickable:  flags.append("CLK")
+            if focusable:  flags.append("FOC")
+            if scrollable: flags.append("SCR")
+            if not enabled: flags.append("DISABLED")
+            flag_str = f"  [{','.join(flags)}]" if flags else ""
 
-            lines.append(f"[{rid_or_cls}]  {label!r}{coord}{flag_str}")
+            lines.append("  ".join(parts) + coord + flag_str)
             count[0] += 1
 
         for child in node:
             visit(child)
 
     visit(root)
-    return "\n".join(lines) if lines else "(no interactive elements found)"
+
+    if not lines:
+        return "(no interactive elements found)"
+
+    header = (
+        "# Each line: CLASS  rid=<resource-id>  text=<text>  desc=<content-desc>"
+        "  @(x%,y%)  [FLAGS]\n"
+        "# Use ONLY these selectors in your code. Never invent resource IDs.\n"
+    )
+    return header + "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -778,11 +789,13 @@ class CodeExecutor:
     - imports uiautomator2, time, re, sys
     - connects to the device and assigns `d`
     - sets implicit-wait
+    - declares every extracted task param as a Python variable
+      (so generated code can use either "05" or alarm_hour — both work)
 
-    Generated code only needs to use `d` and `time`.
+    Generated code only needs to use `d`, `time`, and the param variables.
     """
 
-    _PREAMBLE = textwrap.dedent(
+    _PREAMBLE_HEADER = textwrap.dedent(
         """\
         import uiautomator2 as u2
         import time
@@ -804,14 +817,29 @@ class CodeExecutor:
         self.device_serial = device_serial
         self.timeout       = timeout
 
-    def _build_script(self, code: str) -> str:
-        preamble = self._PREAMBLE.format(serial=self.device_serial or "")
-        # Dedent user code so it runs at module scope
-        return preamble + textwrap.dedent(code)
+    def _build_script(self, code: str, params: Optional["TaskParameters"] = None) -> str:
+        header = self._PREAMBLE_HEADER.format(serial=self.device_serial or "")
 
-    async def execute(self, code: str) -> ExecutionOutcome:
+        # Declare every param as a module-level Python variable.
+        # This is the safety net: if the LLM writes `set_text(alarm_hour)` instead of
+        # `set_text("05")`, the variable resolves correctly rather than crashing.
+        param_lines: List[str] = []
+        if params:
+            for k, v in params.raw.items():
+                if k in _INTERNAL_KEYS:
+                    continue
+                param_lines.append(f"{k} = {str(v)!r}")
+        param_block = ("\n".join(param_lines) + "\n\n") if param_lines else ""
+
+        return header + param_block + textwrap.dedent(code)
+
+    async def execute(
+        self,
+        code:   str,
+        params: Optional["TaskParameters"] = None,
+    ) -> "ExecutionOutcome":
         """Write script to a temp file and execute it asynchronously."""
-        full_script = self._build_script(code)
+        full_script = self._build_script(code, params)
         logger.debug(f"[EXEC] Full script ({len(full_script.splitlines())} lines):\n{full_script}")
 
         with tempfile.NamedTemporaryFile(
@@ -885,117 +913,90 @@ _CODEGEN_SYSTEM_PROMPT = textwrap.dedent(
     """\
     You are an expert Android automation engineer.
 
-    Your job: given a task description, a list of extracted parameters, and an
-    optional screen snapshot, output a complete, runnable Python automation script.
+    Your job: given a task description, a set of concrete parameter values, and
+    a CURRENT SCREEN snapshot, output a complete runnable Python automation script.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     ENVIRONMENT
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     A connected uiautomator2 device object `d` is available.
     `time` and `re` are already imported.
+    All task parameters are already declared as Python variables (e.g. alarm_hour = "05").
     DO NOT add import statements or reassign `d`.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    APP LAUNCH  (always start here — never navigate manually)
+    !! CRITICAL: SELECTORS MUST COME FROM THE SCREEN SNAPSHOT !!
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    d.app_start("com.google.android.gm")           # Gmail
-    d.app_start("com.android.chrome")              # Chrome
-    d.app_start("com.google.android.deskclock")    # Clock / alarms
-    d.app_start("com.android.vending")             # Play Store
-    d.app_start("com.google.android.youtube")      # YouTube
-    d.app_start("com.google.android.apps.maps")    # Maps
-    d.app_start("com.google.android.calendar")     # Calendar
-    d.app_start("com.google.android.contacts")     # Contacts
-    d.app_start("com.android.settings")            # Settings
-    d.app_wait("com.xxx", timeout=6)               # wait for foreground
+    The CURRENT SCREEN section in the user message shows every interactive element
+    with its actual resource-id, text, and content-desc fields.
+
+    YOU MUST:
+      ✓ Use ONLY resource IDs, text values, and descriptions that appear in the snapshot.
+      ✓ Pick the most specific selector available: resource-id > desc > text > class.
+      ✓ After app_start + app_wait, call d.dump_hierarchy() mentally — the snapshot
+        reflects the STATE before your first action, not after app launch.
+        Use .wait(timeout=N) or .exists(timeout=N) to wait for post-launch elements.
+
+    YOU MUST NOT:
+      ✗ Invent resource IDs like "com.android.chrome:id/url_bar" — if it is not in
+        the snapshot, DO NOT use it. Use description or text instead.
+      ✗ Assume any element is present without checking the snapshot.
+      ✗ Use .wait() on an element whose selector is not in the snapshot.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    ELEMENT SELECTORS  (prefer resource-id > description > text)
+    APP LAUNCH  (always start here)
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    d(text="OK")
-    d(textContains="Search")
-    d(description="Add alarm")
-    d(resourceId="android:id/hours")
-    d(resourceId="com.android.chrome:id/url_bar")
-    d(className="android.widget.EditText")
-    d(text="Send", className="android.widget.Button")   # combined
+    d.app_start("com.example.package")         # cold-start the app
+    d.app_wait("com.example.package", timeout=8)  # wait until foreground
+    time.sleep(1.5)                            # let first screen render
+    # THEN inspect snapshot elements and interact with what exists.
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    SELECTOR SYNTAX  (use values from snapshot only)
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    d(resourceId="<rid from snapshot>")
+    d(description="<desc from snapshot>")
+    d(text="<text from snapshot>")
+    d(textContains="<partial text>")
+    d(className="android.widget.EditText")     # fallback when no rid/text/desc
+    d(text="X", className="android.widget.Button")  # combined for disambiguation
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     INTERACTIONS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    d(text="Send").click()
-    d(text="Delete").long_click()
-    d(resourceId="...").set_text("hello")          # focus + clear + type
-    d(resourceId="...").clear_text()               # clear only
-    d(resourceId="...").get_text()                 # read current value
-    d.send_keys("text")                            # type to currently-focused field
-    d.press("back")   d.press("home")   d.press("enter")   d.press("search")
-    d.click(540, 960)                              # coordinate tap
-    d.swipe_ext("up", scale=0.8)                   # fling scroll
-    d(scrollable=True).scroll.to(text="Target")    # scroll until visible
+    d(selector).click()
+    d(selector).long_click()
+    d(selector).set_text("value")              # focus + clear + type in one call
+    d(selector).clear_text()
+    d(selector).get_text()
+    d.send_keys("text")                        # type into currently-focused field
+    d.press("back") / d.press("home") / d.press("enter") / d.press("search")
+    d.click(x, y)                              # pixel coordinate tap
+    d.swipe_ext("up", scale=0.8)              # fling-scroll
+    d(scrollable=True).scroll.to(text="X")    # scroll until element visible
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    WAITING & GUARDS
+    WAITING & CONDITIONAL GUARDS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    d(text="...").wait(timeout=5)                  # wait for element to appear
-    if d(text="Allow").exists(timeout=2):          # conditional guard
-        d(text="Allow").click()
-    time.sleep(1.5)                                # after app_start / major transition
-    time.sleep(0.5)                                # after click
-    time.sleep(0.3)                                # after typing
+    d(selector).wait(timeout=5)                # block until element appears
+    if d(selector).exists(timeout=2):          # non-blocking conditional
+        d(selector).click()
+    time.sleep(1.5)                            # after app_start / screen transition
+    time.sleep(0.5)                            # after a click
+    time.sleep(0.3)                            # after typing / set_text
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     MANDATORY RULES
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    1. ALWAYS begin with d.app_start(package) + d.app_wait(package, timeout=6).
-    2. ALWAYS end the script with:  print("TASK_COMPLETE")
-    3. Add d(text="Allow").exists(timeout=2) guards for optional permission dialogs.
-    4. Use set_text() for text fields — never simulate key-by-key typing.
-    5. After pressing enter/search, add time.sleep(2) for results to load.
-    6. Do NOT wrap the whole script in try/except — let real errors surface.
-    7. Output ONLY raw Python code. No markdown fences, no explanations.
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    REFERENCE PATTERNS
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # SEARCH in Chrome
-    d.app_start("com.android.chrome")
-    d.app_wait("com.android.chrome", timeout=6)
-    time.sleep(1.5)
-    if d(description="Search or type URL").exists(timeout=3):
-        d(description="Search or type URL").click()
-    d(resourceId="com.android.chrome:id/url_bar").set_text("vets near me")
-    d.press("enter")
-    time.sleep(2)
-    print("TASK_COMPLETE")
-
-    # SET ALARM in Clock
-    d.app_start("com.google.android.deskclock")
-    d.app_wait("com.google.android.deskclock", timeout=6)
-    time.sleep(1.5)
-    d(description="Add alarm").click()
-    time.sleep(0.5)
-    d(resourceId="android:id/input_hour").set_text("05")
-    d(resourceId="android:id/input_minute").set_text("30")
-    d(text="PM").click()
-    d(text="OK").click()
-    time.sleep(0.5)
-    print("TASK_COMPLETE")
-
-    # COMPOSE EMAIL in Gmail
-    d.app_start("com.google.android.gm")
-    d.app_wait("com.google.android.gm", timeout=6)
-    time.sleep(1.5)
-    d(description="Compose").click()
-    time.sleep(1)
-    d(resourceId="com.google.android.gm:id/to").set_text("user@example.com")
-    d.press("enter")
-    d(resourceId="com.google.android.gm:id/subject").set_text("Hello")
-    d(resourceId="com.google.android.gm:id/body").click()
-    d.send_keys("Message body here")
-    d(description="Send").click()
-    time.sleep(1)
-    print("TASK_COMPLETE")
+    1. ALWAYS begin with d.app_start(package) + d.app_wait(package, timeout=8).
+    2. ALWAYS end with:  print("TASK_COMPLETE")
+    3. Guard optional dialogs: if d(text="Allow").exists(timeout=2): d(text="Allow").click()
+    4. Use set_text() for all text input — never simulate key-by-key typing.
+    5. After d.press("enter") or d.press("search"), add time.sleep(2.0).
+    6. Do NOT wrap the script in try/except — let real errors surface for retry.
+    7. Output ONLY raw Python. No markdown fences, no comments, no explanation.
+    8. Param variables are already in scope — use them directly: set_text(alarm_hour)
+       OR use their literal string values: set_text("05"). Both work. Be consistent.
     """
 ).strip()
 
@@ -1038,15 +1039,6 @@ class MobileCodeGenStrategy:
         self.current_task:        Optional[MobileTaskRequest] = None
         self.token_usage:         Dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls:     int            = 0
-        # Backward-compatible fields expected by existing handler/coordinator code.
-        self.action_history:      List[Dict[str, Any]] = []
-        self.tier_stats:          Dict[str, int] = {
-            "tier1_cache_hits": 0,
-            "tier1_cache_misses": 0,
-            "tier2_generations": 0,
-            "tier3_retries": 0,
-            "execution_attempts": 0,
-        }
 
         # Sub-components
         self.cache           = TemplateCache(cache_file or CACHE_FILE)
@@ -1214,36 +1206,53 @@ class MobileCodeGenStrategy:
         error_ctx:    str = "",
         extra_params: Optional[Dict[str, Any]] = None,
     ) -> str:
-        # Collect non-internal extra params for context
+        # Params block — show them as the Python variable assignments that will
+        # already be in scope, so the LLM writes set_text(alarm_hour) or "05" correctly.
+        param_block = ""
+        if params.raw:
+            lines = [
+                f"  {k} = {str(v)!r}  # use this variable name OR its string value"
+                for k, v in params.raw.items()
+                if k not in _INTERNAL_KEYS
+            ]
+            if lines:
+                param_block = (
+                    "\nPARAMETER VARIABLES (already declared — use directly in your code):\n"
+                    + "\n".join(lines) + "\n"
+                )
+
+        # Non-internal extra params that aren't already in params.raw
         extra_lines: List[str] = []
         for k, v in (extra_params or {}).items():
-            if k in _INTERNAL_KEYS or v is None:
+            if k in _INTERNAL_KEYS or v is None or k in params.raw:
                 continue
             extra_lines.append(f"  {k.upper()} = {str(v)!r}")
-
         extra_section = (
-            "\nADDITIONAL CONTEXT:\n" + "\n".join(extra_lines) + "\n"
-            if extra_lines else ""
-        )
+            "\nADDITIONAL CONTEXT (for reference only — not pre-declared):\n"
+            + "\n".join(extra_lines) + "\n"
+        ) if extra_lines else ""
+
         error_section = (
             f"\n{'━'*50}\n"
-            f"PREVIOUS ATTEMPT FAILED — fix this error:\n"
+            f"PREVIOUS ATTEMPT FAILED — your next script must fix this error:\n"
             f"{error_ctx}\n"
+            f"HINT: Check the snapshot below for the correct selector to use.\n"
             f"{'━'*50}\n"
         ) if error_ctx else ""
 
+        # Snapshot goes LAST — closest to where the LLM generates, maximising attention.
         return (
-            f"TASK:          {task_text}\n"
-            f"OVERALL GOAL:  {overall_goal}\n"
-            f"TARGET APP:    {app}  (package: {package or 'unknown'})\n"
-            f"\nEXTRACTED PARAMETERS (use these exact values):\n"
-            f"{params.describe()}\n"
+            f"TASK:         {task_text}\n"
+            f"OVERALL GOAL: {overall_goal}\n"
+            f"APP:          {app}  |  PACKAGE: {package or 'unknown'}\n"
+            f"{param_block}"
             f"{extra_section}"
             f"{error_section}"
-            f"\nCURRENT SCREEN AT TASK START:\n"
+            f"\nCURRENT SCREEN SNAPSHOT (your ONLY source of valid selectors):\n"
             f"{ui_snapshot}\n"
             f"\nWrite the complete uiautomator2 script. "
-            f"Raw Python only — no markdown, no commentary."
+            f"Every selector MUST match an element in the snapshot above. "
+            f"Raw Python only — no markdown, no comments."
         )
 
     @staticmethod
@@ -1358,7 +1367,6 @@ class MobileCodeGenStrategy:
         self.current_task = task
         self._executor    = None  # reset per task so serial is re-resolved
         t0                = time.monotonic()
-        self.action_history = []
 
         overall_goal: str = (
             task.extra_params.get("overall_goal")
@@ -1392,7 +1400,6 @@ class MobileCodeGenStrategy:
         # ── 3. Cache lookup ───────────────────────────────────────────────
         cache_hit = self.cache.lookup(task.ai_prompt, app)
         if cache_hit:
-            self.tier_stats["tier1_cache_hits"] += 1
             template, score = cache_hit
             missing = params.missing_keys(template.code_template)
             if not missing:
@@ -1401,12 +1408,7 @@ class MobileCodeGenStrategy:
                     f"injecting {len(params.raw)} params → executing"
                 )
                 injected = params.inject(template.code_template)
-                self.action_history.append({
-                    "stage": "tier1_cache_execute",
-                    "similarity": round(score, 3),
-                })
-                self.tier_stats["execution_attempts"] += 1
-                outcome  = await executor.execute(injected)
+                outcome  = await executor.execute(injected, params)
                 if outcome.success:
                     self.cache.mark_success(template.template_id)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -1420,22 +1422,12 @@ class MobileCodeGenStrategy:
                         f"[T1] Cached code failed: {outcome.error_summary} "
                         f"— falling through to LLM"
                     )
-                    self.action_history.append({
-                        "stage": "tier1_cache_failed",
-                        "error": outcome.error_summary,
-                    })
                     self.cache.mark_failure(template.template_id)
             else:
                 logger.info(
                     f"[T1] Cache hit but missing params {missing} "
                     f"— cannot inject, falling through to LLM"
                 )
-                self.action_history.append({
-                    "stage": "tier1_cache_missing_params",
-                    "missing": missing,
-                })
-        else:
-            self.tier_stats["tier1_cache_misses"] += 1
 
         # ── 4. Fetch UI snapshot (once) ───────────────────────────────────
         logger.info("[DEVICE] Fetching initial UI snapshot …")
@@ -1448,14 +1440,10 @@ class MobileCodeGenStrategy:
         code      = ""
         error_ctx = ""
         outcome:  Optional[ExecutionOutcome] = None
-        last_failure_reason = ""
 
         for attempt in range(1 + MAX_CODE_RETRIES):
             label = f"attempt {attempt + 1}/{1 + MAX_CODE_RETRIES}"
             try:
-                self.tier_stats["tier2_generations"] += 1
-                if attempt > 0:
-                    self.tier_stats["tier3_retries"] += 1
                 code = await self._generate_code(
                     task_text    = task.ai_prompt,
                     overall_goal = overall_goal,
@@ -1473,15 +1461,11 @@ class MobileCodeGenStrategy:
 
             if not code.strip():
                 logger.warning(f"[LLM] Empty code response ({label})")
-                self.action_history.append({"stage": "llm_empty", "attempt": attempt + 1})
-                last_failure_reason = "LLM returned empty code"
                 error_ctx = "You returned empty code. Output a complete Python script."
                 continue
 
             logger.info(f"[T2/T3] Executing — {label}")
-            self.tier_stats["execution_attempts"] += 1
-            self.action_history.append({"stage": "execute", "attempt": attempt + 1})
-            outcome = await executor.execute(code)
+            outcome = await executor.execute(code, params)
 
             if outcome.success:
                 logger.info(f"✅ [T2] Code executed successfully ({label})")
@@ -1489,12 +1473,6 @@ class MobileCodeGenStrategy:
 
             # Feed error back into next generation attempt
             error_ctx = self._error_context(outcome)
-            last_failure_reason = outcome.error_summary or "Execution failed"
-            self.action_history.append({
-                "stage": "execute_failed",
-                "attempt": attempt + 1,
-                "error": outcome.error_summary,
-            })
             logger.warning(
                 f"[T2/T3] Execution failed ({label}): {outcome.error_summary}"
             )
@@ -1513,7 +1491,7 @@ class MobileCodeGenStrategy:
                 completion_reason=f"Code generated and executed in {elapsed_ms}ms",
             )
 
-        err = outcome.error_summary if outcome else (last_failure_reason or "No execution outcome")
+        err = (outcome.error_summary if outcome else "No execution outcome")
         logger.error(f"❌ Task failed after all attempts: {err}")
         return self._build_error_result(task.task_id, err, elapsed_ms)
 

@@ -831,12 +831,20 @@ _session_browser_state: Dict[str, Dict] = {}
 # Cleared when a new chat session starts
 _icrl_buffers: Dict[str, ICRLBuffer] = {}
 
+# ── ICRL MASTER ENABLE FLAG ───────────────────────────────────────────────────
+# Set to False to completely disable In-Context Reinforcement Learning.
+# When False:
+#   - No plan-level retries (maybe_retry_plan passes through immediately)
+#   - No per-task reward recording in execute_single_task
+# Set to True to enable the full ICRL loop.
+ICRL_ENABLED = False
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── ICRL TEST FLAG — set to True temporarily to force round 0 to fail ────────
 # This injects a bad task into the round-0 decomposition so maybe_retry_plan
 # always has something to retry. Set back to False in production.
 _ICRL_FORCE_FAIL_ROUND0 = False
 # ─────────────────────────────────────────────────────────────────────────────
-
 def _get_icrl_buffer(session_id: str, task_id: str, goal: str) -> ICRLBuffer:
     """Get or create an ICRL buffer for a specific task within a session."""
     key = f"{session_id}:{task_id}"
@@ -2883,7 +2891,7 @@ def create_coordinator_graph():
         plan_total = len(results)
         plan_reward = plan_success_count / max(plan_total, 1)
 
-        if session_id and plan_total > 0:
+        if ICRL_ENABLED and session_id and plan_total > 0:
             try:
                 plan_goal = state.get("input", {}).get(
                     "original_input",
@@ -3563,6 +3571,12 @@ Extract now:"""
         """
         current_state = state
 
+        # ── ICRL master gate ──────────────────────────────────────────────────
+        if not ICRL_ENABLED:
+            logger.debug("🔄 ICRL disabled — skipping plan retry node")
+            return {**current_state, "_icrl_plan_round": 0}
+        # ─────────────────────────────────────────────────────────────────────
+
         while True:
             results = current_state.get("results", {})
             session_id = current_state.get("session_id")
@@ -4034,7 +4048,8 @@ async def execute_single_task(
         # those are the ones that fail due to UI automation errors and benefit
         # most from reward-guided retry strategies.
         if (
-            session_id
+            ICRL_ENABLED
+            and session_id
             and task.target_agent == "action"
             and payload_status in ("success", "failed")
         ):

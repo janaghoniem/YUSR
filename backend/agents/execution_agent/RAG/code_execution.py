@@ -759,8 +759,10 @@ class CoordinatorRAGBridge:
         if self.last_file_path and task.depends_on:
             rag_query = f"[ACTIVE FILE: {self.last_file_path}]\n\n{rag_query}"
             logger.info(f"[FILE CONTEXT] Injecting active file: {self.last_file_path}")
-        elif self.last_file_path and not task.depends_on:
-            logger.info(f"[FILE CONTEXT] Skipping file injection - independent new task")
+        elif not task.depends_on:
+            # New independent task - clear file path so it doesn't bleed into next tasks
+            logger.info(f"[FILE CONTEXT] Clearing file context for new independent task")
+            self.last_file_path = None
 
         # ========================================================================
         # STEP 0B: CHECK CACHE FIRST (if enabled) - FILTERED BY MODULE

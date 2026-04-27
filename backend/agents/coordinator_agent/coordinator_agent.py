@@ -1840,6 +1840,9 @@ _icrl_buffers: Dict[str, ICRLBuffer] = {}
 _ICRL_FORCE_FAIL_ROUND0 = False
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Master enable/disable flag for ICRL features
+ICRL_ENABLED = False
+
 def _get_icrl_buffer(session_id: str, task_id: str, goal: str) -> ICRLBuffer:
     """Get or create an ICRL buffer for a specific task within a session."""
     key = f"{session_id}:{task_id}"
@@ -4037,6 +4040,11 @@ Extract now:"""
         """
         current_state = state
 
+        # ── ICRL master gate: bail out early when ICRL is globally disabled
+        if not ICRL_ENABLED:
+            logger.debug("🔄 ICRL disabled — skipping plan retry node")
+            return {**current_state, "_icrl_plan_round": 0}
+
         while True:
             results = current_state.get("results", {})
             session_id = current_state.get("session_id")
@@ -4578,7 +4586,8 @@ async def execute_single_task(
         # those are the ones that fail due to UI automation errors and benefit
         # most from reward-guided retry strategies.
         if (
-            session_id
+            ICRL_ENABLED
+            and session_id
             and task.target_agent == "action"
             and payload_status in ("success", "failed")
         ):

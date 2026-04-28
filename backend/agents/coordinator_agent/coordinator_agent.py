@@ -2232,6 +2232,15 @@ def create_coordinator_graph():
                         f"🚫 Memory Fix 3: Removed {_blocked} credential memory "
                         f"item(s) from coordinator context"
                     )
+                # Convert list of dicts to a readable numbered string for the LLM
+                _lines = []
+                for _i, _p in enumerate(preferences_context, 1):
+                    if isinstance(_p, dict):
+                        _text = _p.get("memory") or _p.get("text") or str(_p)
+                    else:
+                        _text = str(_p)
+                    _lines.append(f"{_i}. {_text.strip()}")
+                preferences_context = "\n".join(_lines) if _lines else "No user preferences available"
             elif isinstance(preferences_context, str):
                 _clean_lines = []
                 for _line in preferences_context.split('\n'):
@@ -3362,8 +3371,37 @@ def create_coordinator_graph():
                     return
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
                 pref_mgr = get_preference_manager(user_id)
-                
-                task_summary = {
+
+                # TC48: Skip extraction for pure task-only commands that contain
+                # no personal signal. These commands open apps or perform generic
+                # UI actions and will never yield a storable preference — calling
+                # the LLM for them wastes tokens and adds latency.
+                _TASK_ONLY_PREFIXES = (
+                    "open ", "launch ", "start ", "close ", "run ",
+                    "click ", "type ", "press ", "navigate to ", "go to ",
+                    "scroll ", "copy ", "paste ", "select all",
+                )
+                _original_req_lower = str(
+                    state["input"].get("original_input",
+                    state["input"].get("confirmation",
+                    state["input"].get("action", "")))
+                ).lower().strip()
+                _is_task_only = (
+                    any(_original_req_lower.startswith(p) for p in _TASK_ONLY_PREFIXES)
+                    and len(_original_req_lower.split()) <= 5
+                    and "@" not in _original_req_lower
+                )
+                if _is_task_only:
+                    logger.info(
+                        f"⏭️ TC48: Skipping preference extraction for task-only command: "
+                        f"'{_original_req_lower[:60]}'"
+                    )
+                else:
+                    pass  # fall through to extraction block below
+
+                if not _is_task_only:
+                    task_summary = {
+                    # Prefer confirmation from Language Agent for a faithful representation of the user's intent
                     "original_request": state['input'].get('original_input', state['input'].get('confirmation', state['input'].get('action', ''))),
                     "completed_steps": [t.ai_prompt for t in state['tasks']],
                     "total_steps": total_count
@@ -3376,24 +3414,26 @@ COMPLETED TASK:
 
 Extract facts in these categories:
 1. TOOLS: Apps/sites the user regularly uses (e.g., "Uses Gmail for email", "Uses Chrome as browser")
-2. CONTACTS: People/emails the user interacts with (e.g., "Frequently emails shahd2202743@miuegypt.edu.eg")
-3. PATTERNS: How the user works (e.g., "Sends emails with short subjects", "Opens YouTube for videos")
-4. ACCOUNTS: Accounts the user has (e.g., "Has Gmail account hala2206898@miuegypt.edu.eg") - NO PASSWORDS EVER
+2. FREQUENT_RECIPIENTS: Email addresses the user has sent TO (e.g., "User sent email to sara@example.com") — store as "User sent email to <address>", never as "User's email is" or "User has account"
+3. PATTERNS: How the user works (e.g., "Sends emails with short subjects", "Opens YouTube for videos", "Sets early morning alarms")
 
-Be generous. If something appeared in the task, it is worth remembering.
-One-time actions still reveal user patterns (e.g., sent email means user uses email).
-Always extract at least 1-2 facts unless the task was purely system-level with no user data.
+STRICT RULES — violating these produces corrupted memory:
+- Email addresses found in the task are RECIPIENTS the user contacted, never the user's own account or identity. Always store them as "User sent email to <address>" under category "frequent_recipient".
+- NEVER store "User's email is X", "Has Gmail account X", "User has account X", or any phrasing that treats a recipient address as belonging to the user.
+- NEVER store the number of steps, retries, or any system execution metric as a preference.
+- NEVER store the content of what was typed or written (e.g. the body of a note or email) as a preference.
+- Only extract behavioral patterns about HOW the user works, not WHAT was in a specific task.
 
 OUTPUT FORMAT (JSON array):
 [
   {{
-    "preference": "Uses Gmail for sending emails",
-    "category": "app_usage",
-    "confidence": "high"
+    "preference": "User sent email to sara@example.com",
+    "category": "frequent_recipient",
+    "confidence": "medium"
   }}
 ]
 
-If truly nothing useful (e.g. task was just opening notepad with no user data), return: []
+If nothing genuinely behavioral was revealed (e.g. opening notepad once with no user data), return: []
 
 Extract now:"""
                 
@@ -3403,11 +3443,31 @@ Extract now:"""
                 if preferences_to_store and isinstance(preferences_to_store, list):
                     for pref_obj in preferences_to_store:
                         if pref_obj.get("confidence") in ["high", "medium"]:
-                            # Use ONLY Mem0's add() path — it runs its own LLM-based
-                            # deduplication against the vector store. The zero_token path
-                            # bypasses Mem0 entirely (raw MongoClient insert) and has no
-                            # similarity check, which caused every preference to be stored
-                            # twice with conflicting IDs that Mem0 couldn't find on update.
+                            # TC60: If the original request was a note-writing task,
+                            # the extracted "preference" may actually be the note's content
+                            # masquerading as a behavioral fact. Block any preference whose
+                            # text closely mirrors the content of a note/write task.
+                            _pref_text = str(pref_obj.get("preference", "")).lower()
+                            _NOTE_TASK_SIGNALS = [
+                                "write note", "create note", "save note",
+                                "add note", "note:", "write:", "record:",
+                            ]
+                            _original_was_note = any(
+                                s in _original_req_lower for s in _NOTE_TASK_SIGNALS
+                            )
+                            if _original_was_note:
+                                # Check if the extracted preference literally contains
+                                # words from the note task content (not a behavioral pattern)
+                                _NOTE_CONTENT_INDICATORS = [
+                                    "lists desktop files", "always lists", "user always",
+                                    "note says", "note content",
+                                ]
+                                if any(ind in _pref_text for ind in _NOTE_CONTENT_INDICATORS):
+                                    logger.warning(
+                                        f"🚫 TC60: Blocked note-content-as-preference: "
+                                        f"'{_pref_text[:80]}'"
+                                    )
+                                    continue
                             try:
                                 pref_mgr.add_preference(
                                     pref_obj["preference"],
@@ -3433,11 +3493,11 @@ Extract now:"""
                 ))
                 apps_used_str = ", ".join(filter(None, apps_used)) if apps_used else "none recorded"
                 
+
                 conversation_context = (
-                    f"User completed task: {task_summary['original_request']}. "
+                    f"User completed task: {_sanitized_request}. "
                     f"Apps used: {apps_used_str}. "
-                    f"Task types: {', '.join(contexts_used)}. "
-                    f"Steps taken: {success_count}."
+                    f"Task types: {', '.join(contexts_used)}."
                 )
                 
                 # pref_mgr.add_preference_zero_token(
@@ -3485,9 +3545,10 @@ Extract now:"""
                     logger.info(f"💾 Stored conversation context")
                 except Exception as ctx_err:
                     logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
             except Exception as e:
                 logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
-        
         # ── Pattern Learning: detect behavioral patterns from history ─────────
         # Runs after every fully successful task. Patterns are stored in Mem0
         # under category="learned_pattern" and surface in the next request's

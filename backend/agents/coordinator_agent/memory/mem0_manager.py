@@ -60,8 +60,9 @@ class Mem0PreferenceManager:
         except Exception as e:
             logger.error(f"❌ Mem0 initialization failed: {e}")
             raise
-
-        # ── TTL cache (TC44) ─────────────────────────────────────────────────
+        
+        # TTL cache for get_relevant_preferences — avoids redundant vector searches
+        # within the same session for the same query (TC44)
         self._search_cache: dict = {}
         self._CACHE_TTL: float = 300.0  # 5 minutes
 
@@ -206,7 +207,9 @@ class Mem0PreferenceManager:
             # Insert directly
             result = collection.insert_one(doc)
             client.close()
-            
+
+            # Invalidate get_all_preferences cache so next call reflects the new entry
+            self._search_cache.pop(f"{self.user_id}:__get_all__", None)
             logger.info(f"✅ Stored (0 tokens): {preference[:50]}...")
             return str(result.inserted_id)
             
@@ -463,7 +466,8 @@ class Mem0PreferenceManager:
             if not already_have_personal:
                 try:
                     # Reuse already-fetched list if available from exact match step above
-                    _all_prefs_fallback = all_prefs if 'all_prefs' in dir() and all_prefs else self.get_all_preferences()
+                    # (get_all_preferences is now cached so repeat calls are free)
+                    _all_prefs_fallback = all_prefs if ('all_prefs' in locals() and all_prefs) else self.get_all_preferences()
                     for pref in _all_prefs_fallback:
                         category = pref.get('metadata', {}).get('category', '')
                         if category == 'personal_info':
@@ -519,10 +523,12 @@ class Mem0PreferenceManager:
             logger.error(f"❌ Failed to get conversation history: {e}")
             return []
     #here
-    def get_all_preferences(self) -> List[Dict]:
+    def get_all_preferences(self, use_cache: bool = True) -> List[Dict]:
             """
             Get ALL stored preferences for this user in proper dictionary format.
-            
+            Results are cached for _CACHE_TTL seconds to avoid repeated MongoDB roundtrips
+            within the same request or short time window.
+
             Returns:
                 List[Dict]: Each dict has structure:
                     {
@@ -536,6 +542,17 @@ class Mem0PreferenceManager:
                         }
                     }
             """
+            import time
+
+            _all_cache_key = f"{self.user_id}:__get_all__"
+
+            # Check cache first
+            if use_cache and hasattr(self, '_search_cache') and _all_cache_key in self._search_cache:
+                cached_result, cached_time = self._search_cache[_all_cache_key]
+                if time.time() - cached_time < self._CACHE_TTL:
+                    logger.debug(f"✅ get_all_preferences cache hit for {self.user_id}")
+                    return cached_result
+
             try:
                 logger.info(f"📥 Fetching all preferences for user {self.user_id}")
                 
@@ -571,6 +588,11 @@ class Mem0PreferenceManager:
                         })
                 
                 logger.info(f"✅ Retrieved {len(formatted_memories)} formatted preferences")
+
+                # Store in cache
+                if hasattr(self, '_search_cache'):
+                    self._search_cache[_all_cache_key] = (formatted_memories, time.time())
+
                 return formatted_memories
                 
             except Exception as e:
@@ -582,6 +604,8 @@ class Mem0PreferenceManager:
         """Delete a specific preference"""
         try:
             self.memory.delete(memory_id=memory_id)
+            # Invalidate get_all_preferences cache so next call reflects the deletion
+            self._search_cache.pop(f"{self.user_id}:__get_all__", None)
             logger.info(f"✅ Deleted preference {memory_id}")
             return True
         except Exception as e:

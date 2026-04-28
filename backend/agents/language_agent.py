@@ -1680,15 +1680,66 @@ async def start_language_agent(broker):
                 try:
                     from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
                     _pmgr = get_preference_manager(user_id)
-                    _pmgr.add_preference(
-                        str(personal_info),
-                        metadata={
-                            "category": "personal_info",
-                            "source": "language_agent",
-                            "session_id": session_id
-                        }
-                    )
-                    print(f"💾 Stored personal info: {personal_info}")
+
+                    # TC59: Reject facts that conflict with existing identity data.
+                    # An attacker saying "my name is Admin" after onboarding as Sara
+                    # must not overwrite the real profile. We check existing personal_info
+                    # memories and block any claim that contradicts a stored name/identity.
+                    _IDENTITY_KEYS = ["name", "age", "nationality", "profession", "email"]
+                    _pi_lower = str(personal_info).lower()
+                    _is_identity_claim = any(k in _pi_lower for k in _IDENTITY_KEYS)
+                    _conflict_detected = False
+
+                    if _is_identity_claim:
+                        try:
+                            _existing = _pmgr.get_all_preferences()
+                            for _mem in _existing:
+                                if not isinstance(_mem, dict):
+                                    continue
+                                _cat = _mem.get("metadata", {}).get("category", "")
+                                if _cat != "personal_info":
+                                    continue
+                                _mem_text = _mem.get("memory", "").lower()
+                                # If the stored fact and the new claim share an identity
+                                # keyword but contain different values, treat as conflict.
+                                for _key in _IDENTITY_KEYS:
+                                    if _key in _mem_text and _key in _pi_lower:
+                                        # Extract value tokens after the keyword
+                                        import re as _re_tc59
+                                        _stored_val = _re_tc59.findall(
+                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _mem_text
+                                        )
+                                        _new_val = _re_tc59.findall(
+                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _pi_lower
+                                        )
+                                        if (
+                                            _stored_val and _new_val
+                                            and _stored_val[0] != _new_val[0]
+                                        ):
+                                            _conflict_detected = True
+                                            logger.warning(
+                                                f"🚫 TC59: Conflicting identity claim blocked. "
+                                                f"Stored: '{_mem_text[:60]}' | "
+                                                f"New claim: '{str(personal_info)[:60]}'"
+                                            )
+                                            break
+                                if _conflict_detected:
+                                    break
+                        except Exception as _conf_err:
+                            logger.debug(f"Conflict check failed (non-fatal): {_conf_err}")
+
+                    if not _conflict_detected:
+                        _pmgr.add_preference(
+                            str(personal_info),
+                            metadata={
+                                "category": "personal_info",
+                                "source": "language_agent",
+                                "session_id": session_id
+                            }
+                        )
+                        print(f"💾 Stored personal info: {personal_info}")
+                    else:
+                        print(f"🚫 Blocked conflicting identity claim: {str(personal_info)[:60]}")
                 except Exception as _ext_err:
                     logger.warning(f"⚠️ Personal info storage (non-fatal): {_ext_err}")
             # ──────────────────────────────────────────────────────────────────────

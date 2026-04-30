@@ -44,7 +44,6 @@ llm = ChatGroq(
     model=LLM_MODEL,
     temperature=0.05,
     max_tokens=2048,
-    # max_retries=0,          # fail fast → Mistral fallback handles retries
     groq_api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
@@ -3086,6 +3085,48 @@ def create_coordinator_graph():
                 input_task_id = current_task.extra_params["input_from"]
                 if input_task_id in task_outputs:
                     current_task.extra_params["input_content"] = task_outputs[input_task_id]
+
+            # For API email send, replace SUBJECT/BODY placeholders from upstream draft output.
+            if current_task.target_agent in {"api", "email"}:
+                _extra = current_task.extra_params or {}
+                _op = str(_extra.get("operation") or "").strip().lower()
+                _subject = str(_extra.get("subject") or "").strip()
+                _body = str(_extra.get("body") or "").strip()
+                _needs_subject = (not _subject) or (_subject.upper() in {"{SUBJECT}", "SUBJECT"})
+                _needs_body = (not _body) or (_body.upper() in {"{BODY}", "BODY"})
+
+                if _op == "send" and (_needs_subject or _needs_body) and current_task.depends_on:
+                    _dep_id = current_task.depends_on[0].strip()
+                    _draft_source = task_outputs.get(_dep_id)
+
+                    # If dependency is a confirmation task, follow its input_from chain to draft task output.
+                    if isinstance(_draft_source, str) and not _draft_source.strip().startswith("{"):
+                        _dep_task = next(
+                            (t for t in state.get("tasks", []) if getattr(t, "task_id", None) == _dep_id),
+                            None,
+                        )
+                        _upstream_id = ((_dep_task.extra_params or {}).get("input_from") if _dep_task else None)
+                        if _upstream_id and _upstream_id in task_outputs:
+                            _draft_source = task_outputs[_upstream_id]
+
+                    if isinstance(_draft_source, str):
+                        try:
+                            _parsed = json.loads(_draft_source)
+                            if isinstance(_parsed, dict) and "result" in _parsed and isinstance(_parsed["result"], dict):
+                                _parsed = _parsed["result"]
+                            if isinstance(_parsed, dict):
+                                if _needs_subject:
+                                    _parsed_subject = str(_parsed.get("SUBJECT") or _parsed.get("subject") or "").strip()
+                                    if _parsed_subject:
+                                        _extra["subject"] = _parsed_subject
+                                if _needs_body:
+                                    _parsed_body = str(_parsed.get("BODY") or _parsed.get("body") or "").strip()
+                                    if _parsed_body:
+                                        _extra["body"] = _parsed_body
+                        except Exception:
+                            pass
+
+                    current_task.extra_params = _extra
             
             # Auto-inject reasoning output into dependent action tasks.
             # IMPORTANT: Only inject the clean text content — never raw fenced JSON blocks.

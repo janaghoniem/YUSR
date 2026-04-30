@@ -34,7 +34,7 @@ class AgentType(str, Enum):
     COORDINATOR = "coordinator"
     EXECUTION = "execution"
     REASONING = "reasoning"
-    EMAIL = "email"
+    API = "api"
 
 class AgentMessage(BaseModel):
     """Base message format for all agent communication"""
@@ -189,11 +189,9 @@ class Channels:
     COORDINATOR_TO_EXECUTION = "coordinator.to.execution"
     COORDINATOR_TO_LANGUAGE = "coordinator.to.language"
     COORDINATOR_TO_REASONING = "coordinator.to.reasoning"
-    COORDINATOR_TO_EMAIL = "coordinator.to.email"
+    COORDINATOR_TO_API = "coordinator.to.api"
     
-    EMAIL_INPUT = "email.input"
-    EMAIL_OUTPUT = "email.output"
-    EMAIL_TO_COORDINATOR = "email.to.coordinator"
+    API_TO_COORDINATOR = "api.to.coordinator"
     
     EXECUTION_INPUT = "execution.input"
     EXECUTION_OUTPUT = "execution.output"

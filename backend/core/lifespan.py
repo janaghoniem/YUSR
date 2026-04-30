@@ -2,7 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from agents.coordinator_agent.coordinator_agent import start_coordinator_agent
-from agents.email_agent import start_email_agent
+from agents.api_agent import start_api_agent
 from agents.execution_agent.RAG.code_execution import initialize_execution_agent_for_server
 from agents.language_agent import start_language_agent
 from agents.reasoning_agent import start_reasoning_agent
@@ -58,8 +58,8 @@ async def lifespan(app):
         asyncio.create_task(initialize_execution_agent_for_server(broker))
         await asyncio.sleep(0.1)
 
-        logger.info("🚀 Starting Email Agent...")
-        asyncio.create_task(start_email_agent(broker))
+        logger.info("🚀 Starting API Agent...")
+        asyncio.create_task(start_api_agent(broker))
         await asyncio.sleep(0.1)
 
         logger.info("✅ All agents scheduled successfully")

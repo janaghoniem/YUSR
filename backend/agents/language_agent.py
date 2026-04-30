@@ -159,6 +159,32 @@ def classify_task_confirmation_reply(user_reply: str) -> str:
     return "critique"
 
 
+def is_likely_task_confirmation_followup(user_reply: str) -> bool:
+    """Heuristic guard: True when text looks like a reply to a draft confirmation."""
+    decision = classify_task_confirmation_reply(user_reply)
+    if decision in {"approved", "rejected"}:
+        return True
+
+    text = (user_reply or "").strip().lower()
+    normalized = normalize_arabic(user_reply or "")
+    compact = re.sub(r"[^a-z\u0600-\u06FF\s]", " ", text)
+    compact = re.sub(r"\s+", " ", compact).strip()
+
+    # Typical revision cues when user asks to tweak a draft.
+    revision_markers = {
+        "revise", "rewrite", "edit", "change", "rephrase", "modify",
+        "shorter", "longer", "friendlier", "more formal", "less formal",
+        "tone", "subject", "body", "draft", "email", "message",
+        "اجعل", "غير", "غيّر", "عدل", "عدلي", "صياغ", "المسوده", "المسودة", "رساله", "رسالة", "ايميل",
+    }
+
+    if any(m in compact for m in revision_markers) or any(m in normalized for m in revision_markers):
+        return True
+
+    # Very short free-form replies are more likely to be feedback than a new task.
+    return len(compact.split()) <= 8
+
+
 def is_explicit_send_email_task(text: str) -> bool:
     """Detect explicit send-email commands with recipient + subject + body/content."""
     if not text:
@@ -1452,71 +1478,82 @@ async def start_language_agent(broker):
         # ── Handle EXECUTION_REQUEST confirmations ─────────────────────────────
         if agent.awaiting_user_response and isinstance(agent.awaiting_user_response, dict):
             if agent.awaiting_user_response.get("type") == "task_confirmation":
-                task_id = agent.awaiting_user_response.get("task_id")
-                draft_content = agent.awaiting_user_response.get("draft_content", "")
-                input_from = agent.awaiting_user_response.get("input_from")
-                agent.awaiting_user_response = None
-                
-                logger.info(f"✅ User answered task confirmation for {task_id}: {input_text}")
-
-                decision = classify_task_confirmation_reply(input_text)
-                if decision == "approved":
-                    exec_status = "success"
-                elif decision == "rejected":
-                    exec_status = "failed"
+                saved_at = agent.awaiting_user_response.get("timestamp", 0)
+                _TASK_CONFIRM_TTL = 1800
+                if saved_at and (time.time() - saved_at > _TASK_CONFIRM_TTL):
+                    logger.warning(f"⏰ Task confirmation expired (>{_TASK_CONFIRM_TTL}s). Clearing stale state.")
+                    agent.awaiting_user_response = None
+                    agent.save_memory()
+                elif not is_likely_task_confirmation_followup(input_text):
+                    logger.info("🧹 Clearing stale task confirmation context; treating input as a fresh task.")
+                    agent.awaiting_user_response = None
+                    agent.save_memory()
                 else:
-                    exec_status = "awaiting_confirmation"
-                
-                # Clear thinking step immediately
-                try:
-                    await ThinkingStepManager.clear_steps(session_id)
-                except Exception:
-                    pass
+                    task_id = agent.awaiting_user_response.get("task_id")
+                    draft_content = agent.awaiting_user_response.get("draft_content", "")
+                    input_from = agent.awaiting_user_response.get("input_from")
+                    agent.awaiting_user_response = None
 
-                # Form execution response
-                response_msg = AgentMessage(
-                    message_type=MessageType.EXECUTION_RESPONSE,
-                    sender=AgentType.LANGUAGE,
-                    receiver=AgentType.COORDINATOR,
-                    session_id=session_id,
-                    task_id=task_id,
-                    response_to=http_request_id,
-                    payload={
-                        "status": exec_status,
-                        "content": input_text,
-                        "details": f"User replied: {input_text}",
-                        "metadata": {
-                            "confirmation_decision": decision,
-                            "user_critique": input_text if decision == "critique" else "",
-                            "draft_content": draft_content,
-                            "input_from": input_from,
-                        },
-                    }
-                )
-                await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
+                    logger.info(f"✅ User answered task confirmation for {task_id}: {input_text}")
 
-                # Resolve the WebSocket pending request for the user's confirmation input
-                if decision == "approved":
-                    ack_text = "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding..."
-                elif decision == "rejected":
-                    ack_text = "تم إيقاف المهمة بناءً على طلبك." if agent.preferred_language == "ar" else "Understood, I will stop this task."
-                else:
-                    ack_text = "ممتاز، سأعيد صياغتها بناءً على ملاحظتك." if agent.preferred_language == "ar" else "Got it, I will revise the draft based on your feedback."
+                    decision = classify_task_confirmation_reply(input_text)
+                    if decision == "approved":
+                        exec_status = "success"
+                    elif decision == "rejected":
+                        exec_status = "failed"
+                    else:
+                        exec_status = "awaiting_confirmation"
 
-                ws_resolve_msg = AgentMessage(
-                    message_type=MessageType.TASK_RESPONSE,
-                    sender=AgentType.LANGUAGE,
-                    receiver=AgentType.LANGUAGE,
-                    session_id=session_id,
-                    response_to=message.message_id,
-                    payload={
-                        "status": "processing",
-                        "response": ack_text,
-                        "user_language": agent.preferred_language
-                    }
-                )
-                await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
-                return
+                    # Clear thinking step immediately
+                    try:
+                        await ThinkingStepManager.clear_steps(session_id)
+                    except Exception:
+                        pass
+
+                    # Form execution response
+                    response_msg = AgentMessage(
+                        message_type=MessageType.EXECUTION_RESPONSE,
+                        sender=AgentType.LANGUAGE,
+                        receiver=AgentType.COORDINATOR,
+                        session_id=session_id,
+                        task_id=task_id,
+                        response_to=http_request_id,
+                        payload={
+                            "status": exec_status,
+                            "content": input_text,
+                            "details": f"User replied: {input_text}",
+                            "metadata": {
+                                "confirmation_decision": decision,
+                                "user_critique": input_text if decision == "critique" else "",
+                                "draft_content": draft_content,
+                                "input_from": input_from,
+                            },
+                        }
+                    )
+                    await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, response_msg)
+
+                    # Resolve the WebSocket pending request for the user's confirmation input
+                    if decision == "approved":
+                        ack_text = "حسنًا، سأكمل المهمة." if agent.preferred_language == "ar" else "Understood, proceeding..."
+                    elif decision == "rejected":
+                        ack_text = "تم إيقاف المهمة بناءً على طلبك." if agent.preferred_language == "ar" else "Understood, I will stop this task."
+                    else:
+                        ack_text = "ممتاز، سأعيد صياغتها بناءً على ملاحظتك." if agent.preferred_language == "ar" else "Got it, I will revise the draft based on your feedback."
+
+                    ws_resolve_msg = AgentMessage(
+                        message_type=MessageType.TASK_RESPONSE,
+                        sender=AgentType.LANGUAGE,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=message.message_id,
+                        payload={
+                            "status": "processing",
+                            "response": ack_text,
+                            "user_language": agent.preferred_language
+                        }
+                    )
+                    await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
+                    return
 
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
         contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
@@ -1790,6 +1827,7 @@ async def start_language_agent(broker):
             "original_request": message.response_to,
             "draft_content": input_content,
             "input_from": extra_params.get("input_from"),
+            "timestamp": time.time(),
         }
         # If the mobile app recreates sessions, save immediately so a new session on the next turn can recover this via the DB
         agent.save_memory()

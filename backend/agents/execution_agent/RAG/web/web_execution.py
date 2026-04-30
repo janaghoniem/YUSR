@@ -32,10 +32,10 @@ from .verification import ScreenshotVerifier
 
 # ✅ Phase 4: OAuth integration for cookie injection
 try:
-    from agents.email_agent import EmailAgent
-    _EMAIL_AGENT_AVAILABLE = True
+    from agents.api_agent import ApiAgent
+    _API_AGENT_AVAILABLE = True
 except ImportError:
-    _EMAIL_AGENT_AVAILABLE = False
+    _API_AGENT_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -1352,16 +1352,16 @@ class WebExecutionPipeline:
 
     async def _get_google_cookies_for_user(self, user_id: Optional[str]) -> Optional[List[Dict[str, Any]]]:
         """
-        ✅ Phase 4a: Get Google session cookies from OAuth token via EmailAgent.
+        ✅ Phase 4a: Get Google session cookies from OAuth token via ApiAgent.
         
         Returns Playwright-compatible cookie list if OAuth tokens available, else None.
         This enables seamless browser automation on Google without requiring login prompts.
         """
-        if not user_id or not _EMAIL_AGENT_AVAILABLE:
+        if not user_id or not _API_AGENT_AVAILABLE:
             return None
         
         try:
-            agent = EmailAgent()
+            agent = ApiAgent()
             result = await agent.get_browser_cookies(user_id)
             
             if result.get('status') == 'success' and result.get('cookies'):
@@ -4285,7 +4285,7 @@ class CoordinatorWebBridge:
             return TaskResult(
                 task_id=task.task_id,
                 status="failed",
-                error="Not an action task - should be handled by reasoning agent"
+                error="Not a web action task — 'api' target tasks must be routed to API Agent via COORDINATOR_TO_API channel, not web automation"
             )
         
         attempt = 0

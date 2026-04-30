@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = FastAPI(
@@ -108,13 +108,14 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
+    reload_enabled = os.getenv("UVICORN_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+    logger.info(f"🚀 Starting server on 0.0.0.0:{port} (reload={'on' if reload_enabled else 'off'})")
 
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=reload_enabled,
         loop="none",
         log_level="info",
         access_log=True,

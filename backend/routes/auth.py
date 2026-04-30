@@ -9,8 +9,30 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from pymongo import MongoClient
 
-from face_auth import face_auth
 from core.dependencies import logger
+
+
+_face_auth_instance = None
+
+
+def _get_face_auth():
+    """Lazy-load face auth to keep server startup fast and robust."""
+    global _face_auth_instance
+    if _face_auth_instance is None:
+        from face_auth import face_auth as loaded_face_auth
+
+        _face_auth_instance = loaded_face_auth
+    return _face_auth_instance
+
+
+class _FaceAuthProxy:
+    """Proxy that delays heavy face_auth import until first actual use."""
+
+    def __getattr__(self, name):
+        return getattr(_get_face_auth(), name)
+
+
+face_auth = _FaceAuthProxy()
 
 router = APIRouter()
 

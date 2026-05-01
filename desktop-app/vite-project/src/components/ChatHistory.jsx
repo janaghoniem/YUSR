@@ -15,7 +15,7 @@ const ChatHistory = ({ messages, onClose, chatTitle }) => {
 
     if (role === "user") {
       // Strip <user_input>...</user_input> security wrapper added by language_agent.py
-      return content.replace(/^<user_input>([\s\S]*)<\/user_input>$/, "$1").trim();
+      return content.replace(/<user_input>([\s\S]*?)<\/user_input>/g, "$1").replace(/<\/?user_input>/g, "").trim();
     }
 
     if (role === "assistant") {

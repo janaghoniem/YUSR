@@ -131,13 +131,24 @@ class Mem0PreferenceManager:
         # This runs BEFORE any write path (Groq, zero-token, or fallback) so that
         # rate-limit fallbacks don't accumulate duplicate name/personal_info entries.
         try:
-            _existing = self.get_relevant_preferences(preference, limit=3, min_score=0.82)
+            _existing = self.get_relevant_preferences(preference, limit=3, min_score=0.80)
             if _existing:
-                logger.info(
-                    f"⏭️ Skipping duplicate — similar memory exists: "
-                    f"'{_existing[0].get('memory','')[:60]}'"
-                )
-                return None
+                existing_text = _existing[0].get('memory', '').lower()
+                new_text = preference.lower()
+                _ATTR_KEYS = ['name', 'email', 'age', 'address', 'profession', 'phone', 'username']
+                existing_attr = next((k for k in _ATTR_KEYS if k in existing_text), None)
+                new_attr = next((k for k in _ATTR_KEYS if k in new_text), None)
+                if existing_attr and new_attr and existing_attr != new_attr:
+                    logger.info(
+                        f"✅ Different personal_info attributes — allowing storage: "
+                        f"existing='{existing_attr}', new='{new_attr}'"
+                    )
+                else:
+                    logger.info(
+                        f"⏭️ Skipping duplicate — similar memory exists: "
+                        f"'{_existing[0].get('memory','')[:60]}'"
+                    )
+                    return None
         except Exception as _dedup_err:
             logger.debug(f"Dedup check failed (non-fatal): {_dedup_err}")
 
@@ -458,28 +469,41 @@ class Mem0PreferenceManager:
             # Sort by score descending
             combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             
-            # ── STEP 5: FALLBACK - Always inject personal_info when missing from results ──
+           
+            # ── STEP 5: FALLBACK - Inject relevant personal_info when missing from results ──
             already_have_personal = any(
                 r.get('metadata', {}).get('category') == 'personal_info'
                 for r in combined_results
             )
             if not already_have_personal:
                 try:
-                    # Reuse already-fetched list if available from exact match step above
-                    # (get_all_preferences is now cached so repeat calls are free)
                     _all_prefs_fallback = all_prefs if ('all_prefs' in locals() and all_prefs) else self.get_all_preferences()
+                    _name_keywords = ['name', 'username', 'user name', 'اسم', 'اسمي']
+                    _email_keywords = ['email', 'mail', 'إيميل', '@']
+                    _is_name_query = any(kw in query_lower for kw in _name_keywords)
+                    _is_email_query = any(kw in query_lower for kw in _email_keywords)
                     for pref in _all_prefs_fallback:
                         category = pref.get('metadata', {}).get('category', '')
-                        if category == 'personal_info':
-                            combined_results.insert(0, {
-                                'memory': pref.get('memory', ''),
-                                'score': 0.95,
-                                'metadata': pref.get('metadata', {})
-                            })
-                            logger.info(f"  ✅ Injected personal info: {pref.get('memory', '')[:60]}")
+                        if category != 'personal_info':
+                            continue
+                        mem_text = pref.get('memory', '').lower()
+                        # When query is about name, only inject name-related personal_info
+                        # When query is about email, only inject email-related personal_info
+                        # When query is general, inject all personal_info
+                        _mem_is_name = any(kw in mem_text for kw in _name_keywords)
+                        _mem_is_email = any(kw in mem_text for kw in _email_keywords)
+                        if _is_name_query and not _mem_is_name:
+                            continue
+                        if _is_email_query and not _mem_is_email:
+                            continue
+                        combined_results.insert(0, {
+                            'memory': pref.get('memory', ''),
+                            'score': 0.95,
+                            'metadata': pref.get('metadata', {})
+                        })
+                        logger.info(f"  ✅ Injected personal info: {pref.get('memory', '')[:60]}")
                 except Exception as e:
                     logger.debug(f"Fallback personal_info fetch failed: {e}")
-            
             combined_results = combined_results[:limit]
 
             logger.info(
@@ -653,7 +677,19 @@ def get_preference_manager(user_id: str) -> Mem0PreferenceManager:
             if _personal:
                 import time as _t
                 import re as _re
-                for _warm_query in ["what is my name", "my name", "who am i"]:
+                # Cover a broad set of identity and personal-info query variations
+                # so that any new session hits the pre-warmed cache immediately
+                _warm_queries = [
+                    "what is my name", "my name", "who am i", "do you remember my name",
+                    "what is my name do u remeber", "what is my name do you remember",
+                    "remember my name", "my name is", "tell me my name", "say my name",
+                    "what is my username", "my username", "user name", "what am i called",
+                    "what is my email", "my email", "my email address",
+                    "my home address", "my address", "where do i live",
+                    "my preferences", "what do i prefer", "what browser do i use",
+                    "what units do i use", "metric or imperial", "my settings",
+                ]
+                for _warm_query in _warm_queries:
                     _norm = _re.sub(r'[^\w\s]', '', _warm_query.lower().strip())[:80]
                     _cache_key = f"{user_id}:{_norm}:10:0.25"
                     mgr._search_cache[_cache_key] = (_personal, _t.time())

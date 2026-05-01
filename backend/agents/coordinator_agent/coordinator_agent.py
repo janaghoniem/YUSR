@@ -29,6 +29,8 @@ from agents.ICRL.icrl_buffer import ICRLBuffer
 from agents.ICRL.icrl_reward_bridge import compute_reward, summarize_task_attempt, classify_failure_type
 from agents.ICRL.icrl_prompt_builder import inject_icrl_into_decomposition_prompt, inject_icrl_into_execution_prompt
 
+ICRL_ENABLED = False
+
 logger = logging.getLogger(__name__)
 load_dotenv()
 
@@ -1840,9 +1842,6 @@ _icrl_buffers: Dict[str, ICRLBuffer] = {}
 _ICRL_FORCE_FAIL_ROUND0 = False
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Master enable/disable flag for ICRL features
-ICRL_ENABLED = False
-
 def _get_icrl_buffer(session_id: str, task_id: str, goal: str) -> ICRLBuffer:
     """Get or create an ICRL buffer for a specific task within a session."""
     key = f"{session_id}:{task_id}"
@@ -2366,7 +2365,7 @@ async def decompose_task_to_actions_with_icrl(
     Returns:
         Same as decompose_task_to_actions: {"tasks": [...]} or {"error": "..."}
     """
-    if icrl_round == 0 or icrl_buffer is None or icrl_buffer.attempt_count == 0:
+    if not ICRL_ENABLED or icrl_round == 0 or icrl_buffer is None or icrl_buffer.attempt_count == 0:
         # First attempt — no ICRL history yet, call normally
         result = await decompose_task_to_actions(
             user_request, preferences_context, device_type,
@@ -3313,7 +3312,7 @@ def create_coordinator_graph():
         plan_total = len(results)
         plan_reward = plan_success_count / max(plan_total, 1)
 
-        if session_id and plan_total > 0:
+        if ICRL_ENABLED and session_id and plan_total > 0:
             try:
                 plan_goal = state.get("input", {}).get(
                     "original_input",
@@ -4496,6 +4495,33 @@ async def execute_single_task(
         task_payload["user_id"] = user_id
     task_payload["extra_params"] = extra_params
 
+    # ── Mobile execution hint: whether the mobile execution agent should
+    # return to the app screen after performing this action. This is a
+    # heuristic flag (not a hardcoded rule) that downstream mobile
+    # executors can use to decide navigation behavior.
+    try:
+        device_hint = str(getattr(task, "device", "") or "").strip().lower()
+        if task.target_agent == "action" and device_hint == "mobile":
+            # Respect explicit signal from decomposition if present
+            if "return_to_app_after_exec" not in extra_params:
+                prompt_lower = str(getattr(task, "ai_prompt", "") or "").lower()
+                final_keywords = [
+                    "click the send",
+                    "click send",
+                    "press send",
+                    "send the email",
+                    "send email",
+                    "submit",
+                    "save",
+                    "confirm and send",
+                ]
+                is_final = any(k in prompt_lower for k in final_keywords)
+                extra_params["return_to_app_after_exec"] = bool(is_final)
+            task_payload["extra_params"] = extra_params
+    except Exception:
+        # Non-fatal - don't block task publishing on this heuristic
+        pass
+
     if task.target_agent == "email":
         for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query",
                      "search_query", "video_url", "title", "start_time", "end_time",
@@ -4630,7 +4656,7 @@ async def execute_single_task(
     except asyncio.TimeoutError:
         logger.error(f"⏰ Task {task.task_id} timeout after {wait_timeout} seconds")
         # Record timeout as near-zero reward in ICRL buffer
-        if session_id and task.target_agent == "action":
+        if ICRL_ENABLED and session_id and task.target_agent == "action":
             try:
                 icrl_buffer = _get_icrl_buffer(
                     session_id, task.task_id, task.goal or task.ai_prompt
@@ -4690,7 +4716,7 @@ async def start_coordinator_agent(broker_instance):
         )
 
         stop_event = _session_stop_events.get(session_id)
-        if stop_event and incoming_text:
+        if ICRL_ENABLED and stop_event and incoming_text:
             try:
                 stopped_task_id = stop_event.get("task_id") or "stopped_plan"
                 goal = stop_event.get("goal") or "Interrupted plan"
@@ -4930,6 +4956,39 @@ async def start_coordinator_agent(broker_instance):
             )
         except Exception as e:
             logger.error(f"❌ Unexpected error setting result for {task_id}: {e}")
+
+    async def handle_language_execution_result(message: AgentMessage):
+        """
+        Handle EXECUTION_RESPONSE messages coming from the Language Agent
+        (e.g. user confirmations). The Language Agent publishes these on
+        Channels.LANGUAGE_TO_COORDINATOR so we must resolve the coordinator's
+        pending_results futures here as well. This prevents coordinator-side
+        task timeouts when confirmations arrive via the language layer.
+        """
+        if message.message_type != MessageType.EXECUTION_RESPONSE:
+            return
+
+        task_id = message.task_id
+        result_status = message.payload.get('status', 'unknown')
+        logger.info(f"📬 Language EXECUTION_RESPONSE for {task_id}: {result_status}")
+
+        # If the coordinator is not expecting this result, warn and ignore.
+        if task_id not in pending_results:
+            logger.warning(f"⚠️ Received language execution result for unknown task {task_id} (may have timed out)")
+            return
+
+        future = pending_results[task_id]
+        if future.done():
+            logger.warning(f"⚠️ Task {task_id} already resolved - ignoring duplicate language result")
+            return
+
+        try:
+            future.set_result(message.payload)
+            logger.debug(f"✅ Successfully set language result for task {task_id}")
+        except asyncio.InvalidStateError as e:
+            logger.error(f"❌ InvalidStateError setting language result for {task_id}: {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error setting language result for {task_id}: {e}")
     
     async def handle_interrupt_command(message: AgentMessage):
         """Handle pause/stop/resume commands with context snapshot support"""
@@ -5089,6 +5148,8 @@ async def start_coordinator_agent(broker_instance):
     broker_instance.subscribe(Channels.EXECUTION_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.EMAIL_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.REASONING_TO_COORDINATOR, handle_action_result)
+    # Also handle execution responses originating from the Language Agent
+    broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_language_execution_result)
     broker_instance.subscribe(Channels.INTERRUPT_CONTROL, handle_interrupt_command)
     broker_instance.subscribe(Channels.SESSION_CONTROL, handle_session_control)
     

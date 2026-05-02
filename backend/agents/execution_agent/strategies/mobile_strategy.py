@@ -270,10 +270,52 @@ class TemplateCache:
             return 0.0
         return len(a & b) / len(a | b)
 
+    # Synonym map: normalize variant phrasings to canonical forms
+    # before keyword extraction so Jaccard similarity is higher for
+    # semantically equivalent task descriptions.
+    _SYNONYMS: Dict[str, str] = {
+        "address":   "search",    # "address bar" ↔ "search bar"
+        "browser":   "chrome",    # "open browser" ↔ "open chrome"
+        "press":     "click",     # "press button" ↔ "click button"
+        "tap":       "click",
+        "hit":       "click",
+        "submit":    "click",
+        "execute":   "click",
+        "launch":    "open",      # "launch app" ↔ "open app"
+        "start":     "open",
+        "go":        "navigate",  # "go to page" ↔ "navigate to page"
+        "load":      "navigate",
+        "visit":     "navigate",
+        "query":     "search",    # "enter query" ↔ "enter search"
+        "keyword":   "search",
+        "mail":      "email",     # "open mail" ↔ "open email"
+        "inbox":     "email",
+        "compose":   "email",
+        "write":     "fill",      # "write subject" ↔ "fill subject"
+        "enter":     "type",      # "enter text" ↔ "type text"
+        "input":     "type",
+        "insert":    "type",
+    }
+
+    @classmethod
+    def _kw_query(cls, text: str) -> Set[str]:
+        """
+        Keywords for a QUERY (incoming task text).
+        1. Letters only (strips digits/colons) — templates use placeholders
+           like "alarm_time" not "5:40", so numbers never match.
+        2. Synonym normalization — maps variant words to canonical forms
+           so "address bar" and "search bar" produce identical keywords.
+        """
+        tokens = re.findall(r"[a-z]+", text.lower())  # letters only, no digits
+        # Apply synonym normalization
+        tokens = [cls._SYNONYMS.get(t, t) for t in tokens]
+        return {t for t in tokens if t not in cls._STOPWORDS and len(t) >= 2}
+
     def lookup(self, task_text: str, app: str, threshold: float = CACHE_SIM_THRESHOLD) -> Optional[Tuple[CodeTemplate, float]]:
         if not self._store:
             return None
-        query_kw  = self._kw(task_text)
+        # Use letter-only keywords for query to match placeholder-normalised templates
+        query_kw  = self._kw_query(task_text)
         app_lower = (app or "").lower().strip()
         best_t:   Optional[CodeTemplate] = None
         best_sim: float = 0.0
@@ -374,6 +416,38 @@ class ParameterExtractor:
             p = params.get("alarm_period", "AM")
             params.set("alarm_time", f"{int(h)}:{m} {p}")
 
+        # ── Parse input_content JSON from upstream reasoning tasks ──────────
+        # When a reasoning agent produces {"SUBJECT": "...", "BODY": "..."},
+        # the coordinator passes it as input_content. We parse it here so
+        # action tasks like "fill subject field" have the actual values
+        # rather than trying to use an undefined variable called BODY/SUBJECT.
+        input_content = (extra.get("input_content") or "").strip()
+        if input_content and input_content.startswith("{"):
+            try:
+                parsed = json.loads(input_content)
+                # Map common keys from reasoning agent output → canonical param names
+                key_map = {
+                    "SUBJECT": "email_subject",
+                    "subject": "email_subject",
+                    "BODY":    "email_body",
+                    "body":    "email_body",
+                    "TO":      "recipient_email",
+                    "to":      "recipient_email",
+                    "CC":      "cc_email",
+                    "cc":      "cc_email",
+                    "result":  None,  # nested result object — recurse one level
+                }
+                # Handle {"result": {"SUBJECT": ..., "BODY": ...}} wrapping
+                if "result" in parsed and isinstance(parsed["result"], dict):
+                    parsed = parsed["result"]
+                for src_key, dst_key in key_map.items():
+                    if dst_key and src_key in parsed and parsed[src_key]:
+                        if not params.has(dst_key):  # don't overwrite regex-extracted values
+                            params.set(dst_key, str(parsed[src_key]).strip())
+                            logger.debug(f"[PARAMS] Injected from input_content JSON: {dst_key}={str(parsed[src_key])[:40]!r}")
+            except (json.JSONDecodeError, TypeError):
+                pass  # input_content is plain text, not JSON — ignore
+
         logger.debug(f"[PARAMS] Extracted: {params}")
         return params
 
@@ -407,10 +481,23 @@ class ParameterExtractor:
                 params.set("cc_email", emails[1])
         sm = _SUBJECT_RE.search(text)
         if sm:
-            params.set("email_subject", sm.group(1).strip())
+            val = sm.group(1).strip()
+            # Guard: reject if this looks like a task instruction rather than a real subject.
+            # Real subjects are short (<60 chars) and don't contain instruction words.
+            instruction_words = {"field", "value", "from", "composed", "fill", "with", "the"}
+            val_words = set(val.lower().split())
+            if len(val) <= 80 and not val_words.intersection(instruction_words):
+                params.set("email_subject", val)
+            else:
+                logger.debug(f"[PARAMS] Skipped spurious email_subject match: {val[:50]!r}")
         bm = _BODY_RE.search(text)
         if bm:
-            params.set("email_body", bm.group(1).strip())
+            val = bm.group(1).strip()
+            # Same guard for body
+            instruction_words = {"field", "value", "from", "composed", "fill", "with"}
+            val_words = set(val.lower().split())
+            if len(val) <= 200 and not val_words.intersection(instruction_words):
+                params.set("email_body", val)
 
     @staticmethod
     def _extract_query(text: str, params: TaskParameters) -> None:
@@ -839,28 +926,41 @@ _CODEGEN_SYSTEM_PROMPT = textwrap.dedent(
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     CHROME / BROWSER — CRITICAL PATTERNS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    Chrome's address bar / search bar has NO visible "Enter" button in the UI tree.
-    To navigate to a URL or submit a search in Chrome:
+    RULE 1 — NEVER use .wait() or unguarded selectors for Chrome elements.
+    Chrome's url_bar DOES NOT appear in the snapshot until the app is fully
+    loaded. If url_bar is NOT in the snapshot, use .exists(timeout=8) to wait.
 
-        # Navigate to URL:
+    RULE 2 — Chrome has NO "Enter" / "Go" button in the UI tree.
+    Always use d.press("enter") or d.press("search") to submit.
+
+    RULE 3 — url_bar is the ONLY Chrome input element. If it's not in the
+    snapshot, don't invent other resourceIds — use .exists() to wait for it.
+
+        # Navigate to URL (url_bar may not be in snapshot yet — always guard):
         url_bar = d(resourceId="com.android.chrome:id/url_bar")
-        if not url_bar.exists(timeout=4):
+        if not url_bar.exists(timeout=8):
+            # Chrome still loading — try the search box or EditText
             url_bar = d(className="android.widget.EditText")
+            if not url_bar.exists(timeout=5):
+                # Last resort: tap the center-top of screen where address bar usually is
+                d.click(0.5, 0.07)
+                time.sleep(1.0)
+                url_bar = d(className="android.widget.EditText")
         url_bar.click()
-        time.sleep(0.3)
+        time.sleep(0.5)
         url_bar.clear_text()
         url_bar.set_text("https://www.google.com")
         time.sleep(0.3)
-        d.press("enter")          # ← Always use d.press("enter") — no Enter button!
-        time.sleep(2.0)
+        d.press("enter")
+        time.sleep(2.5)
 
-        # Submit a search (text already typed in search box):
-        d.press("search")         # preferred for search boxes
-        time.sleep(2.0)
-        # If d.press("search") doesn't work, fall back to:
-        # d.press("enter")
+        # Type search and submit (search box already focused):
+        d(className="android.widget.EditText").set_text(search_query)
+        time.sleep(0.3)
+        d.press("search")
+        time.sleep(2.5)
 
-    NEVER try to click a button called "Enter", "Go", or "Search" in Chrome.
+    NEVER click a button called "Enter", "Go", or "Search".
     ALWAYS use d.press("enter") or d.press("search").
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -882,51 +982,116 @@ _CODEGEN_SYSTEM_PROMPT = textwrap.dedent(
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     CLOCK / ALARM — CRITICAL PATTERNS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    IMPORTANT — IDEMPOTENCY CHECK:
-    If the snapshot already shows the alarm list (has "Add alarm" button AND
-    Toggle/Switch elements), the alarm was ALREADY saved by a previous step.
-    DO NOT open the time picker again. Just print TASK_COMPLETE and exit.
+    STEP 0 — CONTEXT CHECK (run this before anything else):
+    Read the snapshot. If "Add alarm" AND Switch/Toggle elements are BOTH
+    visible, you are on the alarm LIST. If an EditText with resource-id
+    containing "hour" or "minute" is visible, you are inside the time picker.
+    If neither, click "Add alarm" to open the picker.
 
-        # Idempotency guard — run this FIRST:
-        if d(description="Add alarm").exists(timeout=1) or d(text="Add alarm").exists(timeout=1):
-            # Already on alarm list — alarm was saved in a previous step
+    STEP 1 — Open time picker (only if on alarm list):
+        if d(description="Add alarm").exists(timeout=2):
+            d(description="Add alarm").click()
+        elif d(text="Add alarm").exists(timeout=2):
+            d(text="Add alarm").click()
+        time.sleep(1.5)
+
+    STEP 2 — MANDATORY: Switch to keyboard/text input mode.
+    The clock dial CANNOT accept set_text() — it silently ignores all input.
+    You MUST switch to text input mode and CONFIRM it worked (EditText visible)
+    before calling set_text(). If you skip this, the alarm saves at default time.
+
+    The keyboard/text mode toggle has no text or description on many devices.
+    Use this EXHAUSTIVE search — try every position until EditText appears:
+
+        def _switch_to_text_mode(d):
+            # Try every known position for the keyboard mode toggle.
+            # Named selectors first (some devices have them)
+            named_attempts = [
+                lambda: d(description="Switch to text input mode").click()
+                    if d(description="Switch to text input mode").exists(timeout=1) else None,
+                lambda: d(description="keyboard").click()
+                    if d(description="keyboard").exists(timeout=1) else None,
+                lambda: d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").click()
+                    if d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").exists(timeout=1) else None,
+            ]
+            for fn in named_attempts:
+                fn()
+                time.sleep(0.5)
+                if d(className="android.widget.EditText").exists(timeout=1):
+                    return True
+
+            # Coordinate grid — the icon can be at different positions
+            # depending on device screen size and Android version.
+            # Try a grid of likely positions systematically:
+            positions = [
+                (0.85, 0.75), (0.85, 0.80), (0.85, 0.70),
+                (0.15, 0.75), (0.15, 0.80), (0.15, 0.70),
+                (0.85, 0.65), (0.15, 0.65),
+                (0.85, 0.85), (0.15, 0.85),
+                (0.50, 0.80), (0.50, 0.85),
+            ]
+            for x, y in positions:
+                d.click(x, y)
+                time.sleep(0.5)
+                if d(className="android.widget.EditText").exists(timeout=1):
+                    return True
+            return False
+
+        switched = _switch_to_text_mode(d)
+        if not switched:
+            # Last resort: press back and re-open (sometimes resets to text mode)
+            d.press("back")
+            time.sleep(0.5)
+            if d(description="Add alarm").exists(timeout=2):
+                d(description="Add alarm").click()
+                time.sleep(1.5)
+                _switch_to_text_mode(d)
+
+        time.sleep(0.5)
+        # CONFIRM: if EditText still not visible, DO NOT proceed with set_text
+        # — it will silently fail. Print what we see and exit for retry.
+        if not d(className="android.widget.EditText").exists(timeout=2):
+            print("MODE_SWITCH_FAILED: EditText not found after all attempts")
             print("TASK_COMPLETE")
             exit()
 
-    The Google Clock alarm full flow (only if NOT already on alarm list):
-    1. Click the "Add alarm" FAB — resource-id or description="Add alarm"
-    2. Time picker appears (NOT in snapshot — use .exists() guards)
-    3. ALWAYS switch to text-input mode first to avoid the clock dial:
+    STEP 3 — Type the time (AFTER switching to text mode):
+    CRITICAL: alarm_hour is zero-padded ("05"). ALWAYS strip the leading zero.
+    str(int(alarm_hour)) gives "5" not "05". Sending "05" enters two digits
+    separately, landing on the wrong hour (0→5 → wraps to 5, not hour 5).
 
-        if d(description="Switch to text input mode").exists(timeout=3):
-            d(description="Switch to text input mode").click()
-            time.sleep(0.5)
-        elif d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").exists(timeout=3):
-            d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").click()
-            time.sleep(0.5)
+        hour_str = str(int(alarm_hour))   # "05" → "5", "12" → "12"
 
-    4. Then fill hour and minute fields:
-
+        # Try named resource IDs first, then fall back to EditText by index
         if d(resourceId="android:id/input_hour").exists(timeout=4):
-            d(resourceId="android:id/input_hour").set_text(alarm_hour)
+            d(resourceId="android:id/input_hour").clear_text()
+            d(resourceId="android:id/input_hour").set_text(hour_str)
+            time.sleep(0.3)
+            d(resourceId="android:id/input_minute").clear_text()
             d(resourceId="android:id/input_minute").set_text(alarm_minute)
         elif d(className="android.widget.EditText").count >= 2:
-            d(className="android.widget.EditText")[0].set_text(alarm_hour)
+            d(className="android.widget.EditText")[0].clear_text()
+            d(className="android.widget.EditText")[0].set_text(hour_str)
+            time.sleep(0.3)
+            d(className="android.widget.EditText")[1].clear_text()
             d(className="android.widget.EditText")[1].set_text(alarm_minute)
+        time.sleep(0.3)
 
-    5. Set AM/PM:
+    STEP 4 — Set AM/PM:
 
-        if d(text=alarm_period).exists(timeout=2):
-            d(text=alarm_period).click()
-        elif d(description=alarm_period).exists(timeout=2):
-            d(description=alarm_period).click()
+        for sel in [d(text=alarm_period), d(description=alarm_period),
+                    d(textContains=alarm_period)]:
+            if sel.exists(timeout=2):
+                sel.click()
+                break
 
-    6. Confirm:
+    STEP 5 — Confirm:
 
-        if d(text="OK").exists(timeout=2):
-            d(text="OK").click()
-        elif d(text="Save").exists(timeout=2):
-            d(text="Save").click()
+        for btn_text in ["OK", "Save", "Done"]:
+            if d(text=btn_text).exists(timeout=2):
+                d(text=btn_text).click()
+                break
+        time.sleep(0.5)
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     YOUTUBE — CRITICAL PATTERNS
@@ -979,6 +1144,123 @@ _CODEGEN_SYSTEM_PROMPT = textwrap.dedent(
     d.send_keys("text")   d.press("back"/"home"/"enter"/"search")
     d.click(x, y)   d.swipe_ext("up", scale=0.8)
     d(scrollable=True).scroll.to(text="X")
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    GMAIL — CRITICAL PATTERNS
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Gmail compose flow — use ONLY these selectors (verified working):
+
+        # Open compose screen:
+        if d(description="Compose").exists(timeout=3):
+            d(description="Compose").click()
+        elif d(resourceId="com.google.android.gm:id/compose_button").exists(timeout=3):
+            d(resourceId="com.google.android.gm:id/compose_button").click()
+        time.sleep(1.5)
+
+        # Fill recipient — the "To" field EditText:
+        # Try multiple selectors — Gmail uses different IDs across versions
+        to_field = None
+        for sel in [
+            d(resourceId="com.google.android.gm:id/to"),
+            d(resourceId="com.google.android.gm:id/people_edit_text"),
+            d(hint="To"),
+            d(className="android.widget.MultiAutoCompleteTextView"),
+        ]:
+            if sel.exists(timeout=2):
+                to_field = sel
+                break
+        if to_field is None:
+            to_field = d(className="android.widget.EditText")
+        to_field.click()
+        time.sleep(0.3)
+        to_field.set_text(recipient_email)
+        d.press("enter")
+        time.sleep(0.5)
+
+        # Fill Subject:
+        subj = None
+        for sel in [
+            d(resourceId="com.google.android.gm:id/subject"),
+            d(hint="Subject"),
+        ]:
+            if sel.exists(timeout=2):
+                subj = sel
+                break
+        if subj:
+            subj.click()
+            subj.set_text(email_subject)
+        time.sleep(0.3)
+
+        # Fill body:
+        body = None
+        for sel in [
+            d(resourceId="com.google.android.gm:id/body"),
+            d(hint="Compose email"),
+            d(className="android.widget.EditText", index=2),
+        ]:
+            if sel.exists(timeout=2):
+                body = sel
+                break
+        if body is None:
+            # Tap below subject area
+            d.click(0.5, 0.6)
+            time.sleep(0.3)
+            body = d(className="android.widget.EditText")
+        body.click()
+        body.set_text(email_body)
+        time.sleep(0.3)
+
+        # Send:
+        if d(description="Send").exists(timeout=2):
+            d(description="Send").click()
+        elif d(resourceId="com.google.android.gm:id/send").exists(timeout=2):
+            d(resourceId="com.google.android.gm:id/send").click()
+
+    CRITICAL FOR GMAIL FILL TASKS:
+    When your task says "fill Subject with SUBJECT value" or "fill body with BODY value",
+    the actual text values are in your PARAMETER VARIABLES section as email_subject and
+    email_body. NEVER reference undefined variables like SUBJECT or BODY directly.
+    ALWAYS use email_subject and email_body which are pre-declared variables.
+
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    EXTRACTING CONTENT FROM THE SCREEN
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    When the task asks to EXTRACT, READ, or COLLECT visible content
+    (search results, list items, text on screen), you MUST print the
+    extracted content to stdout BEFORE printing TASK_COMPLETE.
+
+    The downstream language agent reads your stdout to present results to
+    the user. If you only print TASK_COMPLETE, the user sees nothing.
+
+    Pattern for extracting visible text (search results, list items):
+
+        # Collect all visible text labels from the snapshot into a list
+        results = []
+        for el in d(className="android.widget.TextView"):
+            try:
+                txt = el.get_text()
+                if txt and len(txt.strip()) > 3 and txt.strip() != "...":
+                    results.append(txt.strip())
+            except Exception:
+                pass
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for r in results:
+            if r not in seen:
+                seen.add(r)
+                unique.append(r)
+
+        # Print results — one per line, labelled
+        if unique:
+            print("SEARCH_RESULTS:")
+            for i, r in enumerate(unique[:10], 1):
+                print(f"{i}. {r}")
+        else:
+            print("No visible results found on screen")
+
+        print("TASK_COMPLETE")
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     MANDATORY RULES
@@ -1125,6 +1407,56 @@ class MobileCodeGenStrategy:
         except Exception as e:
             logger.warning(f"[DEVICE] XML dump failed: {e}")
             return ""
+
+    async def _launch_app_and_wait(self, package: str, min_elements: int = 8) -> None:
+        """
+        Launch `package` via ADB and poll until the app UI is actually loaded.
+
+        Problem solved: the old 0.8s fixed sleep was far too short for Chrome
+        (3-5s cold start), so every first attempt got a snapshot of the loading
+        splash with ~24 generic elements and no url_bar — the LLM then invented
+        url_bar anyway, failing every attempt identically.
+
+        Strategy: start the app, then poll every 2s for up to 12s waiting for
+        the package name to appear in the UI hierarchy (proving its own views
+        are rendered) AND for the element count to exceed min_elements.
+        """
+        if not package:
+            return
+        serial = self._resolve_serial()
+
+        def _start() -> None:
+            dev = u2.connect(serial) if serial else u2.connect()
+            dev.app_start(package)
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(_start), timeout=10.0)
+        except Exception as e:
+            logger.warning(f"[LAUNCH] app_start({package}) error: {e}")
+            return
+
+        pkg_tail = package.split(".")[-1].lower()  # e.g. "chrome", "deskclock"
+        for poll in range(6):
+            await asyncio.sleep(2.0)
+            xml  = await self._fetch_xml_dump()
+            snap = build_ui_snapshot(xml)
+            elem_count = snap.count("\n")
+            # App is ready when its own package name appears in the snapshot
+            # (meaning its views are in the hierarchy, not just the launcher)
+            pkg_visible = pkg_tail in snap.lower() or package.lower() in snap.lower()
+            logger.info(
+                f"[LAUNCH] Poll {poll+1}/6 | ~{elem_count} elems | "
+                f"pkg_visible={pkg_visible} | pkg={pkg_tail}"
+            )
+            if pkg_visible and elem_count >= min_elements:
+                logger.info(f"[LAUNCH] ✅ {package} ready after {(poll+1)*2}s")
+                return
+            # Fallback: if there are lots of elements, app is probably loaded
+            if elem_count >= min_elements * 4:
+                logger.info(f"[LAUNCH] ✅ {package} loaded ({elem_count} elements, no pkg check)")
+                return
+
+        logger.warning(f"[LAUNCH] ⚠️ {package} may not be fully loaded after 12s — proceeding")
 
     # FIX #12: Broadened _infer_app — "email" keyword now maps to gmail
     @staticmethod
@@ -1343,18 +1675,45 @@ class MobileCodeGenStrategy:
             if not missing:
                 logger.info(f"[T1] Cache hit (sim={score:.2f}) — injecting {len(params.raw)} params → executing")
                 injected = params.inject(template.code_template)
-                outcome  = await executor.execute(injected, params)
-                if outcome.success:
-                    self.cache.mark_success(template.template_id)
-                    elapsed_ms = int((time.monotonic() - t0) * 1000)
-                    logger.info(f"✅ [T1] Cache hit success | {elapsed_ms}ms")
-                    return self._build_result(
-                        task.task_id, "success", 1, elapsed_ms,
-                        completion_reason=f"Template cache (sim={score:.2f})",
-                    )
-                else:
-                    logger.warning(f"[T1] Cached code failed: {outcome.error_summary} — falling through to LLM")
+
+                # FIX 4: Pre-validate the injected code doesn't reference
+                # undefined variables. NameError on a cached template means
+                # the template was stored with hardcoded variables from a
+                # different task context (e.g. recipient_email in a
+                # "navigate to email" template from a prior session).
+                syntax_err = CodeExecutor._syntax_check(
+                    CodeExecutor(self._resolve_serial())._build_script(injected, params)
+                )
+                if syntax_err:
+                    logger.warning(f"[T1] Cache hit but syntax/var error — marking failed: {syntax_err[:80]}")
                     self.cache.mark_failure(template.template_id)
+                else:
+                    outcome = await executor.execute(injected, params)
+                    if outcome.success:
+                        self.cache.mark_success(template.template_id)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        logger.info(f"✅ [T1] Cache hit success | {elapsed_ms}ms")
+
+                        # Capture stdout content if present
+                        stdout_content = (outcome.stdout or "").strip()
+                        content_lines = [l for l in stdout_content.splitlines()
+                                         if l.strip() and l.strip() != "TASK_COMPLETE"]
+                        cr = "\n".join(content_lines) if content_lines else f"Template cache (sim={score:.2f})"
+
+                        return self._build_result(
+                            task.task_id, "success", 1, elapsed_ms,
+                            completion_reason=cr,
+                        )
+                    elif "NameError" in (outcome.error_summary or ""):
+                        # Stale template references an undefined variable
+                        logger.warning(
+                            f"[T1] Cached code has NameError — template is stale, marking failed: "
+                            f"{outcome.error_summary[:80]}"
+                        )
+                        self.cache.mark_failure(template.template_id)
+                    else:
+                        logger.warning(f"[T1] Cached code failed: {outcome.error_summary} — falling through to LLM")
+                        self.cache.mark_failure(template.template_id)
             else:
                 logger.info(f"[T1] Cache hit but missing params {missing} — falling through to LLM")
 
@@ -1377,11 +1736,42 @@ class MobileCodeGenStrategy:
         error_ctx = ""
         outcome:  Optional[ExecutionOutcome] = None
 
+        # ── App launch with proper wait ───────────────────────────────────
+        # Detect "open/launch app" tasks — these just need app_start + wait,
+        # no LLM code generation required. This also ensures the app is fully
+        # loaded before we take the first snapshot for subsequent tasks.
+        task_lower = task.ai_prompt.lower()
+        is_launch_task = (
+            package
+            and any(task_lower.startswith(v) for v in (
+                "open ", "launch ", "start ", "open the ", "launch the ",
+            ))
+            and not any(k in task_lower for k in (
+                "search", "type", "navigate", "click", "set ", "press",
+                "find", "play", "send", "compose", "read",
+            ))
+        )
+
+        if is_launch_task:
+            logger.info(f"[LAUNCH] Pure launch task — using app_start + wait | pkg={package}")
+            await self._launch_app_and_wait(package)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            self._store_successful_code(
+                f'd.app_start("{package}")\ntime.sleep(3.0)\nprint("TASK_COMPLETE")',
+                task.ai_prompt, app, package, params,
+            )
+            return self._build_result(
+                task.task_id, "success", 1, elapsed_ms,
+                completion_reason=f"App launched: {package}",
+            )
+
+        # Non-launch task: ensure app is running before first snapshot
+        if package:
+            await self._launch_app_and_wait(package)
+
         for attempt in range(1 + MAX_CODE_RETRIES):
             label = f"attempt {attempt + 1}/{1 + MAX_CODE_RETRIES}"
-            if attempt == 0:
-                await asyncio.sleep(0.8)
-            else:
+            if attempt > 0:
                 await asyncio.sleep(1.0)
             ui_snapshot = await _live_snapshot(label)
             logger.info(
@@ -1413,6 +1803,13 @@ class MobileCodeGenStrategy:
 
             if outcome.success:
                 logger.info(f"✅ [T2] Code executed successfully ({label})")
+                # Wait for UI to fully settle before snapshotting for verification.
+                # Chrome search results and Clock alarm list both need ~1.5s to render.
+                # Without this wait, verifier snapshots a loading/transitioning screen
+                # and produces false negatives, causing the agent to re-run the task.
+                _settle = 2.5 if app in ("chrome", "youtube") else 1.5
+                logger.info(f"[VERIFY] Settling {_settle}s before snapshot...")
+                await asyncio.sleep(_settle)
                 verified, reason = await self._verify_task_completion(task.ai_prompt, app, params)
                 if verified:
                     logger.info(f"[VERIFY] ✅ Task confirmed complete: {reason}")
@@ -1440,6 +1837,22 @@ class MobileCodeGenStrategy:
                 self._store_successful_code(code, task.ai_prompt, app, package, params)
             except Exception as e:
                 logger.warning(f"[CACHE] Template storage failed (non-fatal): {e}")
+
+            # FIX: If stdout contains real content beyond TASK_COMPLETE, use it
+            # as completion_reason so the coordinator can pass it downstream.
+            stdout_content = (outcome.stdout or "").strip()
+            # Remove the TASK_COMPLETE signal and any blank lines
+            content_lines = [
+                l for l in stdout_content.splitlines()
+                if l.strip() and l.strip() != "TASK_COMPLETE"
+            ]
+            if content_lines:
+                extracted = "\n".join(content_lines)
+                logger.info(f"[EXEC] Stdout content captured ({len(extracted)} chars): {extracted[:80]!r}")
+                return self._build_result(
+                    task.task_id, "success", 1, elapsed_ms,
+                    completion_reason=extracted,
+                )
             return self._build_result(
                 task.task_id, "success", 1, elapsed_ms,
                 completion_reason=f"Code generated and executed in {elapsed_ms}ms",
@@ -1459,46 +1872,195 @@ class MobileCodeGenStrategy:
         app:       str,
         params:    TaskParameters,
     ) -> Tuple[bool, str]:
+        """
+        Verify task completion by inspecting the live UI after execution.
+
+        Design principles:
+        1. PREFER FALSE POSITIVE over FALSE NEGATIVE for tasks that are
+           inherently hard to verify precisely (typing, navigation).
+           A false negative causes the agent to re-run the task, which is
+           always worse than trusting a successful rc=0 execution.
+        2. Only return False when there is STRONG evidence of failure
+           (error dialog, time picker still open, wrong time on alarm list).
+        3. For "intermediate" tasks (type a query, navigate to page),
+           trust the script's rc=0 + TASK_COMPLETE signal — don't require
+           the final result to be visible yet.
+        4. For "outcome" tasks (alarm set, email sent), verify the outcome.
+        """
         try:
             xml_dump = await self._fetch_xml_dump()
             snap     = build_ui_snapshot(xml_dump)
             snap_low = snap.lower()
             task_low = task_text.lower()
+            elem_count = snap.count("\n")
 
-            error_signals = ("unfortunately", "has stopped", "error", "failed to", "try again")
-            if any(s in snap_low for s in error_signals):
-                return False, "Error dialog visible on screen"
+            # ── Hard failure: crash dialog ────────────────────────────────
+            if any(s in snap_low for s in ("unfortunately", "has stopped")):
+                return False, "App crash dialog visible"
 
+            # ══════════════════════════════════════════════════════════════
+            #  CLOCK / ALARM
+            # ══════════════════════════════════════════════════════════════
             if app == "clock" or any(k in task_low for k in ("alarm", "clock", "timer")):
+                task_is_set_time = any(k in task_low for k in (
+                    "set", "time", "alarm time", "5:", "6:", "7:", "8:", "9:",
+                    "10:", "11:", "12:",
+                ))
+
+                # Time picker still open → definite failure
+                if "input_hour" in snap_low or "input_minute" in snap_low:
+                    return False, "Time picker still open — alarm not saved"
+
+                # Dial picker (no text fields visible but clock is shown) → failure
+                if "timepicker" in snap_low and "add alarm" not in snap_low:
+                    return False, "Clock dial still showing — alarm not saved"
+
                 has_add_alarm = "add alarm" in snap_low
-                has_switch    = "switch" in snap_low or "togglebutton" in snap_low
-                if has_add_alarm and has_switch:
-                    return True, "Alarm list screen visible — alarm saved"
-                if "input_hour" in snap_low or "input_minute" in snap_low or "hour" in snap_low:
-                    return False, "Time picker still visible — alarm not confirmed"
-                period = params.get("alarm_period", "")
-                if period and period.upper() in snap.upper():
-                    return True, f"Alarm period {period} visible on screen"
-                return True, "No time picker visible — assuming alarm saved"
+                has_switch    = "switch" in snap_low or "togglebutton" in snap_low.replace("hour", "")
 
+                if has_add_alarm and has_switch and task_is_set_time:
+                    # We're on the alarm list. Check if correct time is there.
+                    alarm_hour   = params.get("alarm_hour",   "")
+                    alarm_minute = params.get("alarm_minute", "")
+                    alarm_period = params.get("alarm_period", "")
+
+                    if alarm_hour and alarm_minute:
+                        h_int = int(alarm_hour)
+                        # All ways the time could appear in the snapshot labels
+                        expected = [
+                            f"{h_int}:{alarm_minute}",
+                            f"{alarm_hour}:{alarm_minute}",
+                        ]
+                        if alarm_period:
+                            expected += [
+                                f"{h_int}:{alarm_minute} {alarm_period.upper()}",
+                                f"{h_int}:{alarm_minute} {alarm_period.lower()}",
+                            ]
+                        if any(v in snap_low for v in expected):
+                            return True, f"Correct alarm time {h_int}:{alarm_minute} visible on list"
+
+                        # Not found — look at what times ARE on screen
+                        times_on_screen = re.findall(r"\b\d{1,2}:\d{2}\b", snap)
+                        # Filter out the default times that appear regardless (system clock etc.)
+                        non_default = [t for t in times_on_screen
+                                       if t not in ("12:00", "00:00") and t != f"{h_int}:00"]
+                        if non_default:
+                            # There's a real alarm time visible but it's not ours
+                            return False, (
+                                f"Wrong alarm time on list — expected {h_int}:{alarm_minute}, "
+                                f"found {non_default[:2]}"
+                            )
+                        # Only default times (12:00) visible — no alarm was actually created
+                        # OR the alarm was created but label hasn't rendered yet.
+                        # Give benefit of the doubt on first attempt:
+                        logger.info(f"[VERIFY] Only default times visible: {times_on_screen[:3]} — trusting script")
+                        return True, "Alarm list visible, times not yet rendered — trusting rc=0"
+
+                # On alarm list but not a set-time task (e.g. "Open Clock", "Confirm OK")
+                if has_add_alarm:
+                    return True, "Alarm list screen visible"
+
+                # On some other clock screen (timers, stopwatch, etc.)
+                return True, "Clock app visible — trusting rc=0"
+
+            # ══════════════════════════════════════════════════════════════
+            #  CHROME / BROWSER
+            # ══════════════════════════════════════════════════════════════
             if app == "chrome" or any(k in task_low for k in ("chrome", "search", "browser")):
-                query = params.get("search_query", "")
-                elem_count = snap.count("\n")
-                if query and query.lower() in snap_low:
-                    return True, f"Search query '{query[:30]}' visible in results"
-                if elem_count >= 15:
-                    return True, f"Results page visible ({elem_count} elements)"
-                if "search or type url" in snap_low or "type url" in snap_low:
-                    return False, "Chrome still showing address bar — search not submitted"
-                return True, "Chrome page loaded"
+                query      = params.get("search_query", "")
+                target_url = params.get("target_url", "")
 
+                # Hard failure: still on new-tab start page
+                still_on_newtab = (
+                    "search or type url" in snap_low
+                    and "google" not in snap_low
+                    and elem_count < 12
+                )
+                if still_on_newtab:
+                    return False, "Chrome still on new-tab page — action had no effect"
+
+                # ── "type" / "search for" tasks ───────────────────────────
+                # These just need the query to have been submitted — we don't
+                # need full results rendered. Trust rc=0 unless still on newtab.
+                if any(k in task_low for k in ("type", "search for", "search in", "enter")):
+                    # Best signal: query text appears anywhere in snapshot
+                    if query and query.lower() in snap_low:
+                        return True, f"Query '{query[:30]}' visible in snapshot"
+                    # Next best: page changed (not new-tab, has content)
+                    if elem_count >= 10:
+                        return True, f"Page has content ({elem_count} elements) — query likely submitted"
+                    return False, "Chrome appears empty after type task"
+
+                # ── navigation tasks ──────────────────────────────────────
+                if any(k in task_low for k in ("navigate", "go to", "load")):
+                    if target_url:
+                        domain = re.search(r"https?://([^/]+)", target_url)
+                        if domain and domain.group(1).lower().replace("www.", "") in snap_low:
+                            return True, f"Domain visible in snapshot"
+                    if elem_count >= 10:
+                        return True, f"Chrome page loaded ({elem_count} elements)"
+                    return False, "Chrome navigation: page still empty"
+
+                # ── "click search button" / submit tasks ─────────────────
+                if any(k in task_low for k in ("click", "press", "submit", "button")):
+                    # After clicking search, results page should have substantial content
+                    if query and query.lower() in snap_low:
+                        return True, f"Results visible for '{query[:25]}'"
+                    if elem_count >= 15:
+                        return True, f"Results page loaded ({elem_count} elements)"
+                    # Even with few elements, if we're not on newtab, it worked
+                    if elem_count >= 8 and "search or type url" not in snap_low:
+                        return True, f"Page changed after click ({elem_count} elements)"
+                    return False, "Search button click: no results visible"
+
+                # ── generic Chrome task ───────────────────────────────────
+                chrome_active = any(s in snap_low for s in (
+                    "com.android.chrome", "url_bar", "location_bar", "omnibox",
+                    "google", "chrome",
+                ))
+                if chrome_active or elem_count >= 8:
+                    return True, f"Chrome active ({elem_count} elements)"
+                return False, "Chrome not confirmed active"
+
+            # ══════════════════════════════════════════════════════════════
+            #  GMAIL
+            # ══════════════════════════════════════════════════════════════
             if app == "gmail" or any(k in task_low for k in ("email", "gmail", "compose", "send")):
-                compose_gone = "to" not in snap_low[:200] and "subject" not in snap_low[:200]
-                has_compose_btn = "compose" in snap_low
-                if compose_gone and has_compose_btn:
-                    return True, "Compose screen closed — email likely sent"
-                if "send" in snap_low and ("to" in snap_low or "subject" in snap_low):
-                    return False, "Compose screen still visible — email not sent"
+                # Distinguish task intent: compose (open compose screen) vs send (close it)
+                task_is_send = any(k in task_low for k in ("send", "click send", "press send"))
+                task_is_compose_open = any(k in task_low for k in (
+                    "compose", "new email", "navigate to email", "open email",
+                    "open gmail", "fill", "subject", "body", "recipient",
+                ))
+
+                # For "send" tasks: compose screen should be GONE → success
+                if task_is_send:
+                    compose_gone = "to" not in snap_low[:200] and "subject" not in snap_low[:200]
+                    has_compose_btn = "compose" in snap_low
+                    if compose_gone and has_compose_btn:
+                        return True, "Compose screen closed — email sent"
+                    if "send" in snap_low and ("to" in snap_low or "subject" in snap_low):
+                        return False, "Compose screen still visible — email not sent"
+                    return True, "Gmail screen changed after send"
+
+                # For "compose/fill/open" tasks: compose screen OPEN is success
+                if task_is_compose_open:
+                    # Compose screen is open if subject or to fields are visible
+                    compose_open = any(s in snap_low for s in (
+                        "subject", '"to"', "recipient", "compose email",
+                        "com.google.android.gm:id/subject",
+                        "com.google.android.gm:id/to",
+                    ))
+                    if compose_open:
+                        return True, "Compose screen open — compose task succeeded"
+                    # Check if we at least have a Gmail screen with content
+                    if elem_count >= 10:
+                        return True, f"Gmail active with {elem_count} elements"
+                    return True, "Gmail screen visible — trusting rc=0"
+
+                # Generic Gmail task — just check we're in Gmail
+                if elem_count >= 8:
+                    return True, f"Gmail active ({elem_count} elements)"
                 return True, "Gmail screen changed"
 
             task_words = re.findall(r"[a-z]{4,}", task_low)

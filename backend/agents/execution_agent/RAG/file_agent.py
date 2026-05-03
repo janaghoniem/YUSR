@@ -32,70 +32,15 @@ from typing import Any, Dict, List, Optional, Tuple
 # Try rapidfuzz first (faster), fall back to difflib
 try:
     from rapidfuzz import fuzz as _fuzz
-
-    def _numeric_penalty(a: str, b: str) -> float:
-        """
-        Return a penalty multiplier (0.0–1.0) based on mismatched numeric tokens.
-
-        If the query contains numbers (e.g. "3", "7") that are absent from the
-        filename, the match is almost certainly wrong.  Each missing query number
-        that appears in the filename as a *different* number applies a 0.30
-        reduction so that "session 7" can never win over "session 1" just because
-        partial_ratio sees "session" overlapping.
-
-        Rules
-        -----
-        * Extract digit-only tokens from both normalised strings.
-        * For every number in the query that is NOT in the filename numbers,
-          check whether *any* number IS present in the filename — if so, this is
-          a numeric mismatch (e.g. query has "7", file has "1"): penalise 0.70×.
-        * If query has numbers and file has NONE at all, penalise lightly (0.85×)
-          because the file might just omit the number in its name.
-        * No numbers in query → no penalty (1.0).
-        """
-        import re
-        q_nums = set(re.findall(r'\b\d+\b', a))
-        f_nums = set(re.findall(r'\b\d+\b', b))
-
-        if not q_nums:
-            return 1.0  # Query has no numbers — nothing to check
-
-        missing = q_nums - f_nums          # Numbers in query but not in filename
-        if not missing:
-            return 1.0  # All query numbers present in filename — perfect
-
-        # Filename has numbers but they differ from the query numbers
-        if f_nums:
-            # Each mismatched number applies a 0.70× factor
-            return 0.70 ** len(missing)
-
-        # Filename has no numbers at all — mild penalty
-        return 0.85
-
     def _score(a: str, b: str) -> float:
         """
-        Robust filename match combining:
-          - token_sort_ratio  : order-insensitive full-token comparison
-          - token_set_ratio   : handles extra tokens in filename gracefully
-          - partial_ratio     : substring awareness (weighted down to avoid
-                                false positives like "Lab 3 SWE" beating "Lab 3 KR")
-          - numeric penalty   : punishes mismatched numbers (session 1 vs session 7)
-
+        Combine token_sort_ratio (order-insensitive) and partial_ratio
+        (substring-aware) for robust voice-input matching.
         Returns 0.0–1.0.
         """
-        token_sort = _fuzz.token_sort_ratio(a, b)   # order-insensitive
-        token_set  = _fuzz.token_set_ratio(a, b)    # handles extra tokens in filename
-        partial    = _fuzz.partial_ratio(a, b)       # substring (weighted down)
-
-        # Weighted combination — partial gets less weight to stop it crowning
-        # wrong matches just because they share a short substring
-        raw = (token_sort * 0.45 + token_set * 0.35 + partial * 0.20) / 100.0
-
-        # Apply numeric penalty AFTER combining so a number mismatch always
-        # drags down the final score even when substring similarity is high
-        penalty = _numeric_penalty(a, b)
-        return raw * penalty
-
+        token  = _fuzz.token_sort_ratio(a, b)   # "q4 report earnings" == "earnings report q4"
+        partial = _fuzz.partial_ratio(a, b)      # "report" matches inside "Q4_Report_Final_v2"
+        return max(token, partial) / 100.0
     FUZZY_BACKEND = "rapidfuzz"
 except ImportError:
     from difflib import SequenceMatcher
@@ -117,21 +62,25 @@ SKIP_DIRS = {
     # Windows system
     "Windows", "System32", "SysWOW64", "Program Files", "Program Files (x86)",
     "AppData", "ProgramData", "$Recycle.Bin", "Recovery",
-    # Python / package managers (LOW PRIORITY - system-generated)
-    "site-packages", "dist-info", "miniconda", "anaconda", ".egg-info",
-    "pip-cache", ".pyenv", ".gem", "node_modules",
 }
 
-# User-priority directories - files here get boosted in ranking
-USER_PRIORITY_DIRS = {"Desktop", "Downloads", "Documents", "OneDrive", "Google Drive"}
+# Prefix-based skip — any directory whose name STARTS WITH one of these is skipped.
+# Catches versioned names like miniconda3, anaconda3, Python311, etc.
+SKIP_DIR_PREFIXES = (
+    "miniconda", "anaconda", "python3", "python2",
+    "Library", "site-packages", "dist-info",
+)
 
 FILLER_WORDS = {"the", "a", "my", "your", "and", "or", "is", "are", "of", "for", "in"}
+
+# Directories considered user-owned — files here get a score boost
+USER_PRIORITY_DIRS = {"Desktop", "Downloads", "Documents", "OneDrive", "Google Drive"}
 
 # Where we persist the index cache
 def _cache_path() -> str:
     """Cache path under %LOCALAPPDATA%\\yusr\\."""
     base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(base, "aura", "file_index_cache.json")
+    return os.path.join(base, "yusr", "file_index_cache.json")
 
 CACHE_PATH    = _cache_path()
 CACHE_VERSION = 3          # Bump when index schema changes
@@ -155,20 +104,17 @@ class Normalizer:
         1. Lowercase
         2. Replace separators (_, -, .) with spaces
         3. Strip non-alphanumeric characters
-        4. Remove filler words; keep tokens of len > 1 OR that are purely numeric
-           (so single-digit numbers like "1", "3", "7" survive the length filter)
+        4. Remove filler words and single chars
         5. Collapse whitespace
 
         Example:
             "My-Report_Q4.2024 (FINAL).pdf" → "report q4 2024 final pdf"
-            "Session 7 DEPI.pdf"            → "session 7 depi pdf"
         """
         s = text.lower()
         for ch in ("_", "-", ".", "(", ")", "[", "]"):
             s = s.replace(ch, " ")
         s = "".join(c if c.isalnum() or c.isspace() else " " for c in s)
-        # Keep a word if it's purely numeric (any length) OR non-numeric and > 1 char
-        words = [w for w in s.split() if w not in FILLER_WORDS and (w.isdigit() or len(w) > 1)]
+        words = [w for w in s.split() if w not in FILLER_WORDS and len(w) > 1]
         return " ".join(words).strip()
 
 
@@ -176,34 +122,104 @@ class Normalizer:
 # Platform helpers
 # ============================================================================
 
+def _get_onedrive_roots() -> List[str]:
+    """
+    Detect ALL OneDrive folders for this user — including custom-named ones
+    like "OneDrive - Habiba - Personal" — using three strategies:
+
+    1. Windows registry (most reliable): reads UserFolder key from OneDrive
+       account entries, which always points to the real local sync path.
+    2. Filesystem scan of home dir: any folder starting with "OneDrive"
+       covers variants like "OneDrive - Personal", "OneDrive - Contoso".
+    3. Environment variable ONEDRIVE / ONEDRIVECOMMERCIAL as a fallback.
+
+    Only returns paths that actually exist on disk (i.e. are synced locally).
+    Cloud-only files (☁️ icon in Explorer) are NOT on disk and cannot be found.
+    """
+    found: List[str] = []
+    seen: set = set()
+    home = os.path.expanduser("~")
+
+    def add(p: str) -> None:
+        if p not in seen and os.path.isdir(p):
+            found.append(p)
+            seen.add(p)
+
+    # Strategy 1: Registry — reads actual sync paths registered by OneDrive
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\OneDrive\Accounts"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as accounts_key:
+            i = 0
+            while True:
+                try:
+                    account_name = winreg.EnumKey(accounts_key, i)
+                    with winreg.OpenKey(accounts_key, account_name) as acc_key:
+                        try:
+                            user_folder, _ = winreg.QueryValueEx(acc_key, "UserFolder")
+                            add(user_folder)
+                            logger.debug(f"[OneDrive] Registry found: {user_folder}")
+                        except FileNotFoundError:
+                            pass
+                    i += 1
+                except OSError:
+                    break
+    except Exception as e:
+        logger.debug(f"[OneDrive] Registry read failed: {e}")
+
+    # Strategy 2: Filesystem — scan home for any OneDrive-prefixed folder
+    try:
+        for entry in os.scandir(home):
+            if entry.is_dir() and entry.name.startswith("OneDrive"):
+                add(entry.path)
+                logger.debug(f"[OneDrive] Filesystem found: {entry.path}")
+    except Exception as e:
+        logger.debug(f"[OneDrive] Filesystem scan failed: {e}")
+
+    # Strategy 3: Environment variables
+    for env_var in ("ONEDRIVE", "ONEDRIVECOMMERCIAL", "ONEDRIVECONSUMER"):
+        path = os.environ.get(env_var, "")
+        if path:
+            add(path)
+            logger.debug(f"[OneDrive] Env var {env_var}: {path}")
+
+    return found
+
+
 def _get_scan_roots() -> List[str]:
     """
     Return prioritised list of directories to index.
 
     Priority:
-      1. User's Desktop / Downloads / Documents (and OneDrive mirrors)
-      2. Same folders on every mounted drive letter
-      3. User profile root on each drive
+      1. User common folders: Desktop, Downloads, Documents (direct in home)
+      2. All OneDrive roots (registry + filesystem + env var detection)
+         and their Desktop/Downloads/Documents subfolders
+      3. Same common folders on every mounted drive letter
+      4. User profile root on each drive (shallow — catches edge cases)
     """
     import string
     roots: List[str] = []
     seen: set = set()
     home = os.path.expanduser("~")
     username = os.path.basename(home)
-    common = ["Desktop", "Downloads", "Documents"]
+    common = ["Desktop", "Downloads", "Documents", "Pictures"]
 
     def add(p: str) -> None:
         if p not in seen and os.path.isdir(p):
             roots.append(p)
             seen.add(p)
 
-    # Home common folders + OneDrive mirrors
+    # 1. Direct home common folders
     for folder in common:
         add(os.path.join(home, folder))
-        add(os.path.join(home, "OneDrive", folder))
-        add(os.path.join(home, "OneDrive - Personal", folder))
 
-    # Same folders on every drive letter
+    # 2. All OneDrive roots + their subfolders
+    for onedrive_root in _get_onedrive_roots():
+        add(onedrive_root)                              # root itself
+        for folder in common:
+            add(os.path.join(onedrive_root, folder))   # subfolders inside
+
+    # 3. Common folders on every drive letter
     drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
     for drive in drives:
         for folder in common:
@@ -305,7 +321,9 @@ class FileIndexer:
                 # Skip useless directories in-place (fast)
                 dirnames[:] = [
                     d for d in dirnames
-                    if d not in SKIP_DIRS and not d.startswith(".")
+                    if d not in SKIP_DIRS
+                    and not d.startswith(".")
+                    and not any(d.startswith(p) for p in SKIP_DIR_PREFIXES)
                 ]
 
                 for filename in filenames:
@@ -419,118 +437,83 @@ class FuzzyMatcher:
     def __init__(self, index: List[Dict[str, Any]]) -> None:
         self.index = index
 
-    def _is_user_file(self, path: str) -> tuple[bool, float]:
-        """
-        Check if file is in user-priority directory.
-        Returns: (is_user_priority, boost_factor)
-
-        User-priority (boost 1.2x): Desktop, Downloads, Documents, OneDrive
-        System-file (penalize 0.4x): site-packages, miniconda, Windows system
-        """
-        path_lower = path.lower()
-
-        # Check user-priority directories
-        for user_dir in USER_PRIORITY_DIRS:
-            if user_dir.lower() in path_lower:
-                return (True, 1.2)  # Boost user files
-
-        # Check system directories
-        system_markers = ["site-packages", "miniconda", "anaconda", "appdata", "program files",
-                         "windows\\system", "\\lib\\", "\\.egg-info"]
-        for marker in system_markers:
-            if marker in path_lower:
-                return (False, 0.4)  # Penalize system files
-
-        return (False, 1.0)  # Neutral
-
-    def _count_matching_tokens(self, query_tokens: set, filename_tokens: set) -> tuple[int, int]:
-        """
-        Count how many tokens from query are in filename.
-        Returns: (matching_count, total_query_tokens)
-        """
-        matching = len(query_tokens & filename_tokens)
-        return (matching, len(query_tokens))
-
     def _best_candidates(
         self, normalized_query: str, threshold: float
     ) -> List[Dict[str, Any]]:
-        """
-        Return all index entries scoring >= threshold, sorted by:
-        1. Combined score (fuzzy × location × token_coverage × path_context)
-        2. Exact-number-match bonus
-        3. Location priority (user dirs > neutral > system dirs)
-        4. Token coverage (full matches > partial matches)
-
-        Changes vs original
-        -------------------
-        * path_context_score: also score the query against the *parent directory
-          path*, normalised the same way.  This means "Lab 3 KR" correctly
-          prefers the file inside a "Knowledge Representation" folder over one
-          inside an "SWE110" folder, even when filename fuzzy scores are similar.
-        * number_match_bonus: if ALL numeric tokens in the query appear in the
-          filename, add a 15 % bonus so "Lecture 3" conclusively beats "Lecture 1"
-          when the file name literally contains the right number.
-        * combined_score formula updated to include path_context and number bonus.
-        """
-        import re
-        query_tokens = set(normalized_query.split())
-        q_nums = set(re.findall(r'\b\d+\b', normalized_query))
+        """Return all index entries scoring >= threshold, sorted desc."""
         results = []
+        for entry in self.index:
+            score = _score(normalized_query, entry["normalized_name"])
+            if score >= threshold:
+                results.append({**entry, "_score": score})
+        results.sort(key=lambda x: x["_score"], reverse=True)
+        return results
+
+
+    def _is_user_file(self, path: str) -> tuple:
+        """
+        Check if file is in user-priority directory.
+        Returns: (is_user_priority, boost_factor)
+        User-priority (boost 1.2x): Desktop, Downloads, Documents, OneDrive
+        System-file  (penalize 0.4x): site-packages, miniconda, Windows system
+        """
+        path_lower = path.lower()
+        for user_dir in USER_PRIORITY_DIRS:
+            if user_dir.lower() in path_lower:
+                return (True, 1.2)
+        system_markers = ["site-packages", "miniconda", "anaconda", "appdata",
+                          "program files", "windows\\system", "\\lib\\", "\\.egg-info"]
+        for marker in system_markers:
+            if marker in path_lower:
+                return (False, 0.4)
+        return (False, 1.0)
+
+    def exact_match(self, query: str) -> Dict[str, Any]:
+        """
+        Stage 0 — exact filename match (case-insensitive).
+        Checks every indexed entry whose filename equals the query exactly.
+        Returns immediately on the first hit from a user-priority directory,
+        or the best-location hit if multiple identical filenames exist.
+
+        Returns:
+            {"status": "found", "path": ..., "confidence": 1.0}
+            {"status": "not_found", "suggestions": []}
+        """
+        query_lower = query.strip().lower()
+        # Also try matching without extension: "report" should find "report.txt"
+        query_no_ext = query_lower.rsplit(".", 1)[0] if "." in query_lower else None
+        hits = []
 
         for entry in self.index:
-            # ── Base fuzzy score (filename only) ──────────────────────────────
-            fuzzy_score = _score(normalized_query, entry["normalized_name"])
-            if fuzzy_score < threshold:
-                continue
+            name_lower = entry["name"].lower()
+            name_no_ext = name_lower.rsplit(".", 1)[0] if "." in name_lower else name_lower
 
-            # ── Path-context score ────────────────────────────────────────────
-            # Normalise the parent directory path and fuzzy-score it against
-            # the query.  This lifts "KR" folder matches when the filename
-            # alone is ambiguous (e.g. "Lab 3 - Group 5 - SWE110" vs "Lab 3 - KR").
-            parent_dir = os.path.dirname(entry["path"])
-            norm_parent = Normalizer.normalize(os.path.basename(parent_dir))
-            # Score query against the immediate parent folder name
-            path_score = _score(normalized_query, norm_parent)
-            # Blend: 85 % filename, 15 % folder context
-            blended_score = fuzzy_score * 0.85 + path_score * 0.15
+            # Exact name match (with or without extension on query side)
+            is_exact = (name_lower == query_lower) or (query_no_ext and name_no_ext == query_no_ext and "." in query_lower)
 
-            # ── Location boost / penalty ──────────────────────────────────────
-            is_user, location_boost = self._is_user_file(entry["path"])
+            if is_exact and os.path.isfile(entry["path"]):
+                _, location_boost = self._is_user_file(entry["path"])
+                # Full name match scores higher than extension-stripped match
+                score_boost = location_boost * (1.0 if name_lower == query_lower else 0.95)
+                hits.append((entry["path"], score_boost))
 
-            # ── Token coverage ────────────────────────────────────────────────
-            filename_tokens = set(entry["normalized_name"].split())
-            matching_tokens, total_tokens = self._count_matching_tokens(query_tokens, filename_tokens)
-            token_coverage = matching_tokens / max(total_tokens, 1) if total_tokens > 0 else 0
+        if not hits:
+            return {"status": "not_found", "suggestions": []}
 
-            # ── Exact-number-match bonus ──────────────────────────────────────
-            # If the query has numeric tokens and ALL of them appear verbatim in
-            # the filename tokens, reward the file with a 15 % boost.
-            f_nums = set(re.findall(r'\b\d+\b', entry["normalized_name"]))
-            if q_nums and q_nums.issubset(f_nums):
-                number_bonus = 0.15
-            elif q_nums and not (q_nums & f_nums):
-                number_bonus = -0.10   # slight nudge down for complete number miss
-            else:
-                number_bonus = 0.0
+        # Sort by location priority — user dirs first (boost=1.2 > 1.0 > 0.4)
+        hits.sort(key=lambda x: x[1], reverse=True)
+        best_path = hits[0][0]
 
-            # ── Combined score ────────────────────────────────────────────────
-            combined_score = (
-                blended_score
-                * location_boost
-                * (1 + token_coverage * 0.8)
-                * (1 + number_bonus)
-            )
-
-            results.append({
-                **entry,
-                "_score": fuzzy_score,
-                "_combined_score": combined_score,
-                "_location_boost": location_boost,
-                "_token_coverage": token_coverage,
-            })
-
-        results.sort(key=lambda x: x["_combined_score"], reverse=True)
-        return results
+        if len(hits) == 1:
+            logger.info(f"[ExactMatch] Found: {best_path}")
+            return {"status": "found", "path": best_path, "confidence": 1.0}
+        else:
+            # Multiple files with the same name — return all for disambiguation
+            logger.info(f"[ExactMatch] {len(hits)} files named '{query}' found")
+            return {
+                "status": "multiple",
+                "paths": [{"path": p, "confidence": 1.0} for p, _ in hits[:5]],
+            }
 
     def match(self, query: str) -> Dict[str, Any]:
         """
@@ -549,12 +532,8 @@ class FuzzyMatcher:
 
         if valid:
             best = valid[0]
-            # Use combined_score gap (which includes number bonus + path context)
-            # so that "Lecture 3" clearly beats "Lecture 1" even at similar raw
-            # fuzzy scores.  Threshold lowered to 0.08 so a number-match bonus
-            # of 0.15 is sufficient to resolve ambiguity.
-            gap = valid[0]["_combined_score"] - (valid[1]["_combined_score"] if len(valid) > 1 else 0)
-            if len(valid) == 1 or gap >= 0.08:
+            # If top match is clearly better than second, return it directly
+            if len(valid) == 1 or (valid[0]["_score"] - valid[1]["_score"]) >= 0.12:
                 return {
                     "status": "found",
                     "path": best["path"],
@@ -684,7 +663,14 @@ class FileSearch:
             if os.path.isfile(normalized_q):
                 return {"status": "found", "path": normalized_q, "confidence": 1.0}
 
-        # Fuzzy match
+        # Stage 0 — exact filename match (fastest, highest confidence)
+        # Must run BEFORE fuzzy so "report.txt" never loses to "REPORT TITLE.docx"
+        exact = self._matcher.exact_match(query)
+        if exact["status"] != "not_found":
+            logger.info(f"[Find] Exact match hit for '{query}'")
+            return exact
+
+        # Stage 1 — fuzzy match
         result = self._matcher.match(query)
         if result["status"] != "not_found":
             return result
@@ -757,54 +743,6 @@ def find_file(filename: str, force_refresh: bool = False) -> Dict[str, Any]:
     return _get_engine().find(filename, force_refresh=force_refresh)
 
 
-def find_all_matches(filename: str) -> Dict[str, Any]:
-    """
-    Find ALL matching files with confidence scores.
-    Perfect for showing users all options when multiple matches exist.
-
-    Returns:
-        {
-          "status": "found" | "multiple" | "not_found",
-          "matches": [{"path": str, "confidence": float, "name": str}, ...],
-          "total": int,
-          "suggestions": [str, ...]  # if not_found
-        }
-
-    Example:
-        >>> result = find_all_matches("lecture")
-        >>> for match in result["matches"]:
-        ...     print(f"{match['name']} ({match['confidence']:.0%}) → {match['path']}")
-    """
-    result = _get_engine().find(filename)
-
-    if result["status"] == "found":
-        return {
-            "status": "found",
-            "matches": [{"path": result["path"], "confidence": result["confidence"], "name": os.path.basename(result["path"])}],
-            "total": 1
-        }
-    elif result["status"] == "multiple":
-        matches = []
-        for m in result.get("paths", []):
-            matches.append({
-                "path": m["path"],
-                "confidence": m["confidence"],
-                "name": os.path.basename(m["path"])
-            })
-        return {
-            "status": "multiple",
-            "matches": matches,
-            "total": len(matches)
-        }
-    else:
-        return {
-            "status": "not_found",
-            "matches": [],
-            "total": 0,
-            "suggestions": result.get("suggestions", [])
-        }
-
-
 def find_all_files(filename: str) -> List[str]:
     """Return all matching paths (backward-compatible)."""
     result = find_file(filename)
@@ -851,19 +789,6 @@ def open_file(filename: str) -> bool:
     return _open_file(path)
 
 
-# def preload_index() -> None:
-#     """
-#     Pre-load and warm up the file index BEFORE any file searches.
-#     Call this during agent startup/initialization to avoid timeout on first find_file() call.
-
-#     If cache exists and is valid, loads instantly (~100ms).
-#     If cache missing/expired, builds from scratch (~5-15s depending on drive).
-#     """
-#     logger.info("📂 Preloading file index...")
-#     _get_engine()._ensure_index()
-#     logger.info("✅ File index preloaded and ready")
-
-
 def refresh_index() -> None:
     """Force a full re-index. Call after moving/creating files."""
     _get_engine().refresh()
@@ -881,11 +806,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     tests = [
-        "flutter quiz",
-        "quarterly report",
-        "config",
-        "resume",
-        "notes",
+        "final_draft.docx"
     ]
 
     import time

@@ -256,7 +256,7 @@ MODULES = {
     module_name="Word",
     library_name="python-docx",
     library_import="from docx import Document",
-    keywords=["word", "document", "docx", "page", "paragraph", "heading", "table", "text formatting"],
+    keywords=["word", "document","page", "paragraph", "heading", "table", "text formatting"],
     guidance="""
 Use ONLY these word_tools functions. Never import python-docx directly. Never use pyautogui.
 
@@ -563,6 +563,78 @@ Not found:
 ✅ OUTPUT DATA BEFORE status messages (critical for pipelines)
 ✅ Use [FILE]: marker for downstream tasks
 ✅ Cache automatically refreshes after 24 hours, manual refresh via find_file(query, "full")
+"""
+    ),
+    "notepad": ModuleGuidance(
+        module_name="Notepad",
+        library_name="notepad_tools (native text file handling)",
+        library_import="from agents.execution_agent.RAG.scripts.notepad_tools import (...)",
+        keywords=["notepad", "text editor", "note", "text entry", "type text", "write note", "arabic text"],
+        guidance="""
+Use ONLY these notepad_tools functions. Never use pyautogui for text entry unless absolutely necessary.
+For all text input tasks, use notepad_type() with clipboard for reliable Unicode/Arabic support.
+
+IMPORT (copy exactly):
+try:
+    from agents.execution_agent.RAG.scripts.notepad_tools import (
+        notepad_launch, notepad_create, notepad_open, notepad_find,
+        notepad_load, notepad_save, notepad_write, notepad_type,
+        notepad_append, notepad_read
+    )
+except ImportError:
+    from scripts.notepad_tools import (
+        notepad_launch, notepad_create, notepad_open, notepad_find,
+        notepad_load, notepad_save, notepad_write, notepad_type,
+        notepad_append, notepad_read
+    )
+
+TASK → EXACT EXECUTION PATTERN:
+
+[LAUNCH] task says "open notepad", "launch notepad", "start notepad":
+    notepad_launch()
+
+[OPEN] task says "open <filename>":
+    path = notepad_find("<filename>")
+    notepad_open(path)
+
+[CREATE] task says "create", "new note", "make a note":
+    path = notepad_create("<descriptive_name_from_task>")
+    # DO NOT open. Stop here. Let next task do edits.
+
+[TYPE/WRITE] task says "type", "write", "enter text", "add text":
+    # CRITICAL: Only call notepad_launch() if this is the FIRST task for notepad
+    # If the task depends on a previous notepad task, Notepad is ALREADY OPEN
+    # DO NOT call notepad_launch() again - this prevents duplicate launches
+    notepad_type("Your text here")
+    # That's it - just type! Don't launch again.
+
+[WRITE TO FILE] task says "write to file", "save note", "create note with content":
+    path = notepad_create("<filename>")
+    path = notepad_write(path, "Your content here")
+    # notepad_write() both writes AND opens the file
+
+[APPEND] task says "add to", "append to", "continue writing":
+    path = notepad_append("<filename>", "\\nAdditional text")
+
+[READ] task says "read", "show contents", "get text":
+    notepad_read("<filename>")
+    # Outputs content then EXECUTION_SUCCESS
+
+[SPECIAL: ARABIC TEXT HANDLING]
+    # notepad_type() uses clipboard which handles Arabic perfectly
+    # Only launch if needed - don't launch twice!
+    notepad_type("???? ??????? ????? '????? ???????'")  # Arabic text works correctly!
+
+RULES:
+- ONLY call notepad_launch() if the task explicitly says to open/launch
+- If task is about typing/writing and depends on previous task, do NOT call notepad_launch()
+- Always use notepad_type() for typing into active window (handles Unicode/Arabic)
+- Use notepad_write() for direct file creation with content
+- notepad_type() uses clipboard paste for 100% accurate character input
+- Never hardcode folder paths — notepad_tools handles folder detection
+- For ambiguous "text editor" tasks, launch Notepad as default
+- notepad_load() returns content string, doesn't print
+- PREVENT DUPLICATE LAUNCHES: Check context before calling notepad_launch()
 """
     ),
 }

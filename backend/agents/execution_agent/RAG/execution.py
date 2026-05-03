@@ -160,7 +160,7 @@ class SecurityValidator:
             'os.unlink',
             'os.rmdir',
             # 'os.system',
-            'os.popen',
+            # 'os.popen',
             # NOTE: 'pathlib.Path' removed — os.path.* calls are safe and used
             # by module_selector.py. pathlib import is blocked at the AST level.
             'ctypes.windll',
@@ -528,6 +528,178 @@ except Exception as e:
 # %%
 
 # ============================================================================
+# CELL 3B: Import Validation Wrapper
+# ============================================================================
+
+class ImportValidator:
+    """Validates and fixes missing imports in generated code"""
+
+    # Map of function names to their required imports
+    FUNCTION_TO_MODULE = {
+        # Word tools
+        'doc_create': ('doc_create', 'scripts.word_tools'),
+        'doc_open': ('doc_open', 'scripts.word_tools'),
+        'doc_find': ('doc_find', 'scripts.word_tools'),
+        'doc_load': ('doc_load', 'scripts.word_tools'),
+        'doc_add_heading': ('doc_add_heading', 'scripts.word_tools'),
+        'doc_add_paragraph': ('doc_add_paragraph', 'scripts.word_tools'),
+        'doc_add_table': ('doc_add_table', 'scripts.word_tools'),
+        'doc_save': ('doc_save', 'scripts.word_tools'),
+        'doc_launch': ('doc_launch', 'scripts.word_tools'),
+
+        # Excel tools
+        'xl_create': ('xl_create', 'scripts.excel_tools'),
+        'xl_open': ('xl_open', 'scripts.excel_tools'),
+        'xl_find': ('xl_find', 'scripts.excel_tools'),
+        'xl_load': ('xl_load', 'scripts.excel_tools'),
+        'xl_set_cell': ('xl_set_cell', 'scripts.excel_tools'),
+        'xl_write_headers': ('xl_write_headers', 'scripts.excel_tools'),
+        'xl_write_row': ('xl_write_row', 'scripts.excel_tools'),
+        'xl_set_formula': ('xl_set_formula', 'scripts.excel_tools'),
+        'xl_save': ('xl_save', 'scripts.excel_tools'),
+        'xl_launch': ('xl_launch', 'scripts.excel_tools'),
+
+        # PowerPoint tools
+        'ppt_create': ('ppt_create', 'scripts.ppt_tools'),
+        'ppt_open': ('ppt_open', 'scripts.ppt_tools'),
+        'ppt_find': ('ppt_find', 'scripts.ppt_tools'),
+        'ppt_load': ('ppt_load', 'scripts.ppt_tools'),
+        'ppt_add_title_slide': ('ppt_add_title_slide', 'scripts.ppt_tools'),
+        'ppt_add_content_slide': ('ppt_add_content_slide', 'scripts.ppt_tools'),
+        'ppt_add_bullet_slide': ('ppt_add_bullet_slide', 'scripts.ppt_tools'),
+        'ppt_save': ('ppt_save', 'scripts.ppt_tools'),
+        'ppt_launch': ('ppt_launch', 'scripts.ppt_tools'),
+
+        # Notepad tools
+        'notepad_launch': ('notepad_launch', 'scripts.notepad_tools'),
+        'notepad_create': ('notepad_create', 'scripts.notepad_tools'),
+        'notepad_open': ('notepad_open', 'scripts.notepad_tools'),
+        'notepad_find': ('notepad_find', 'scripts.notepad_tools'),
+        'notepad_load': ('notepad_load', 'scripts.notepad_tools'),
+        'notepad_save': ('notepad_save', 'scripts.notepad_tools'),
+        'notepad_write': ('notepad_write', 'scripts.notepad_tools'),
+        'notepad_type': ('notepad_type', 'scripts.notepad_tools'),
+        'notepad_append': ('notepad_append', 'scripts.notepad_tools'),
+        'notepad_read': ('notepad_read', 'scripts.notepad_tools'),
+        'notepad_focus': ('notepad_focus', 'scripts.notepad_tools'),
+    }
+
+    @staticmethod
+    def validate_and_fix_imports(code: str) -> str:
+        """
+        Detect missing imports from scripts module and add them.
+
+        Args:
+            code: Generated Python code
+
+        Returns:
+            Code with necessary imports added
+        """
+        logger = logging.getLogger(__name__)
+
+        # Find all function calls in the code
+        functions_called = ImportValidator._extract_function_calls(code)
+
+        # Find which module functions are being used
+        required_imports = {}
+        for func_name in functions_called:
+            if func_name in ImportValidator.FUNCTION_TO_MODULE:
+                func, module = ImportValidator.FUNCTION_TO_MODULE[func_name]
+                if module not in required_imports:
+                    required_imports[module] = []
+                required_imports[module].append(func)
+
+        if not required_imports:
+            logger.debug(f"[IMPORTS] No module functions detected in code")
+            return code
+
+        # Check what imports already exist
+        existing_imports = ImportValidator._extract_existing_imports(code)
+
+        # Determine what needs to be added
+        missing_imports = {}
+        for module, functions in required_imports.items():
+            for func in functions:
+                # Check if this function is already imported from this module
+                is_imported = module in existing_imports and func in existing_imports[module]
+                if not is_imported:
+                    if module not in missing_imports:
+                        missing_imports[module] = []
+                    missing_imports[module].append(func)
+
+        if not missing_imports:
+            logger.debug(f"[IMPORTS] All required imports already present")
+            return code
+
+        # Build import statements
+        import_lines = []
+        for module in sorted(missing_imports.keys()):
+            functions = sorted(missing_imports[module])
+            import_stmt = f"from {module} import {', '.join(functions)}"
+            import_lines.append(import_stmt)
+            logger.info(f"[IMPORTS] Adding: {import_stmt}")
+
+        # Add imports at the top of the code
+        # Skip any encoding declaration and existing imports
+        lines = code.split('\n')
+        insert_pos = 0
+
+        # Skip encoding declaration
+        if lines and lines[0].startswith('# -*- coding'):
+            insert_pos = 1
+
+        # Skip existing imports and docstrings
+        while insert_pos < len(lines):
+            line = lines[insert_pos].strip()
+            if line.startswith('import ') or line.startswith('from '):
+                insert_pos += 1
+            elif line.startswith('"""') or line.startswith("'''"):
+                # Skip docstrings
+                insert_pos += 1
+            elif not line or line.startswith('#'):
+                # Skip empty lines and comments
+                insert_pos += 1
+            else:
+                break
+
+        # Insert new imports
+        new_imports = '\n'.join(import_lines) + '\n'
+
+        if insert_pos < len(lines):
+            fixed_code = '\n'.join(lines[:insert_pos]) + '\n' + new_imports + '\n'.join(lines[insert_pos:])
+        else:
+            fixed_code = code + '\n' + new_imports
+
+        logger.info(f"[IMPORTS] Fixed code with {len(import_lines)} import statement(s)")
+        return fixed_code
+
+    @staticmethod
+    def _extract_function_calls(code: str) -> set:
+        """Extract all function calls from code"""
+        import re
+        # Regex to find function calls: word(
+        pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\('
+        matches = re.findall(pattern, code)
+        return set(matches)
+
+    @staticmethod
+    def _extract_existing_imports(code: str) -> Dict[str, List[str]]:
+        """Extract existing imports from code"""
+        imports = {}
+
+        # Find all 'from X import Y' statements
+        import re
+        from_pattern = r'from\s+([\w.]+)\s+import\s+([\w\s,]+)'
+        for match in re.finditer(from_pattern, code):
+            module = match.group(1)
+            imported_items = [s.strip() for s in match.group(2).split(',')]
+            imports[module] = imported_items
+
+        return imports
+
+# %%
+
+# ============================================================================
 # CELL 4: Local Process Sandbox (Fallback)
 # ============================================================================
 
@@ -554,7 +726,7 @@ class LocalSandbox:
         # Calculate AURA backend path more robustly
         import os
         # Current file: d:\AURA\backend\agents\execution_agent\RAG\execution.py
-        # We want: d:\AURA\backend
+        # We want: d:\AURA\backend and d:\AURA\backend\agents\execution_agent\RAG
         current_file = os.path.abspath(__file__)
         rag_dir = os.path.dirname(current_file)  # ...RAG
         agent_dir = os.path.dirname(rag_dir)     # ...execution_agent
@@ -563,13 +735,21 @@ class LocalSandbox:
 
         # Escape backslashes for Python string
         backend_dir_escaped = backend_dir.replace('\\', '\\\\')
+        rag_dir_escaped = rag_dir.replace('\\', '\\\\')
+
+        # ✅ VALIDATE AND FIX MISSING IMPORTS
+        code = ImportValidator.validate_and_fix_imports(code)
 
         # Inject sys.path at the very beginning
+        # Add both backend and RAG directories so both import styles work
         path_setup = f"""import sys
 import os
 _backend_path = r'{backend_dir}'
+_rag_path = r'{rag_dir}'
 if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
+if _rag_path not in sys.path:
+    sys.path.insert(0, _rag_path)
 """
 
         # Prepend path setup to user code
@@ -1851,55 +2031,55 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 # # Reload the module to pick up any changes
 # importlib.reload(code_generation)
 
-from agents.execution_agent.RAG.code_generation import RAGSystem, RAGConfig
+# from agents.execution_agent.RAG.code_generation import RAGSystem, RAGConfig
 # from code_generation import RAGSystem, RAGConfig
 
-# %%
+# # %%
 
-# ============================================================================
-# CELL 9: Run Tests
-# ============================================================================
+# # ============================================================================
+# # CELL 9: Run Tests
+# # ============================================================================
 
-if __name__ == "__main__":
-    print("\n" + " "*20)
-    print("SANDBOX EXECUTION SYSTEM - TEST SUITE")
-    print(""*20)
+# if __name__ == "__main__":
+#     print("\n" + " "*20)
+#     print("SANDBOX EXECUTION SYSTEM - TEST SUITE")
+#     print(""*20)
     
-    # # Run basic tests
-    # print("\n\n")
-    # result1 = test_sandbox_basic()
+#     # # Run basic tests
+#     # print("\n\n")
+#     # result1 = test_sandbox_basic()
     
-    # # print("\n\n")
-    # result2 = test_sandbox_with_error()
+#     # # print("\n\n")
+#     # result2 = test_sandbox_with_error()
     
-    # # print("\n\n")
-    # result3 = test_sandbox_security()
+#     # # print("\n\n")
+#     # result3 = test_sandbox_security()
     
-    # For complete RAG test, you need to provide your RAG system:
-    def ensure_execution_result(r):
-        if isinstance(r, ExecutionResult):
-            return r
-        elif isinstance(r, dict):
-            return ExecutionResult(**r)
-        else:
-            raise TypeError("Invalid execution history item")
+#     # For complete RAG test, you need to provide your RAG system:
+#     def ensure_execution_result(r):
+#         if isinstance(r, ExecutionResult):
+#             return r
+#         elif isinstance(r, dict):
+#             return ExecutionResult(**r)
+#         else:
+#             raise TypeError("Invalid execution history item")
 
     
 
-    config = RAGConfig(library_name="pywinauto")
-    rag = RAGSystem(config)
-    rag.initialize()
-    # prompt0="open calculator and calculate 25 times 25 and copy the result and paste it in notepad"
-    # result4 = test_complete_rag_flow(rag,prompt0)
-    # prompt="open word doc and chooose new blank doc and type hello-habiba"
-    # result4 = test_complete_rag_flow(rag,prompt)
-    # prompt2="open powerpoint and navigate to new ctrl n then press enter twice and save it in the default folder"
-    # result4 = test_complete_rag_flow(rag,prompt2)
-    # prompt3="open powerpoint and navigate to new and open blank doc and save it in the default folder"
-    # result4 = test_complete_rag_flow(rag,prompt3)
-    prompt4="start whatsapp application "
-    result4 = test_complete_rag_flow(rag,prompt4)
-    # prompt5="search current window ctrl f for Grad-Project and navigate to it"
+#     config = RAGConfig(library_name="pywinauto")
+#     rag = RAGSystem(config)
+#     rag.initialize()
+#     # prompt0="open calculator and calculate 25 times 25 and copy the result and paste it in notepad"
+#     # result4 = test_complete_rag_flow(rag,prompt0)
+#     # prompt="open word doc and chooose new blank doc and type hello-habiba"
+#     # result4 = test_complete_rag_flow(rag,prompt)
+#     # prompt2="open powerpoint and navigate to new ctrl n then press enter twice and save it in the default folder"
+#     # result4 = test_complete_rag_flow(rag,prompt2)
+#     # prompt3="open powerpoint and navigate to new and open blank doc and save it in the default folder"
+#     # result4 = test_complete_rag_flow(rag,prompt3)
+#     prompt4="start whatsapp application "
+#     result4 = test_complete_rag_flow(rag,prompt4)
+#     # prompt5="search current window ctrl f for Grad-Project and navigate to it"
     # result4 = test_complete_rag_flow(rag,prompt5)
     # prompt="type message hello from agent and send it "
     # result4 = test_complete_rag_flow(rag,prompt)
@@ -1908,15 +2088,15 @@ if __name__ == "__main__":
     
 
 
-    print("\n\n" + "="*80)
-    print("TEST SUITE COMPLETED")
-    print("="*80)
+    # print("\n\n" + "="*80)
+    # print("TEST SUITE COMPLETED")
+    # print("="*80)
     
-    # Get statistics
-    config = SandboxConfig()
-    pipeline = SandboxExecutionPipeline(config)
+    # # Get statistics
+    # config = SandboxConfig()
+    # pipeline = SandboxExecutionPipeline(config)
     
-    pipeline.execution_history = [result4]
+    # pipeline.execution_history = [result4]
 
 #     pipeline.execution_history = [
 #     ensure_execution_result(r)

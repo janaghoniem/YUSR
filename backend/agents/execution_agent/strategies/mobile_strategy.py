@@ -126,6 +126,14 @@ _INTERNAL_KEYS: Set[str] = {
     "session_id", "uiautomator_port", "input_content",  # FIX #3
 }
 
+# Words in task descriptions that look like quoted values but are actually
+# UI element names / button labels — never extract as params.
+_TASK_LABEL_WORDS: Set[str] = {
+    "compose", "new email", "send", "ok", "cancel", "back", "next",
+    "save", "done", "confirm", "submit", "search", "yes", "no",
+    "add alarm", "alarm", "install", "get", "open", "close",
+}
+
 _RESERVED_RUNTIME_KEYS: Set[str] = {
     "time", "re", "sys", "os", "u2", "json", "hashlib", "tempfile",
     "textwrap", "asyncio", "datetime", "Path", "ET",
@@ -169,6 +177,15 @@ class TaskParameters:
         result = template_code
         for k, v in self.raw.items():
             result = result.replace(f"{{{k}}}", str(v))
+        # Post-injection: fix any unquoted numeric args to set_text()
+        # e.g. set_text(05) → set_text("05")
+        # This happens when PlaceholderExtractor captured a value inside
+        # a numeric context rather than a string literal.
+        result = re.sub(
+            r"\.set_text\((\d+)\)",
+            lambda m: f'.set_text("{m.group(1)}")',
+            result,
+        )
         return result
 
     def missing_keys(self, template_code: str) -> List[str]:
@@ -583,10 +600,28 @@ class ParameterExtractor:
             if len(val) <= 200 and not val_words.intersection(instruction_words):
                 params.set("email_body", val)
 
+    # Pattern: "Enter/Type/Write X in the <field> field" — extracts actual param values
+    # from task descriptions like "Enter hello world in the Subject field"
+    _ENTER_IN_FIELD_RE = re.compile(
+        r"(?:enter|type|write|put|fill(?:\s+in)?|input)\s+"
+        r"(?P<value>.+?)\s+in(?:\s+the)?\s+"
+        r"(?P<field>\w[\w\s]*?)\s+(?:field|box|input|area)",
+        re.IGNORECASE,
+    )
+    _FIELD_PARAM_MAP: Dict[str, str] = {
+        "subject":    "email_subject",
+        "to":         "recipient_email",
+        "body":       "email_body",
+        "message":    "email_body",
+        "content":    "email_body",
+        "email body": "email_body",
+        "search":     "search_query",
+        "query":      "search_query",
+    }
+
     @staticmethod
     def _extract_query(text: str, params: TaskParameters) -> None:
         # FIX #2: Skip query extraction entirely for navigation/click sentences.
-        # These task descriptions are instructions for the LLM, not search queries.
         nav_verbs = re.compile(
             r"^\s*(navigate|click|press|tap|open|go to|scroll|swipe|drag|select|"
             r"confirm|submit|dismiss|close|back|return)\b",
@@ -596,9 +631,24 @@ class ParameterExtractor:
             logger.debug(f"[PARAMS] Skipping query extraction for navigation task: {text[:60]}")
             return
 
+        # ── "Enter X in the Subject/Body/To field" pattern ──────────────
+        m = ParameterExtractor._ENTER_IN_FIELD_RE.search(text)
+        if m:
+            value     = m.group("value").strip().strip("'\"")
+            field     = m.group("field").strip().lower()
+            param_key = None
+            for field_kw, pk in ParameterExtractor._FIELD_PARAM_MAP.items():
+                if field_kw in field:
+                    param_key = pk
+                    break
+            if param_key and value and value.lower() not in _TASK_LABEL_WORDS:
+                if not params.has(param_key):
+                    params.set(param_key, value)
+                    logger.debug(f"[PARAMS] 'Enter X in field': {param_key}={value!r}")
+                return  # don't also run _QUERY_RE
+
         qm = _QUERY_RE.search(text)
         if qm:
-            # Group 1 = search/find/google, Group 2 = type/enter
             raw = (qm.group(1) or qm.group(2) or "").strip().strip("'\"")
             if raw:
                 params.set("search_query", raw)
@@ -606,11 +656,16 @@ class ParameterExtractor:
     @staticmethod
     def _extract_quoted(text: str, params: TaskParameters) -> None:
         quoted = _QUOTED_RE.findall(text)
-        if quoted:
+        # Filter out UI button/label words — these are task instructions, not param values
+        real_values = [
+            q for q in quoted
+            if q.lower().strip() not in _TASK_LABEL_WORDS and len(q.strip()) >= 2
+        ]
+        if real_values:
             if not params.has("search_query"):
-                params.set("search_query", quoted[0])
-            if len(quoted) >= 2 and not params.has("email_subject"):
-                params.set("email_subject", quoted[1])
+                params.set("search_query", real_values[0])
+            if len(real_values) >= 2 and not params.has("email_subject"):
+                params.set("email_subject", real_values[1])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -960,7 +1015,8 @@ SUB-TASK B — "Set the alarm time to HH:MM AM/PM" (alarm_hour, alarm_minute, al
   Step 1: Check if time picker EditText is visible. If not, click Add Alarm then switch modes.
   Step 2: Switch to TEXT INPUT — dial ignores set_text() silently.
     Use 12-position grid search (see positions list in clock_set_alarm_001 template).
-    Confirm EditText visible BEFORE calling set_text. Exit with MODE_SWITCH_FAILED if not.
+    Confirm EditText visible BEFORE calling set_text. If not found, use sys.exit(1) NOT exit().
+    IMPORTANT: sys.exit(1) causes retry; exit() causes false rc=0 success.
   Step 3: Strip leading zero: hour_str = str(int(alarm_hour))
     d(resourceId="android:id/input_hour").clear_text(); .set_text(hour_str)
     d(resourceId="android:id/input_minute").clear_text(); .set_text(alarm_minute)
@@ -979,16 +1035,38 @@ Mode switch selectors (try in order until EditText appears):
 
     "gmail": """
 GMAIL PLAYBOOK:
-INVALID keywords (never use): hint=, placeholder=, label=
-Open compose: d(description="Compose") or d(resourceId="com.google.android.gm:id/compose_button")
-To field (no hint= — use):
-  d(resourceId="com.google.android.gm:id/to") or
-  d(className="android.widget.MultiAutoCompleteTextView") or
-  d(className="android.widget.EditText")[0]
-Subject field: d(resourceId="com.google.android.gm:id/subject") or EditText[1]
-Body: tap (0.5, 0.65) then last EditText on screen
-Send: d(description="Send") or d(resourceId="com.google.android.gm:id/send")
-For fill tasks: use email_subject and email_body variables (pre-declared) — NEVER type SUBJECT or BODY literally
+INVALID keywords (never use): hint=, placeholder=, label=, desc= (use description= always)
+
+IMPORTANT: description="Compose" does NOT exist on this device. Use resourceId FIRST.
+
+Open compose FAB:
+  if d(resourceId="com.google.android.gm:id/compose_button").exists(timeout=5):
+      d(resourceId="com.google.android.gm:id/compose_button").click()
+  elif d(resourceId="com.google.android.gm:id/fab").exists(timeout=3):
+      d(resourceId="com.google.android.gm:id/fab").click()
+  else:
+      # Last resort: tap bottom-right FAB area
+      d.click(0.9, 0.9)
+  time.sleep(2.0)
+
+To field — compose screen must be open first:
+  to_field = None
+  for rid in ["com.google.android.gm:id/to",
+              "com.google.android.gm:id/people_edit_text",
+              "com.google.android.gm:id/recipient_text_view"]:
+      if d(resourceId=rid).exists(timeout=3):
+          to_field = d(resourceId=rid); break
+  if to_field is None:
+      if d(className="android.widget.MultiAutoCompleteTextView").exists(timeout=2):
+          to_field = d(className="android.widget.MultiAutoCompleteTextView")
+      else:
+          to_field = d(className="android.widget.EditText")
+  to_field.click(); to_field.set_text(recipient_email); d.press("enter"); time.sleep(0.5)
+
+Subject: d(resourceId="com.google.android.gm:id/subject") or d(className="android.widget.EditText")[1]
+Body: tap (0.5, 0.65) → last EditText on screen
+Send: d(resourceId="com.google.android.gm:id/send") or d(description="Send")
+For fill tasks: use email_subject and email_body variables (pre-declared) — NEVER hardcode values
 """,
 
     "youtube": """
@@ -1316,22 +1394,52 @@ class MobileCodeGenStrategy:
             logger.warning(f"[DEVICE] XML dump failed: {e}")
             return ""
 
+    async def _is_app_foreground(self, package: str) -> bool:
+        """Return True if `package` is currently the foreground app."""
+        if not package:
+            return False
+        serial = self._resolve_serial()
+        def _check() -> bool:
+            dev = u2.connect(serial) if serial else u2.connect()
+            try:
+                info = dev.app_current()
+                current_pkg = (info or {}).get("package", "")
+                return current_pkg == package or current_pkg.startswith(package)
+            except Exception:
+                return False
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_check), timeout=5.0)
+        except Exception:
+            return False
+
     async def _launch_app_and_wait(self, package: str, min_elements: int = 8) -> None:
         """
         Launch `package` via ADB and poll until the app UI is actually loaded.
 
-        Problem solved: the old 0.8s fixed sleep was far too short for Chrome
-        (3-5s cold start), so every first attempt got a snapshot of the loading
-        splash with ~24 generic elements and no url_bar — the LLM then invented
-        url_bar anyway, failing every attempt identically.
+        IMPORTANT: If the app is already in the foreground, skip app_start().
+        Calling app_start() when Gmail has a compose screen open will save the
+        draft and return to the inbox — destroying any partially-filled form.
 
-        Strategy: start the app, then poll every 2s for up to 12s waiting for
-        the package name to appear in the UI hierarchy (proving its own views
-        are rendered) AND for the element count to exceed min_elements.
+        Strategy: check foreground first. If already there, just verify elements
+        are loaded. If not, start the app and poll until ready.
         """
         if not package:
             return
         serial = self._resolve_serial()
+
+        # ── Skip app_start if already in foreground ───────────────────────
+        already_running = await self._is_app_foreground(package)
+        if already_running:
+            # Verify the screen has enough elements to be usable
+            xml  = await self._fetch_xml_dump()
+            snap = build_ui_snapshot(xml)
+            if snap.count("\n") >= min_elements:
+                logger.info(f"[LAUNCH] ✅ {package} already in foreground — skipping app_start")
+                return
+            # App is in foreground but screen is loading — brief wait
+            logger.info(f"[LAUNCH] {package} in foreground but screen loading — waiting 1.5s")
+            await asyncio.sleep(1.5)
+            return
 
         def _start() -> None:
             dev = u2.connect(serial) if serial else u2.connect()
@@ -1448,9 +1556,8 @@ class MobileCodeGenStrategy:
         ) if error_ctx else ""
 
         return (
-            f"TASK:         {task_text}\n"
-            f"OVERALL GOAL: {overall_goal}\n"
-            f"APP:          {app}  |  PACKAGE: {package or 'unknown'}\n"
+            f"TASK: {task_text}\n"
+            f"APP:  {app}  (package: {package or 'unknown'})\n"
             f"{param_block}"
             f"{extra_section}"
             f"{error_section}"
@@ -1537,8 +1644,25 @@ class MobileCodeGenStrategy:
         params:    TaskParameters,
     ) -> None:
         template_code, schema = self.placeholderizer.extract(code, params, task_text)
-        task_pattern          = self._normalise_task_pattern(task_text, params)
-        tid                   = self._template_id(task_text, app)
+
+        # Guard: if the task text implies a parameterised value (has field names)
+        # but the stored template has no placeholders, it hardcodes the value.
+        # A hardcoded template is useless for different values — don't cache it.
+        field_implies_param = any(
+            kw in task_text.lower()
+            for kw in ("subject field", "body field", "to field", "in the subject",
+                       "in the body", "in the to", "email body", "enter ")
+        )
+        has_placeholders = "{" in template_code
+        if field_implies_param and not has_placeholders and params.raw:
+            logger.info(
+                f"[CACHE] Skipping storage — template has no placeholders but task "
+                f"implies parameterised value: {task_text[:60]!r}"
+            )
+            return
+
+        task_pattern = self._normalise_task_pattern(task_text, params)
+        tid          = self._template_id(task_text, app)
         existing = self.cache._store.get(tid)
         if existing:
             existing.success_count   += 1
@@ -1583,10 +1707,12 @@ class MobileCodeGenStrategy:
         if explicit_app and explicit_app not in ("email",):  # "email" still needs mapping
             _explicit_pkg = APP_PACKAGES.get(explicit_app, "")
             app, package = (explicit_app, _explicit_pkg) if _explicit_pkg else self._infer_app(
-                f"{explicit_app} {task.ai_prompt} {overall_goal}"
+                f"{explicit_app} {task.ai_prompt}"
             )
         else:
-            app, package = self._infer_app(f"{explicit_app} {task.ai_prompt} {overall_goal}")
+            # Use only ai_prompt for app inference — overall_goal bleeds in
+            # location/content text that confuses app detection
+            app, package = self._infer_app(f"{explicit_app} {task.ai_prompt}")
         explicit_app = (task.extra_params.get("app_name") or "").strip().lower()
         if explicit_app and explicit_app in APP_PACKAGES:
             app     = explicit_app
@@ -1683,19 +1809,25 @@ class MobileCodeGenStrategy:
             else:
                 logger.info(f"[T1] Cache hit but missing params {missing} — falling through to LLM")
 
-        async def _live_snapshot(label: str, min_elems: int = _MIN_SNAPSHOT_ELEMENTS) -> str:
-            for snap_try in range(3):
+        # Email apps (gmail) need more elements before we consider the screen ready
+        _snap_min = 15 if app in ("gmail", "email") else _MIN_SNAPSHOT_ELEMENTS
+
+        async def _live_snapshot(label: str, min_elems: int = _snap_min) -> str:
+            # More retries and longer waits for email app which loads slowly
+            max_tries = 5 if app in ("gmail", "email") else 3
+            for snap_try in range(max_tries):
                 xml  = await self._fetch_xml_dump()
                 snap = build_ui_snapshot(xml)
                 elem_count = snap.count("\n")
-                if elem_count >= min_elems or snap_try == 2:
+                if elem_count >= min_elems or snap_try == max_tries - 1:
                     logger.info(f"[DEVICE] {label} snapshot: ~{elem_count} elements (try {snap_try + 1})")
                     return snap
+                wait = _SNAPSHOT_RETRY_DELAY * (snap_try + 1)  # progressive backoff
                 logger.warning(
                     f"[DEVICE] {label} snapshot has only ~{elem_count} elements "
-                    f"— retrying in {_SNAPSHOT_RETRY_DELAY}s"
+                    f"— retrying in {wait:.1f}s"
                 )
-                await asyncio.sleep(_SNAPSHOT_RETRY_DELAY)
+                await asyncio.sleep(wait)
             return snap  # type: ignore[return-value]
 
         code      = ""
@@ -1768,6 +1900,23 @@ class MobileCodeGenStrategy:
             outcome = await executor.execute(code, params)
 
             if outcome.success:
+                # Guard: if stdout contains MODE_SWITCH_FAILED the script signalled
+                # a soft failure (was using exit() before sys.exit(1) fix) — treat as failure
+                if "MODE_SWITCH_FAILED" in (outcome.stdout or ""):
+                    logger.warning(f"[T2/T3] stdout contains MODE_SWITCH_FAILED — treating as failure")
+                    outcome = ExecutionOutcome(
+                        success=False,
+                        error_summary="MODE_SWITCH_FAILED: keyboard mode toggle not found; "
+                                      "see snapshot and try coordinate or selector alternatives",
+                    )
+                    error_ctx = (
+                        "CRITICAL: The clock mode switch FAILED. EditText fields never appeared. "
+                        "The keyboard toggle icon was NOT found at any of the 12 grid positions. "
+                        "Read the snapshot carefully — look for a small icon near the time display "
+                        "that could be the keyboard toggle. Try d.click() at different coordinates "
+                        "based on what you see. Do NOT call set_text on the dial — it silently ignores it."
+                    )
+                    continue
                 logger.info(f"✅ [T2] Code executed successfully ({label})")
                 # Wait for UI to fully settle before snapshotting for verification.
                 # Chrome search results and Clock alarm list both need ~1.5s to render.
@@ -1999,14 +2148,26 @@ class MobileCodeGenStrategy:
                     "open gmail", "fill", "subject", "body", "recipient",
                 ))
 
-                # For "send" tasks: compose screen should be GONE → success
+                # For "send" tasks: first validate fields, then check compose is gone
                 if task_is_send:
+                    # Pre-send check: look for empty required fields warning
+                    # Gmail shows "Please add a recipient" or leaves compose open
+                    error_indicators = [
+                        "please add a recipient",
+                        "add a recipient",
+                        "subject is required",
+                        "recipient required",
+                    ]
+                    for err in error_indicators:
+                        if err in snap_low:
+                            return False, f"Gmail validation error visible: {err}"
+
                     compose_gone = "to" not in snap_low[:200] and "subject" not in snap_low[:200]
                     has_compose_btn = "compose" in snap_low
                     if compose_gone and has_compose_btn:
                         return True, "Compose screen closed — email sent"
                     if "send" in snap_low and ("to" in snap_low or "subject" in snap_low):
-                        return False, "Compose screen still visible — email not sent"
+                        return False, "Compose screen still visible — check all fields are filled"
                     return True, "Gmail screen changed after send"
 
                 # For "compose/fill/open" tasks: compose screen OPEN is success

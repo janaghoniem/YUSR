@@ -1752,15 +1752,66 @@ async def start_language_agent(broker):
                 try:
                     from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
                     _pmgr = get_preference_manager(user_id)
-                    _pmgr.add_preference(
-                        str(personal_info),
-                        metadata={
-                            "category": "personal_info",
-                            "source": "language_agent",
-                            "session_id": session_id
-                        }
-                    )
-                    print(f"💾 Stored personal info: {personal_info}")
+
+                    # TC59: Reject facts that conflict with existing identity data.
+                    # An attacker saying "my name is Admin" after onboarding as Sara
+                    # must not overwrite the real profile. We check existing personal_info
+                    # memories and block any claim that contradicts a stored name/identity.
+                    _IDENTITY_KEYS = ["name", "age", "nationality", "profession", "email"]
+                    _pi_lower = str(personal_info).lower()
+                    _is_identity_claim = any(k in _pi_lower for k in _IDENTITY_KEYS)
+                    _conflict_detected = False
+
+                    if _is_identity_claim:
+                        try:
+                            _existing = _pmgr.get_all_preferences()
+                            for _mem in _existing:
+                                if not isinstance(_mem, dict):
+                                    continue
+                                _cat = _mem.get("metadata", {}).get("category", "")
+                                if _cat != "personal_info":
+                                    continue
+                                _mem_text = _mem.get("memory", "").lower()
+                                # If the stored fact and the new claim share an identity
+                                # keyword but contain different values, treat as conflict.
+                                for _key in _IDENTITY_KEYS:
+                                    if _key in _mem_text and _key in _pi_lower:
+                                        # Extract value tokens after the keyword
+                                        import re as _re_tc59
+                                        _stored_val = _re_tc59.findall(
+                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _mem_text
+                                        )
+                                        _new_val = _re_tc59.findall(
+                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _pi_lower
+                                        )
+                                        if (
+                                            _stored_val and _new_val
+                                            and _stored_val[0] != _new_val[0]
+                                        ):
+                                            _conflict_detected = True
+                                            logger.warning(
+                                                f"🚫 TC59: Conflicting identity claim blocked. "
+                                                f"Stored: '{_mem_text[:60]}' | "
+                                                f"New claim: '{str(personal_info)[:60]}'"
+                                            )
+                                            break
+                                if _conflict_detected:
+                                    break
+                        except Exception as _conf_err:
+                            logger.debug(f"Conflict check failed (non-fatal): {_conf_err}")
+
+                    if not _conflict_detected:
+                        _pmgr.add_preference(
+                            str(personal_info),
+                            metadata={
+                                "category": "personal_info",
+                                "source": "language_agent",
+                                "session_id": session_id
+                            }
+                        )
+                        print(f"💾 Stored personal info: {personal_info}")
+                    else:
+                        print(f"🚫 Blocked conflicting identity claim: {str(personal_info)[:60]}")
                 except Exception as _ext_err:
                     logger.warning(f"⚠️ Personal info storage (non-fatal): {_ext_err}")
             # ──────────────────────────────────────────────────────────────────────
@@ -1790,6 +1841,8 @@ async def start_language_agent(broker):
                     # output_language may differ (e.g. Arabic user wants English summary)
                     "output_language": output_language,
                     "device_type": device_type,
+                    "target_device": cross_platform_intent.get("target_platform") if cross_platform_intent else None,
+                    "cross_device_target": cross_platform_intent,
                     "user_id": user_id,
                     "chat_title": chat_title,
                     "first_input": input_text,
@@ -1834,6 +1887,8 @@ async def start_language_agent(broker):
         extra_params = payload_data.get("extra_params", {})
         # Try both direct and nested input content in case of extraction variance
         input_content = extra_params.get("input_content", "")
+        content_pages = []
+        display_content = input_content
         if not input_content and "input_from" in extra_params:
             logger.info(f"Looking for content from: {extra_params.get('input_from')}")
             
@@ -1850,6 +1905,12 @@ async def start_language_agent(broker):
                 import json
                 parsed = json.loads(input_content)
                 if isinstance(parsed, dict):
+                    if isinstance(parsed.get("content"), dict) and isinstance(parsed["content"].get("pages"), list):
+                        content_pages = parsed["content"]["pages"]
+                        display_content = "\n\n".join(
+                            p.get("content", "") for p in content_pages if isinstance(p, dict)
+                        ).strip() or input_content
+
                     formatted_parts = []
                     for k, v in parsed.items():
                         title = k.replace("_", " ").title()
@@ -1857,18 +1918,19 @@ async def start_language_agent(broker):
                         if is_ar and title.upper() == "BODY": title = "الرسالة"
                         formatted_parts.append(f"{title}: {v}")
                     
-                    question_hdr = "إليك المسودة. هل يجب المتابعة؟\n\n" if is_ar else "Here is the drafted content. Should I proceed?\n\n"
-                    question = question_hdr + "\n\n".join(formatted_parts)
+                    if formatted_parts and not content_pages:
+                        display_content = "\n\n".join(formatted_parts)
                 else:
-                    question += f"Draft:\n{input_content}"
+                    display_content = str(parsed)
             except Exception:
-                question += f"Content:\n{input_content}"
+                display_content = input_content
              
         agent.awaiting_user_response = {
             "type": "task_confirmation",
             "task_id": task_id,
             "original_request": message.response_to,
-            "draft_content": input_content,
+            "draft_content": display_content,
+            "draft_pages": content_pages,
             "input_from": extra_params.get("input_from"),
         }
         # If the mobile app recreates sessions, save immediately so a new session on the next turn can recover this via the DB
@@ -1882,7 +1944,10 @@ async def start_language_agent(broker):
             response_to=message.response_to,
             payload={
                 "question": question,
-                "context": str(payload_data)
+                "context": str(payload_data),
+                "full_content": display_content,
+                "offer_read_aloud": bool(display_content),
+                "content_pages": content_pages,
             }
         )
         await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
@@ -1895,7 +1960,10 @@ async def start_language_agent(broker):
             response_to=message.response_to,
             payload={
                 "ws_type": "confirmation_needed",
-                "question": question
+                "question": question,
+                "full_content": display_content,
+                "offer_read_aloud": bool(display_content),
+                "content_pages": content_pages,
             }
         )
         await broker.publish(Channels.WEBSOCKET_OUTPUT, ws_msg)

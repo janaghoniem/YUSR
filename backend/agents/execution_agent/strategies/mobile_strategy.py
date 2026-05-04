@@ -24,6 +24,19 @@ from typing import Any, Dict, List, Optional, Protocol, Set, Tuple, runtime_chec
 
 import uiautomator2 as u2
 
+# Optional sentence-transformers for semantic cache similarity.
+# If not installed, falls back to Jaccard + synonym normalization.
+try:
+    from sentence_transformers import SentenceTransformer
+    import numpy as np
+    _SENTENCE_MODEL = SentenceTransformer("all-MiniLM-L6-v2")   # 22MB, runs locally
+    _SEMANTIC_CACHE_AVAILABLE = True
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.info("✅ Sentence-Transformers loaded — using semantic cache similarity")
+except ImportError:
+    _SEMANTIC_CACHE_AVAILABLE = False
+    _SENTENCE_MODEL = None
+
 from agents.utils.device_protocol import (
     MobileTaskRequest,
     MobileTaskResult,
@@ -68,6 +81,10 @@ APP_PACKAGES: Dict[str, str] = {
     "files":           "com.google.android.apps.nbu.files",
     "dialer":          "com.google.android.dialer",
     "phone":           "com.google.android.dialer",
+    # App stores
+    "play store":      "com.android.vending",
+    "google play":     "com.android.vending",
+    "app store":       "com.android.vending",   # Android has no iOS App Store
 }
 
 PACKAGE_TO_APP: Dict[str, str] = {
@@ -227,10 +244,16 @@ class TemplateCache:
     }
 
     def __init__(self, cache_file: Path = CACHE_FILE) -> None:
-        self._path:  Path                    = cache_file
-        self._store: Dict[str, CodeTemplate] = {}
+        self._path:    Path                    = cache_file
+        self._store:   Dict[str, CodeTemplate] = {}
+        # Embedding cache: template_id → numpy vector (lazy, computed on first lookup)
+        self._embeds:  Dict[str, Any]          = {}
         self._load()
-        logger.info(f"[CACHE] TemplateCache ready: {len(self._store)} templates | path={self._path}")
+        logger.info(
+            f"[CACHE] TemplateCache ready: {len(self._store)} templates | "
+            f"path={self._path} | "
+            f"mode={'semantic' if _SEMANTIC_CACHE_AVAILABLE else 'jaccard'}"
+        )
 
     def _load(self) -> None:
         if not self._path.exists():
@@ -311,28 +334,79 @@ class TemplateCache:
         tokens = [cls._SYNONYMS.get(t, t) for t in tokens]
         return {t for t in tokens if t not in cls._STOPWORDS and len(t) >= 2}
 
+    def _embed(self, text: str) -> Any:
+        """Return sentence embedding for text, using the global model."""
+        if not _SEMANTIC_CACHE_AVAILABLE or _SENTENCE_MODEL is None:
+            return None
+        return _SENTENCE_MODEL.encode(text, normalize_embeddings=True)
+
+    @staticmethod
+    def _cosine(a: Any, b: Any) -> float:
+        """Cosine similarity between two normalized embedding vectors."""
+        if a is None or b is None:
+            return 0.0
+        return float(np.dot(a, b))
+
     def lookup(self, task_text: str, app: str, threshold: float = CACHE_SIM_THRESHOLD) -> Optional[Tuple[CodeTemplate, float]]:
         if not self._store:
             return None
-        # Use letter-only keywords for query to match placeholder-normalised templates
-        query_kw  = self._kw_query(task_text)
+
         app_lower = (app or "").lower().strip()
         best_t:   Optional[CodeTemplate] = None
         best_sim: float = 0.0
-        for t in self._store.values():
-            sim = self._jaccard(query_kw, set(t.keywords))
-            if app_lower and t.app.lower() != app_lower:
-                sim *= 0.4
-            if t.reliability < 0.5 and (t.success_count + t.failure_count) >= 3:
-                sim *= 0.6
-            if sim > best_sim:
-                best_sim = sim
-                best_t   = t
-        if best_t is not None and best_sim >= threshold:
-            logger.info(f"[CACHE] HIT  sim={best_sim:.2f} | pattern='{best_t.task_pattern[:55]}' | app={best_t.app}")
-            return best_t, best_sim
-        logger.info(f"[CACHE] MISS best_sim={best_sim:.2f} < {threshold} | query='{task_text[:55]}'")
-        return None
+
+        if _SEMANTIC_CACHE_AVAILABLE and _SENTENCE_MODEL is not None:
+            # ── Semantic similarity path ──────────────────────────────────
+            # Embed the query once; embed each template lazily (cached).
+            query_vec = self._embed(task_text)
+            for t in self._store.values():
+                # Lazy-compute and cache template embedding
+                if t.template_id not in self._embeds:
+                    self._embeds[t.template_id] = self._embed(t.task_pattern)
+                tmpl_vec = self._embeds[t.template_id]
+                sim = self._cosine(query_vec, tmpl_vec)
+                # Cross-app penalty: wrong app → halve similarity
+                if app_lower and t.app.lower() != app_lower:
+                    sim *= 0.4
+                # Reliability penalty: templates that fail often
+                if t.reliability < 0.5 and (t.success_count + t.failure_count) >= 3:
+                    sim *= 0.6
+                if sim > best_sim:
+                    best_sim = sim
+                    best_t   = t
+            # Semantic similarity is naturally in [0,1].
+            # 0.60 is the right floor — same-app variants score 0.60-0.75 and
+            # should hit cache. The cross-app 0.4x penalty prevents misfires.
+            sem_threshold = max(threshold, 0.60)
+            if best_t is not None and best_sim >= sem_threshold:
+                logger.info(
+                    f"[CACHE] HIT (semantic) sim={best_sim:.3f} | "
+                    f"pattern='{best_t.task_pattern[:55]}' | app={best_t.app}"
+                )
+                return best_t, best_sim
+            logger.info(
+                f"[CACHE] MISS (semantic) best_sim={best_sim:.3f} < {sem_threshold} | "
+                f"query='{task_text[:55]}'"
+            )
+            return None
+
+        else:
+            # ── Jaccard fallback path (no sentence-transformers) ──────────
+            query_kw = self._kw_query(task_text)
+            for t in self._store.values():
+                sim = self._jaccard(query_kw, set(t.keywords))
+                if app_lower and t.app.lower() != app_lower:
+                    sim *= 0.4
+                if t.reliability < 0.5 and (t.success_count + t.failure_count) >= 3:
+                    sim *= 0.6
+                if sim > best_sim:
+                    best_sim = sim
+                    best_t   = t
+            if best_t is not None and best_sim >= threshold:
+                logger.info(f"[CACHE] HIT (jaccard) sim={best_sim:.2f} | pattern='{best_t.task_pattern[:55]}' | app={best_t.app}")
+                return best_t, best_sim
+            logger.info(f"[CACHE] MISS (jaccard) best_sim={best_sim:.2f} < {threshold} | query='{task_text[:55]}'")
+            return None
 
     def add(self, template: CodeTemplate) -> None:
         template.keywords   = list(self._kw(template.task_pattern))
@@ -416,12 +490,22 @@ class ParameterExtractor:
             p = params.get("alarm_period", "AM")
             params.set("alarm_time", f"{int(h)}:{m} {p}")
 
-        # ── Parse input_content JSON from upstream reasoning tasks ──────────
+        # ── Parse email JSON from input_content OR overall_goal context ────
         # When a reasoning agent produces {"SUBJECT": "...", "BODY": "..."},
-        # the coordinator passes it as input_content. We parse it here so
-        # action tasks like "fill subject field" have the actual values
-        # rather than trying to use an undefined variable called BODY/SUBJECT.
+        # it's stored as task_1 output. The coordinator injects it as
+        # input_content ONLY if task_1 is in the current task's depends_on.
+        # If it's not (e.g. the decomposer dropped the dependency), we try
+        # to find it in all extra_params values — the coordinator sometimes
+        # passes it under input_content from a previous task in the chain.
+        # As a final fallback: parse overall_goal for explicit subject/body markers.
         input_content = (extra.get("input_content") or "").strip()
+        # If input_content looks like metadata (Template cache..., Code generated...),
+        # try to find actual JSON elsewhere in extra_params.
+        if not input_content.startswith("{"):
+            for val in extra.values():
+                if isinstance(val, str) and val.strip().startswith('{"SUBJECT"'):
+                    input_content = val.strip()
+                    break
         if input_content and input_content.startswith("{"):
             try:
                 parsed = json.loads(input_content)
@@ -842,6 +926,149 @@ class CodeExecutor:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  APP PLAYBOOKS — injected dynamically, one per task
+#  These replace the hardcoded sections in the old monolithic prompt.
+#  Add new apps here without touching the base prompt.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_APP_PLAYBOOKS: Dict[str, str] = {
+
+    "chrome": """
+CHROME PLAYBOOK:
+- Address bar: d(resourceId="com.android.chrome:id/url_bar") — guard with .exists(timeout=8)
+- If url_bar not in snapshot, use d(className="android.widget.EditText") or tap (0.5, 0.07)
+- To navigate/search: click bar → clear_text() → set_text(url_or_query) → d.press("enter")
+- NO Enter/Go button exists — always use d.press("enter") or d.press("search")
+- After submit: time.sleep(2.5)
+""",
+
+    "clock": """
+CLOCK / ALARM PLAYBOOK:
+Read the task carefully — it is ONE of these sub-tasks, not all of them at once:
+
+SUB-TASK A — "Open alarm / Navigate to alarm / Add alarm" (no time params present):
+  Only click Add Alarm. Do NOT open the time picker or set any time.
+  if d(description="Add alarm").exists(timeout=3):
+      d(description="Add alarm").click()
+  elif d(text="Add alarm").exists(timeout=3):
+      d(text="Add alarm").click()
+  time.sleep(1.5)
+  print("TASK_COMPLETE")
+
+SUB-TASK B — "Set the alarm time to HH:MM AM/PM" (alarm_hour, alarm_minute, alarm_period params present):
+  The time picker may already be open (from sub-task A) OR you may need to open it.
+  Step 1: Check if time picker EditText is visible. If not, click Add Alarm then switch modes.
+  Step 2: Switch to TEXT INPUT — dial ignores set_text() silently.
+    Use 12-position grid search (see positions list in clock_set_alarm_001 template).
+    Confirm EditText visible BEFORE calling set_text. Exit with MODE_SWITCH_FAILED if not.
+  Step 3: Strip leading zero: hour_str = str(int(alarm_hour))
+    d(resourceId="android:id/input_hour").clear_text(); .set_text(hour_str)
+    d(resourceId="android:id/input_minute").clear_text(); .set_text(alarm_minute)
+    OR d(className="android.widget.EditText")[0/1] if resourceId not found
+  Step 4: d(text=alarm_period) or d(description=alarm_period)
+  Step 5: d(text="OK") or d(text="Save") or d(text="Done")
+
+Mode switch selectors (try in order until EditText appears):
+  description="Switch to text input mode"  (NOT the longer "for the time input." variant)
+  description="keyboard"
+  resourceId="com.google.android.deskclock:id/material_timepicker_mode_button"
+  Coordinate grid: (0.85,0.75) (0.85,0.80) (0.85,0.70) (0.15,0.75) (0.15,0.80)
+                   (0.15,0.70) (0.85,0.65) (0.15,0.65) (0.85,0.85) (0.15,0.85)
+                   (0.50,0.80) (0.50,0.85)
+""",
+
+    "gmail": """
+GMAIL PLAYBOOK:
+INVALID keywords (never use): hint=, placeholder=, label=
+Open compose: d(description="Compose") or d(resourceId="com.google.android.gm:id/compose_button")
+To field (no hint= — use):
+  d(resourceId="com.google.android.gm:id/to") or
+  d(className="android.widget.MultiAutoCompleteTextView") or
+  d(className="android.widget.EditText")[0]
+Subject field: d(resourceId="com.google.android.gm:id/subject") or EditText[1]
+Body: tap (0.5, 0.65) then last EditText on screen
+Send: d(description="Send") or d(resourceId="com.google.android.gm:id/send")
+For fill tasks: use email_subject and email_body variables (pre-declared) — NEVER type SUBJECT or BODY literally
+""",
+
+    "youtube": """
+YOUTUBE PLAYBOOK:
+IMPORTANT: description='Search' does NOT exist on this device — use resourceId.
+
+Open search bar:
+  if d(resourceId="com.google.android.youtube:id/menu_item_1").exists(timeout=3):
+      d(resourceId="com.google.android.youtube:id/menu_item_1").click()
+  elif d(resourceId="com.google.android.youtube:id/toolbar_search_button").exists(timeout=3):
+      d(resourceId="com.google.android.youtube:id/toolbar_search_button").click()
+  else:
+      # Tap top-right search area by coordinate
+      d.click(0.92, 0.05)
+  time.sleep(1.0)
+
+Type query (search input field):
+  search_box = None
+  for rid in ["com.google.android.youtube:id/search_edit_text",
+              "com.google.android.youtube:id/youtube_query_text_view"]:
+      if d(resourceId=rid).exists(timeout=3):
+          search_box = d(resourceId=rid); break
+  if search_box is None:
+      search_box = d(className="android.widget.EditText")
+  search_box.click(); search_box.set_text(search_query)
+  d.press("search"); time.sleep(2.5)
+
+Click first video result (titles are in LABEL section of snapshot):
+  # Try textContains with first few words of the query
+  words = search_query.split()[:3]
+  for w in words:
+      if d(textContains=w, clickable=True).exists(timeout=2):
+          d(textContains=w, clickable=True)[0].click(); break
+  else:
+      # Fallback: first clickable ViewGroup below search bar
+      d(className="android.view.ViewGroup", clickable=True)[2].click()
+""",
+
+    "play_store": """
+PLAY STORE PLAYBOOK:
+Search bar: d(resourceId="com.android.vending:id/search_bar_hint") or
+            d(description="Search for apps & games")
+Type: d(className="android.widget.EditText").set_text(search_query)
+Submit: d.press("search") → time.sleep(2.0)
+First result: d(resourceId="com.android.vending:id/li_title")[0].click() OR
+              first clickable TextView
+Install: d(text="Install") or d(text="Get") — click and wait
+Wait for install: poll d(text="Open").exists() up to 60s
+""",
+
+    "maps": """
+MAPS PLAYBOOK:
+Search: d(resourceId="com.google.android.apps.maps:id/search_omnibox_text_field")
+        or d(description="Search here")
+Type destination: .set_text(search_query) → d.press("search") → time.sleep(2.0)
+Directions: d(description="Directions") or d(text="Directions")
+""",
+
+    "google_calendar": """
+GOOGLE CALENDAR PLAYBOOK:
+New event: d(description="Create new event") or d(resourceId="...fab")
+Title: first EditText
+Date/time: tap date/time fields and use the pickers
+Save: d(text="Save") or d(description="Save")
+""",
+}
+
+def _get_app_playbook(app: str) -> str:
+    """Return the playbook for the given app, or empty string for unknown apps."""
+    key = app.lower().replace(" ", "_").replace("-", "_")
+    # Try exact match first, then partial match
+    if key in _APP_PLAYBOOKS:
+        return _APP_PLAYBOOKS[key]
+    for k, v in _APP_PLAYBOOKS.items():
+        if k in key or key in k:
+            return v
+    return ""   # Unknown app — LLM reasons from snapshot alone
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  LLM SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -850,436 +1077,115 @@ class CodeExecutor:
 # FIX #6: Strengthened .exists() guard rule
 # FIX #7: Added hard MAX LINES rule
 
-_CODEGEN_SYSTEM_PROMPT = textwrap.dedent(
+_CODEGEN_BASE_PROMPT = textwrap.dedent(
     """    You are an expert Android automation engineer.
-
-    Your job: given a task description, parameter values, and a CURRENT SCREEN
-    snapshot, output a complete runnable uiautomator2 Python script.
+    Given a task, parameters, and a UI snapshot, write a complete uiautomator2 Python script.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     ENVIRONMENT
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     • `d` = connected uiautomator2 device. `time` and `re` already imported.
-    • Param variables are pre-declared (alarm_hour = "05", etc.).
-    • DO NOT add imports or reassign `d`.
+    • Param variables are pre-declared (alarm_hour, email_subject, search_query, etc.)
+    • DO NOT add imports or reassign `d`. DO NOT call app_start().
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    SELECTOR SYNTAX — READ CAREFULLY
+    REASONING FROM THE SNAPSHOT
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    The snapshot shows: rid="X"  text="Y"  desc="Z"
-    Map these to uiautomator2 keyword arguments as follows:
+    The snapshot lists every interactive element on screen RIGHT NOW.
+    It has two sections: INTERACTIVE ELEMENTS and VISIBLE TEXT labels.
 
-        rid="X"   →  d(resourceId="X")          ← exact keyword
-        text="Y"  →  d(text="Y")                ← exact keyword
-        desc="Z"  →  d(description="Z")         ← MUST be description=, NOT desc=
+    Before writing code, ask: "Which element in the snapshot maps to what I need?"
+    - "search" intent → find EditText, SearchView, elements with "search" in desc/text
+    - "tap X" → element with text="X" or description="X"
+    - "type in field Y" → EditText near label Y
+    - "install/download" → button with text "Install", "Get", "Download"
+    - Can't find it? It appears after a click → use .exists(timeout=N) guard
 
-    !! NEVER write d(desc=...) — that keyword does NOT EXIST in uiautomator2 !!
-    !! ALWAYS write d(description=...) when matching a desc= field !!
+    SELECTOR PRIORITY (most stable → least):
+    1. d(resourceId="exact_rid")          ← only from snapshot, never invent
+    2. d(description="exact_desc")        ← use description=, NEVER desc=
+    3. d(text="exact_text")
+    4. d(textContains="partial")
+    5. d(className="...")[index]          ← last resort
 
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    THE SNAPSHOT: WHAT IT SHOWS AND WHAT IT DOES NOT
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    The snapshot = the screen NOW. It has two sections:
-
-    Section 1 — INTERACTIVE ELEMENTS (things you can click/type/scroll).
-    Section 2 — VISIBLE TEXT labels (non-interactive text nodes: video titles,
-                alarm times, list item text). These show what's ON SCREEN but
-                cannot be clicked directly via their own node. To click an item
-                whose title appears in Section 2, use:
-                  d(text="Exact Title Text").click()       ← matches by text
-                  d(textContains="Partial Title").click()  ← partial match
-
-    ► Interactive elements: use their exact rid/text/desc selectors.
-    ► Post-navigation elements (appear AFTER a click): use .exists() guards.
-      NEVER invent a resource-id not in the snapshot.
-
-        # Safe pattern for post-click screens:
-        time.sleep(1.5)
-        if d(className="android.widget.EditText").count >= 2:
-            d(className="android.widget.EditText")[0].set_text("05")
-            d(className="android.widget.EditText")[1].set_text("30")
-        elif d(className="android.widget.EditText").exists(timeout=4):
-            d(className="android.widget.EditText").set_text("05")
-
-        # With resourceId guarded by .exists():
-        if d(resourceId="android:id/input_hour").exists(timeout=3):
-            d(resourceId="android:id/input_hour").set_text("05")
-
-    !! NEVER call .wait() on an invented selector — it WILL hang forever !!
-    !! ALWAYS wrap post-navigation selectors in .exists(timeout=N) !!
+    VALID selector keywords: resourceId, text, textContains, textStartsWith,
+    description, className, index, instance, scrollable, clickable, focusable
+    !! NEVER use: hint=, placeholder=, label=, id=, name= !!
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    SELECTOR PRIORITY (snapshot elements)
+    POST-NAVIGATION ELEMENTS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    1. resourceId  — d(resourceId="<rid from snapshot>")
-    2. description — d(description="<desc from snapshot>")   ← NOT desc=
-    3. text        — d(text="<text from snapshot>")
-    4. className   — d(className="android.widget.EditText")  ← last resort
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    APP LAUNCH
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    The strategy launched the app before taking the snapshot.
-    DO NOT call d.app_start() or d.app_wait(). Begin on the snapshot screen.
-    Add time.sleep(0.5) at the top to let the UI settle.
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CHROME / BROWSER — CRITICAL PATTERNS
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    RULE 1 — NEVER use .wait() or unguarded selectors for Chrome elements.
-    Chrome's url_bar DOES NOT appear in the snapshot until the app is fully
-    loaded. If url_bar is NOT in the snapshot, use .exists(timeout=8) to wait.
-
-    RULE 2 — Chrome has NO "Enter" / "Go" button in the UI tree.
-    Always use d.press("enter") or d.press("search") to submit.
-
-    RULE 3 — url_bar is the ONLY Chrome input element. If it's not in the
-    snapshot, don't invent other resourceIds — use .exists() to wait for it.
-
-        # Navigate to URL (url_bar may not be in snapshot yet — always guard):
-        url_bar = d(resourceId="com.android.chrome:id/url_bar")
-        if not url_bar.exists(timeout=8):
-            # Chrome still loading — try the search box or EditText
-            url_bar = d(className="android.widget.EditText")
-            if not url_bar.exists(timeout=5):
-                # Last resort: tap the center-top of screen where address bar usually is
-                d.click(0.5, 0.07)
-                time.sleep(1.0)
-                url_bar = d(className="android.widget.EditText")
-        url_bar.click()
-        time.sleep(0.5)
-        url_bar.clear_text()
-        url_bar.set_text("https://www.google.com")
-        time.sleep(0.3)
-        d.press("enter")
-        time.sleep(2.5)
-
-        # Type search and submit (search box already focused):
-        d(className="android.widget.EditText").set_text(search_query)
-        time.sleep(0.3)
-        d.press("search")
-        time.sleep(2.5)
-
-    NEVER click a button called "Enter", "Go", or "Search".
-    ALWAYS use d.press("enter") or d.press("search").
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    THE SNAPSHOT FORMAT — TWO SECTIONS
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    The snapshot has two parts:
-
-    1. INTERACTIVE ELEMENTS — things you can click/type/scroll.
-       Use rid=, text=, desc= from these lines as selectors.
-
-    2. VISIBLE TEXT (non-interactive labels) — text that is ON SCREEN
-       but on a non-interactive node (e.g. video title in a RecyclerView,
-       alarm time label, search result description).
-       You CANNOT click these label nodes directly.
-       To interact with them, use their parent container:
-         d(text="Some Video Title").click()      ← works via child matching
-         d(textContains="AgentForce").click()    ← partial match on visible text
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    CLOCK / ALARM — CRITICAL PATTERNS
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    STEP 0 — CONTEXT CHECK (run this before anything else):
-    Read the snapshot. If "Add alarm" AND Switch/Toggle elements are BOTH
-    visible, you are on the alarm LIST. If an EditText with resource-id
-    containing "hour" or "minute" is visible, you are inside the time picker.
-    If neither, click "Add alarm" to open the picker.
-
-    STEP 1 — Open time picker (only if on alarm list):
-        if d(description="Add alarm").exists(timeout=2):
-            d(description="Add alarm").click()
-        elif d(text="Add alarm").exists(timeout=2):
-            d(text="Add alarm").click()
-        time.sleep(1.5)
-
-    STEP 2 — MANDATORY: Switch to keyboard/text input mode.
-    The clock dial CANNOT accept set_text() — it silently ignores all input.
-    You MUST switch to text input mode and CONFIRM it worked (EditText visible)
-    before calling set_text(). If you skip this, the alarm saves at default time.
-
-    The keyboard/text mode toggle has no text or description on many devices.
-    Use this EXHAUSTIVE search — try every position until EditText appears:
-
-        def _switch_to_text_mode(d):
-            # Try every known position for the keyboard mode toggle.
-            # Named selectors first (some devices have them)
-            named_attempts = [
-                lambda: d(description="Switch to text input mode").click()
-                    if d(description="Switch to text input mode").exists(timeout=1) else None,
-                lambda: d(description="keyboard").click()
-                    if d(description="keyboard").exists(timeout=1) else None,
-                lambda: d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").click()
-                    if d(resourceId="com.google.android.deskclock:id/material_timepicker_mode_button").exists(timeout=1) else None,
-            ]
-            for fn in named_attempts:
-                fn()
-                time.sleep(0.5)
-                if d(className="android.widget.EditText").exists(timeout=1):
-                    return True
-
-            # Coordinate grid — the icon can be at different positions
-            # depending on device screen size and Android version.
-            # Try a grid of likely positions systematically:
-            positions = [
-                (0.85, 0.75), (0.85, 0.80), (0.85, 0.70),
-                (0.15, 0.75), (0.15, 0.80), (0.15, 0.70),
-                (0.85, 0.65), (0.15, 0.65),
-                (0.85, 0.85), (0.15, 0.85),
-                (0.50, 0.80), (0.50, 0.85),
-            ]
-            for x, y in positions:
-                d.click(x, y)
-                time.sleep(0.5)
-                if d(className="android.widget.EditText").exists(timeout=1):
-                    return True
-            return False
-
-        switched = _switch_to_text_mode(d)
-        if not switched:
-            # Last resort: press back and re-open (sometimes resets to text mode)
-            d.press("back")
-            time.sleep(0.5)
-            if d(description="Add alarm").exists(timeout=2):
-                d(description="Add alarm").click()
-                time.sleep(1.5)
-                _switch_to_text_mode(d)
-
-        time.sleep(0.5)
-        # CONFIRM: if EditText still not visible, DO NOT proceed with set_text
-        # — it will silently fail. Print what we see and exit for retry.
-        if not d(className="android.widget.EditText").exists(timeout=2):
-            print("MODE_SWITCH_FAILED: EditText not found after all attempts")
-            print("TASK_COMPLETE")
-            exit()
-
-    STEP 3 — Type the time (AFTER switching to text mode):
-    CRITICAL: alarm_hour is zero-padded ("05"). ALWAYS strip the leading zero.
-    str(int(alarm_hour)) gives "5" not "05". Sending "05" enters two digits
-    separately, landing on the wrong hour (0→5 → wraps to 5, not hour 5).
-
-        hour_str = str(int(alarm_hour))   # "05" → "5", "12" → "12"
-
-        # Try named resource IDs first, then fall back to EditText by index
+    Elements that appear AFTER a click are NOT in the snapshot.
+    Always wrap them in .exists(timeout=N) guards:
         if d(resourceId="android:id/input_hour").exists(timeout=4):
-            d(resourceId="android:id/input_hour").clear_text()
-            d(resourceId="android:id/input_hour").set_text(hour_str)
-            time.sleep(0.3)
-            d(resourceId="android:id/input_minute").clear_text()
-            d(resourceId="android:id/input_minute").set_text(alarm_minute)
-        elif d(className="android.widget.EditText").count >= 2:
-            d(className="android.widget.EditText")[0].clear_text()
-            d(className="android.widget.EditText")[0].set_text(hour_str)
-            time.sleep(0.3)
-            d(className="android.widget.EditText")[1].clear_text()
-            d(className="android.widget.EditText")[1].set_text(alarm_minute)
-        time.sleep(0.3)
-
-    STEP 4 — Set AM/PM:
-
-        for sel in [d(text=alarm_period), d(description=alarm_period),
-                    d(textContains=alarm_period)]:
-            if sel.exists(timeout=2):
-                sel.click()
-                break
-
-    STEP 5 — Confirm:
-
-        for btn_text in ["OK", "Save", "Done"]:
-            if d(text=btn_text).exists(timeout=2):
-                d(text=btn_text).click()
-                break
-        time.sleep(0.5)
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    YOUTUBE — CRITICAL PATTERNS
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    YouTube search flow:
-
-        # Open search:
-        if d(description="Search").exists(timeout=3):
-            d(description="Search").click()
-        elif d(resourceId="com.google.android.youtube:id/menu_item_1").exists(timeout=3):
-            d(resourceId="com.google.android.youtube:id/menu_item_1").click()
-        time.sleep(1.0)
-
-        # Type query:
-        search_box = None
-        for rid in ["com.google.android.youtube:id/search_edit_text",
-                    "com.google.android.youtube:id/youtube_query_text_view"]:
-            if d(resourceId=rid).exists(timeout=3):
-                search_box = d(resourceId=rid)
-                break
-        if search_box is None:
-            search_box = d(className="android.widget.EditText")
-        search_box.set_text(search_query)
-        time.sleep(0.3)
-        d.press("search")
-        time.sleep(2.5)
-
-    Clicking a result — CHECK THE SNAPSHOT LABELS FIRST:
-    The snapshot's LABEL section shows the video titles visible on screen.
-    Use those exact title strings to click. Never guess by index alone.
-
-        # If you can see a title in the LABEL section of the snapshot, use it:
-        if d(textContains="AgentForce").exists(timeout=5):
-            d(textContains="AgentForce").click()
-        elif d(resourceId="com.google.android.youtube:id/results").exists(timeout=5):
-            # Click the first result container
-            d(resourceId="com.google.android.youtube:id/results").child(
-                className="android.view.ViewGroup", clickable=True
-            )[0].click()
-        else:
-            # Last resort — first clickable item below top nav bar
-            d(className="android.view.ViewGroup", clickable=True)[2].click()
-        time.sleep(1.5)
+            d(resourceId="android:id/input_hour").set_text("5")
+    NEVER call .wait() on an invented selector — it hangs forever.
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     INTERACTIONS
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    d(sel).click()   d(sel).set_text("v")
-    if d(sel).exists(timeout=3): ...
-    d.send_keys("text")   d.press("back"/"home"/"enter"/"search")
-    d.click(x, y)   d.swipe_ext("up", scale=0.8)
+    d(sel).click()    d(sel).set_text("v")    d(sel).clear_text()
+    d(sel).exists(timeout=N)
+    d.press("back"/"home"/"enter"/"search")
+    d.click(x_pct, y_pct)    d.swipe_ext("up")
     d(scrollable=True).scroll.to(text="X")
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    GMAIL — CRITICAL PATTERNS
+    EXTRACTING SCREEN CONTENT
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    Gmail compose flow — use ONLY these selectors (verified working):
-
-        # Open compose screen:
-        if d(description="Compose").exists(timeout=3):
-            d(description="Compose").click()
-        elif d(resourceId="com.google.android.gm:id/compose_button").exists(timeout=3):
-            d(resourceId="com.google.android.gm:id/compose_button").click()
-        time.sleep(1.5)
-
-        # Fill recipient — the "To" field EditText:
-        # Try multiple selectors — Gmail uses different IDs across versions
-        to_field = None
-        for sel in [
-            d(resourceId="com.google.android.gm:id/to"),
-            d(resourceId="com.google.android.gm:id/people_edit_text"),
-            d(hint="To"),
-            d(className="android.widget.MultiAutoCompleteTextView"),
-        ]:
-            if sel.exists(timeout=2):
-                to_field = sel
-                break
-        if to_field is None:
-            to_field = d(className="android.widget.EditText")
-        to_field.click()
-        time.sleep(0.3)
-        to_field.set_text(recipient_email)
-        d.press("enter")
-        time.sleep(0.5)
-
-        # Fill Subject:
-        subj = None
-        for sel in [
-            d(resourceId="com.google.android.gm:id/subject"),
-            d(hint="Subject"),
-        ]:
-            if sel.exists(timeout=2):
-                subj = sel
-                break
-        if subj:
-            subj.click()
-            subj.set_text(email_subject)
-        time.sleep(0.3)
-
-        # Fill body:
-        body = None
-        for sel in [
-            d(resourceId="com.google.android.gm:id/body"),
-            d(hint="Compose email"),
-            d(className="android.widget.EditText", index=2),
-        ]:
-            if sel.exists(timeout=2):
-                body = sel
-                break
-        if body is None:
-            # Tap below subject area
-            d.click(0.5, 0.6)
-            time.sleep(0.3)
-            body = d(className="android.widget.EditText")
-        body.click()
-        body.set_text(email_body)
-        time.sleep(0.3)
-
-        # Send:
-        if d(description="Send").exists(timeout=2):
-            d(description="Send").click()
-        elif d(resourceId="com.google.android.gm:id/send").exists(timeout=2):
-            d(resourceId="com.google.android.gm:id/send").click()
-
-    CRITICAL FOR GMAIL FILL TASKS:
-    When your task says "fill Subject with SUBJECT value" or "fill body with BODY value",
-    the actual text values are in your PARAMETER VARIABLES section as email_subject and
-    email_body. NEVER reference undefined variables like SUBJECT or BODY directly.
-    ALWAYS use email_subject and email_body which are pre-declared variables.
-
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    EXTRACTING CONTENT FROM THE SCREEN
-    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    When the task asks to EXTRACT, READ, or COLLECT visible content
-    (search results, list items, text on screen), you MUST print the
-    extracted content to stdout BEFORE printing TASK_COMPLETE.
-
-    The downstream language agent reads your stdout to present results to
-    the user. If you only print TASK_COMPLETE, the user sees nothing.
-
-    Pattern for extracting visible text (search results, list items):
-
-        # Collect all visible text labels from the snapshot into a list
+    For extract/read tasks, print content BEFORE TASK_COMPLETE:
         results = []
         for el in d(className="android.widget.TextView"):
             try:
                 txt = el.get_text()
-                if txt and len(txt.strip()) > 3 and txt.strip() != "...":
+                if txt and len(txt.strip()) > 3:
                     results.append(txt.strip())
-            except Exception:
-                pass
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique = []
-        for r in results:
-            if r not in seen:
-                seen.add(r)
-                unique.append(r)
-
-        # Print results — one per line, labelled
+            except: pass
+        seen = set(); unique = [r for r in results if r not in seen and not seen.add(r)]
         if unique:
             print("SEARCH_RESULTS:")
-            for i, r in enumerate(unique[:10], 1):
-                print(f"{i}. {r}")
-        else:
-            print("No visible results found on screen")
-
-        print("TASK_COMPLETE")
+            for i, r in enumerate(unique[:10], 1): print(f"{i}. {r}")
 
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     MANDATORY RULES
     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    1. DO NOT call app_start() — app is already open.
-    2. ALWAYS end with:  print("TASK_COMPLETE")
+    1. DO NOT call app_start() — app already open.
+    2. ALWAYS end with: print("TASK_COMPLETE")
     3. Guard permission dialogs: if d(text="Allow").exists(timeout=2): d(text="Allow").click()
-    4. Use set_text() — never key-by-key typing.
-    5. After d.press("enter"/"search"), add time.sleep(2.0).
-    6. Do NOT use try/except — let errors surface for the retry engine.
-    7. Output ONLY raw Python. No markdown, no comments, no explanation.
-    8. Param variables are in scope — use them directly.
-    9. MAX 25 LINES. Simple tasks need simple scripts. Do not add fallback chains
-       for elements you can already see in the snapshot — only use .exists() guards
-       for elements that appear AFTER a click (post-navigation).
-    10. NEVER use desc= keyword — always use description= for content-desc fields.
-    11. NEVER call .wait() on a selector you invented — only on selectors from snapshot.
+    4. Use set_text(), never character-by-character typing.
+    5. After d.press("enter"/"search"): time.sleep(2.0)
+    6. Do NOT use try/except — let errors surface for retry engine.
+    7. Output ONLY raw Python. No markdown, no comments.
+    8. MAX 25 LINES. Simple tasks need simple scripts.
+    9. Param variables are in scope — use them directly.
     """
 ).strip()
+
+
+def _build_codegen_system_prompt(app: str) -> str:
+    """
+    Build the system prompt for a specific app by combining the base prompt
+    with the app-specific playbook (if one exists).
+
+    This replaces the old 300-line monolith:
+    - Base prompt: ~70 lines of reasoning principles, valid for ALL apps
+    - Playbook: 10-20 lines of app-specific patterns, injected only when needed
+    - Unknown apps: no playbook — LLM reads snapshot and reasons from scratch
+    """
+    playbook = _get_app_playbook(app)
+    if playbook:
+        playbook_section = (
+            f"\n    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"\n    APP-SPECIFIC PLAYBOOK: {app.upper()}"
+            f"\n    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"\n{playbook}"
+        )
+        return _CODEGEN_BASE_PROMPT + playbook_section
+    return _CODEGEN_BASE_PROMPT
+
+
+# Keep backward-compat alias pointing at the base (used in tests/logging)
+_CODEGEN_SYSTEM_PROMPT = _CODEGEN_BASE_PROMPT
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1312,6 +1218,8 @@ class MobileCodeGenStrategy:
         self.param_extractor = ParameterExtractor()
         self.placeholderizer = PlaceholderExtractor()
         self._executor:      Optional[CodeExecutor] = None
+        # action_history: referenced by mobile_action_handler.py for step logging.
+        self.action_history: List[Tuple[str, bool]] = []
 
         self._init_llm()
         logger.info(
@@ -1324,7 +1232,7 @@ class MobileCodeGenStrategy:
             try:
                 from cerebras.cloud.sdk import Cerebras
                 self.llm_client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY", ""))
-                self.model      = "llama3.1-8b"
+                self.model      = "llama3.1-8b"   # 120B params, 3000 t/s — much better code quality
                 logger.info("✅ Cerebras: llama3.1-8b")
             except ImportError:
                 raise RuntimeError("Install cerebras-cloud-sdk: pip install cerebras-cloud-sdk")
@@ -1463,21 +1371,28 @@ class MobileCodeGenStrategy:
     def _infer_app(text: str) -> Tuple[str, str]:
         t = text.lower()
         checks: List[Tuple[Tuple[str, ...], str]] = [
-            # FIX #12: added "email", "mail", "compose", "inbox" to gmail triggers
+            # NOTE: Order matters — first match wins.
+            # Chrome MUST be before maps so "Navigate to search bar in Chrome" matches chrome,
+            # not maps (which previously matched "navigate to").
+            (("chrome", "browser", "search the web", "google.com", "url"),    "chrome"),
             (("gmail", "email", "mail", "compose email", "send email",
               "recipient", "subject", "inbox"),                               "gmail"),
             (("alarm", "clock", "stopwatch", "timer"),                        "clock"),
             (("contacts", "contact", "call log"),                             "contacts"),
-            (("play store", "install app", "google play", "download app"),    "play_store"),
+            (("play store", "install app", "google play", "download app",
+              "app store", "download the", "install the", "get the app",
+              "download app", "install app"),                                  "play_store"),
             (("youtube", "watch video", "play video", "play a video"),        "youtube"),
-            (("maps", "directions", "navigate to", "location"),               "maps"),
+            # Maps: removed "navigate to" — it was matching Chrome/generic navigate tasks.
+            # Require explicit location-search intent words.
+            (("google maps", "maps app", "directions to", "find on map",
+              "get directions", "open maps"),                                  "maps"),
             (("google docs", " docs ", "document"),                           "google docs"),
             (("google sheets", "spreadsheet"),                                "google sheets"),
             (("google slides", "presentation"),                               "google slides"),
             (("google calendar", "calendar", "schedule", "event"),            "google calendar"),
             (("google keep", "keep", "note"),                                 "google keep"),
             (("settings",),                                                   "settings"),
-            (("chrome", "browser", "search the web", "google.com", "url"),    "chrome"),
             (("whatsapp",),                                                   "whatsapp"),
             (("spotify", "music", "playlist"),                                "spotify"),
         ]
@@ -1573,10 +1488,14 @@ class MobileCodeGenStrategy:
             f"params={list(params.raw.keys())} | retry={'yes' if error_ctx else 'no'}"
         )
         logger.debug(f"[LLM] USER_PROMPT:\n{user_prompt}")
+        # Use the dynamic system prompt (base + app playbook)
+        system_prompt = _build_codegen_system_prompt(app)
+        logger.debug(f"[LLM] System prompt: {len(system_prompt)} chars | app={app}")
+
         response = await self._llm_chat(
             model=self.model,
             messages=[
-                {"role": "system", "content": _CODEGEN_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=0.1,
@@ -1658,7 +1577,16 @@ class MobileCodeGenStrategy:
         params = ParameterExtractor.extract(task.ai_prompt, task.extra_params)
         logger.info(f"[PARAMS] {params}")
 
-        app, package = self._infer_app(f"{task.ai_prompt} {overall_goal}")
+        # Respect explicit app_name from coordinator FIRST — it's more reliable
+        # than text-based inference which can misfire on content like "vets in New Cairo".
+        explicit_app = (task.extra_params or {}).get("app_name", "").lower().strip()
+        if explicit_app and explicit_app not in ("email",):  # "email" still needs mapping
+            _explicit_pkg = APP_PACKAGES.get(explicit_app, "")
+            app, package = (explicit_app, _explicit_pkg) if _explicit_pkg else self._infer_app(
+                f"{explicit_app} {task.ai_prompt} {overall_goal}"
+            )
+        else:
+            app, package = self._infer_app(f"{explicit_app} {task.ai_prompt} {overall_goal}")
         explicit_app = (task.extra_params.get("app_name") or "").strip().lower()
         if explicit_app and explicit_app in APP_PACKAGES:
             app     = explicit_app
@@ -1690,20 +1618,58 @@ class MobileCodeGenStrategy:
                 else:
                     outcome = await executor.execute(injected, params)
                     if outcome.success:
-                        self.cache.mark_success(template.template_id)
                         elapsed_ms = int((time.monotonic() - t0) * 1000)
-                        logger.info(f"✅ [T1] Cache hit success | {elapsed_ms}ms")
 
-                        # Capture stdout content if present
-                        stdout_content = (outcome.stdout or "").strip()
-                        content_lines = [l for l in stdout_content.splitlines()
-                                         if l.strip() and l.strip() != "TASK_COMPLETE"]
-                        cr = "\n".join(content_lines) if content_lines else f"Template cache (sim={score:.2f})"
-
-                        return self._build_result(
-                            task.task_id, "success", 1, elapsed_ms,
-                            completion_reason=cr,
+                        # Verify outcome for tasks where cached code can silently
+                        # produce wrong results (e.g. alarm set to default time).
+                        # For clock/alarm tasks, the old cached template may have
+                        # been stored before the mode-switch fix and still taps a
+                        # dial that ignores set_text(). We catch this here.
+                        needs_verify = app == "clock" or any(
+                            k in task.ai_prompt.lower()
+                            for k in ("alarm", "set the alarm", "time to")
                         )
+                        if needs_verify:
+                            _settle = 1.5
+                            logger.info(f"[T1] Settling {_settle}s before verify (alarm task)...")
+                            await asyncio.sleep(_settle)
+                            verified, reason = await self._verify_task_completion(
+                                task.ai_prompt, app, params
+                            )
+                            if not verified:
+                                logger.warning(
+                                    f"[T1] Cache hit verification FAILED: {reason} "
+                                    f"— invalidating template and regenerating"
+                                )
+                                self.cache.mark_failure(template.template_id)
+                                # Force reliability below threshold so it won't be used again
+                                t = self.cache._store.get(template.template_id)
+                                if t:
+                                    t.failure_count += 3   # penalise heavily
+                                    self.cache._save()
+                                # Fall through to LLM generation below
+                            else:
+                                self.cache.mark_success(template.template_id)
+                                logger.info(f"✅ [T1] Cache hit success + verified | {elapsed_ms}ms | {reason}")
+                                stdout_content = (outcome.stdout or "").strip()
+                                content_lines = [l for l in stdout_content.splitlines()
+                                                 if l.strip() and l.strip() != "TASK_COMPLETE"]
+                                cr = "\n".join(content_lines) if content_lines else f"Template cache (sim={score:.2f})"
+                                return self._build_result(
+                                    task.task_id, "success", 1, elapsed_ms,
+                                    completion_reason=cr,
+                                )
+                        else:
+                            self.cache.mark_success(template.template_id)
+                            logger.info(f"✅ [T1] Cache hit success | {elapsed_ms}ms")
+                            stdout_content = (outcome.stdout or "").strip()
+                            content_lines = [l for l in stdout_content.splitlines()
+                                             if l.strip() and l.strip() != "TASK_COMPLETE"]
+                            cr = "\n".join(content_lines) if content_lines else f"Template cache (sim={score:.2f})"
+                            return self._build_result(
+                                task.task_id, "success", 1, elapsed_ms,
+                                completion_reason=cr,
+                            )
                     elif "NameError" in (outcome.error_summary or ""):
                         # Stale template references an undefined variable
                         logger.warning(

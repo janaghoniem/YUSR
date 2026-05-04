@@ -155,10 +155,10 @@ async def text_to_speech(request: Request):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_audio:
             tmp_path = tmp_audio.name
 
-        tts = gTTS(text=text, lang=lang, tld=tld, slow=False)
-        tts.save(tmp_path)
-
         try:
+            tts = gTTS(text=text, lang=lang, tld=tld, slow=False)
+            tts.save(tmp_path)
+
             with open(tmp_path, "rb") as audio_file:
                 audio_bytes = audio_file.read()
 

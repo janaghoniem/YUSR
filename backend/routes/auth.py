@@ -1,18 +1,45 @@
+import asyncio
 import hashlib
 import logging
 import os
 import uuid
 from datetime import datetime
 
+import bcrypt
 import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from pymongo import MongoClient
 
 from face_auth import face_auth
+from core.mongo import get_database
 from core.dependencies import logger
 
 router = APIRouter()
+
+
+def _get_aura_db():
+    return get_database("aura_db")
+
+
+def _hash_password(password: str) -> str:
+    if not password:
+        return ""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    if not password or not stored_hash:
+        return False
+
+    stored = stored_hash.strip()
+    if stored.startswith("$2"):
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), stored.encode("utf-8"))
+        except ValueError:
+            return False
+
+    legacy_hash = hashlib.sha256(password.encode()).hexdigest()
+    return legacy_hash == stored
 
 
 class OnboardingData(BaseModel):
@@ -34,21 +61,22 @@ async def create_account(data: OnboardingData):
         from dotenv import load_dotenv
         load_dotenv()
 
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
         users_col = db["users"]
 
-        existing_user = users_col.find_one({"username": data.username})
+        existing_user = await asyncio.to_thread(users_col.find_one, {"username": data.username})
         if existing_user:
             logger.warning(f"Duplicate username attempt: {data.username}")
             raise HTTPException(status_code=409, detail="Username already taken")
 
-        existing_by_id = users_col.find_one({"user_id": data.user_id})
+        existing_by_id = await asyncio.to_thread(users_col.find_one, {"user_id": data.user_id})
         if existing_by_id:
             logger.warning(f"Duplicate user_id attempt: {data.user_id}")
             raise HTTPException(status_code=409, detail="User ID already exists")
 
-        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest() if data.password else ""
+        hashed_pw = _hash_password(data.password)
 
         user_doc = {
             "user_id": data.user_id,
@@ -62,7 +90,7 @@ async def create_account(data: OnboardingData):
             "has_face_auth": True,
         }
 
-        users_col.insert_one(user_doc)
+        await asyncio.to_thread(users_col.insert_one, user_doc)
         logger.info(f"✅ Account created for user_id: {data.user_id}, username: {data.username}")
 
         try:
@@ -196,17 +224,24 @@ class LoginData(BaseModel):
 @router.post("/onboarding/login")
 async def login(data: LoginData):
     try:
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
 
-        hashed_pw = hashlib.sha256(data.password.encode()).hexdigest()
-        user = db["users"].find_one({
-            "username": data.username,
-            "password_hash": hashed_pw
-        })
+        users_col = db["users"]
+        user = await asyncio.to_thread(users_col.find_one, {"username": data.username})
 
-        if not user:
+        if not user or not _verify_password(data.password, user.get("password_hash", "")):
             raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        stored_hash = str(user.get("password_hash", ""))
+        if stored_hash and not stored_hash.startswith("$2"):
+            upgraded_hash = _hash_password(data.password)
+            await asyncio.to_thread(
+                users_col.update_one,
+                {"_id": user["_id"]},
+                {"$set": {"password_hash": upgraded_hash}},
+            )
 
         return {
             "status": "ok",
@@ -253,9 +288,10 @@ async def verify_face_login(request: Request):
         if not verified:
             raise HTTPException(status_code=401, detail=result)
 
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
-        user = db["users"].find_one({"username": username})
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
+        user = await asyncio.to_thread(db["users"].find_one, {"username": username})
 
         if not user:
             raise HTTPException(status_code=404, detail="User account not found")
@@ -330,10 +366,11 @@ async def login_face_only(request: Request):
         if not encoding:
             raise HTTPException(status_code=400, detail=message)
 
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
 
-        all_face_users = list(db["face_auth_data"].find({}))
+        all_face_users = await asyncio.to_thread(lambda: list(db["face_auth_data"].find({})))
 
         if not all_face_users:
             logger.warning("No face data found in database")
@@ -391,7 +428,7 @@ async def login_face_only(request: Request):
                 detail=f"Face not recognized. Best match confidence: {best_match['confidence_percent']:.1f}% (need > {face_auth.min_confidence_percent:.0f}%). Please ensure good lighting and look directly at the camera."
             )
 
-        user = db["users"].find_one({"user_id": best_match["user_data"]["user_id"]})
+        user = await asyncio.to_thread(db["users"].find_one, {"user_id": best_match["user_data"]["user_id"]})
 
         if not user:
             logger.error(f"User account not found for user_id: {best_match['user_data']['user_id']}")
@@ -443,10 +480,11 @@ async def register_face(request: Request):
         if not encoding:
             raise HTTPException(status_code=400, detail=message)
 
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
 
-        existing_face = db["face_auth_data"].find_one({"user_id": user_id})
+        existing_face = await asyncio.to_thread(db["face_auth_data"].find_one, {"user_id": user_id})
         if existing_face and existing_face.get("username") != username:
             logger.warning(f"User ID {user_id} is already associated with username {existing_face['username']}")
             raise HTTPException(
@@ -483,63 +521,14 @@ async def register_face(request: Request):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@router.get("/debug/user-sessions/{user_id}")
-async def debug_user_sessions(user_id: str):
-    """
-    Debug endpoint to list all sessions for a user
-    (Remove in production or add authentication)
-    """
-    try:
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["yusr_db"]
-
-        sessions = list(db["language_agent_conversations"].find(
-            {"user_id": user_id},
-            {"session_id": 1, "title": 1, "timestamp": 1}
-        ).sort("timestamp", -1))
-
-        return {
-            "user_id": user_id,
-            "session_count": len(sessions),
-            "sessions": sessions
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.delete("/onboarding/cleanup-user/{user_id}")
-async def cleanup_user_data(user_id: str):
-    """
-    Cleanup endpoint to remove all traces of a user
-    Useful for debugging and testing
-    """
-    try:
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
-
-        user_result = db["users"].delete_one({"user_id": user_id})
-        face_result = db["face_auth_data"].delete_one({"user_id": user_id})
-        conv_result = db["language_agent_conversations"].delete_many({"user_id": user_id})
-
-        return {
-            "status": "success",
-            "deleted": {
-                "user": user_result.deleted_count,
-                "face_data": face_result.deleted_count,
-                "conversations": conv_result.deleted_count
-            }
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
 @router.get("/user/profile")
 async def get_user_profile(user_id: str):
     """Get user profile (name, email)"""
     try:
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
-        user = db["users"].find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
+        user = await asyncio.to_thread(db["users"].find_one, {"user_id": user_id}, {"_id": 0, "password_hash": 0})
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         return {
@@ -563,12 +552,16 @@ class UpdateProfileData(BaseModel):
 async def update_user_profile(data: UpdateProfileData):
     """Update user name and/or email"""
     try:
-        client = MongoClient(os.getenv("MONGODB_URI"))
-        db = client["aura_db"]
+        db = _get_aura_db()
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database unavailable")
 
         update_fields = {}
         if data.username:
-            existing = db["users"].find_one({"username": data.username, "user_id": {"$ne": data.user_id}})
+            existing = await asyncio.to_thread(
+                db["users"].find_one,
+                {"username": data.username, "user_id": {"$ne": data.user_id}},
+            )
             if existing:
                 raise HTTPException(status_code=409, detail="Username already taken")
             update_fields["username"] = data.username
@@ -578,9 +571,10 @@ async def update_user_profile(data: UpdateProfileData):
         if not update_fields:
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        result = db["users"].update_one(
+        result = await asyncio.to_thread(
+            db["users"].update_one,
             {"user_id": data.user_id},
-            {"$set": update_fields}
+            {"$set": update_fields},
         )
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="User not found")

@@ -14,26 +14,29 @@ from typing import List, Dict, Optional, Tuple, Any
 import asyncio
 import logging
 from groq import Groq
-from mistralai.client import Mistral
+from mistralai import Mistral
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from agents.utils.protocol import AgentMessage, MessageType, AgentType, ClarificationMessage
 from dotenv import load_dotenv
 from ThinkingStepManager import ThinkingStepManager
 from agents.security.input_sanitiser import sanitise_input
+from core.mongo import get_database
+from routes.cross_platform_manager import detect_cross_platform_intent
+from utils.semantic_intent import classify_draft_reading_intent, classify_polar_intent
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # -----------------------
-# CONFIG - GROQ API
+# CONFIG - PRIMARY: MISTRAL, FALLBACK: GROQ
 # -----------------------
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
-MODEL_NAME = "llama-3.3-70b-versatile"
+GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
 MISTRAL_MODEL_NAME = os.environ.get("MISTRAL_MODEL", "mistral-medium-latest")
-client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 CONV_SAVE_PATH = "conversations.jsonl"
 TASKS_SAVE_PATH = "tasks.jsonl"
@@ -171,10 +174,28 @@ def is_explicit_send_email_task(text: str) -> bool:
     has_body = bool(re.search(r"\b(content|body|message|text)\b", lowered))
     return has_send_verb and has_email_word and has_recipient and has_subject and has_body
 
+
+def is_actionable_plan_learning_intent(text: str) -> bool:
+    """Detect high-level intents that should directly trigger executable planning."""
+    if not text:
+        return False
+    lowered = text.strip().lower()
+
+    learning_pattern = re.compile(
+        r"\b(i\s+want\s+to\s+learn|i\s+would\s+like\s+to\s+learn|help\s+me\s+learn|learn\s+)\b"
+    )
+    plan_pattern = re.compile(
+        r"\b(make\s+a\s+plan\s+for\s+me|create\s+a\s+plan\s+for\s+me|plan\s+for\s+me|build\s+a\s+plan\s+for\s+me)\b"
+    )
+
+    # Require some concrete topic words for "learn" requests.
+    has_topic = len([w for w in re.findall(r"[a-zA-Z0-9]+", lowered) if len(w) > 2]) >= 3
+    return bool(plan_pattern.search(lowered) or (learning_pattern.search(lowered) and has_topic))
+
 # -----------------------
-# Groq API Call
+# Language Model Call
 # -----------------------
-def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
+def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS, user_id: Optional[str] = None) -> str:
     def _extract_mistral_text(response_obj: Any) -> str:
         try:
             choices = getattr(response_obj, "choices", None) or []
@@ -194,12 +215,29 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
         except Exception:
             return ""
 
-    def _call_mistral_fallback() -> str:
-        if not mistral_client:
-            logger.warning("⚠️ Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+    def _call_groq_fallback() -> str:
+        if not groq_client:
+            logger.warning("⚠️ Groq fallback unavailable: GROQ_API_KEY is not set")
             return ""
         try:
-            # Keep message structure unchanged so prompt behavior matches Groq path.
+            completion = groq_client.chat.completions.create(
+                model=GROQ_MODEL_NAME,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=0.1,
+                top_p=0.9,
+                stream=False,
+            )
+            text = sanitize_text(completion.choices[0].message.content)
+            if text:
+                logger.info(f"✅ Language model fallback succeeded with Groq ({GROQ_MODEL_NAME})")
+            return text
+        except Exception as groq_err:
+            logger.error(f"❌ Groq fallback failed: {groq_err}")
+            return ""
+
+    try:
+        if mistral_client:
             completion = mistral_client.chat.complete(
                 model=MISTRAL_MODEL_NAME,
                 messages=messages,
@@ -208,30 +246,16 @@ def call_groq_api(messages: List[Dict[str, str]], max_tokens=MAX_TOKENS) -> str:
             )
             text = _extract_mistral_text(completion)
             if text:
-                logger.info(f"✅ Language model fallback succeeded with Mistral ({MISTRAL_MODEL_NAME})")
-            return text
-        except Exception as mistral_err:
-            logger.error(f"❌ Mistral fallback failed: {mistral_err}")
-            return ""
+                logger.info(f"✅ Language model primary succeeded with Mistral ({MISTRAL_MODEL_NAME})")
+                return text
+            logger.warning("⚠️ Mistral returned an empty response; trying Groq fallback.")
+            return _call_groq_fallback()
 
-    try:
-        if not client:
-            logger.warning("⚠️ Groq unavailable: GROQ_API_KEY is not set. Trying Mistral fallback.")
-            return _call_mistral_fallback()
-
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.1,
-            top_p=0.9,
-            stream=False
-        )
-        text = completion.choices[0].message.content
-        return sanitize_text(text)
+        logger.warning("⚠️ Mistral unavailable: MISTRAL_API_KEY is not set. Trying Groq fallback.")
+        return _call_groq_fallback()
     except Exception as e:
-        logger.warning(f"⚠️ Groq API Error, trying Mistral fallback: {e}")
-        return _call_mistral_fallback()
+        logger.warning(f"⚠️ Mistral API Error, trying Groq fallback: {e}")
+        return _call_groq_fallback()
 
 # ===========================================================================
 # DUAL-MODE PROMPTS
@@ -526,28 +550,24 @@ class LanguageAgent:
         self.awaiting_user_response = None
         # User profile for personalization (loaded from onboarding / memory)
         self.user_profile: Dict[str, Any] = {}
+        self.last_used = time.time()
 
-        # Initialize MongoDB client for persistent storage
-        try:
-            from pymongo import MongoClient
-            mongo_uri = os.getenv("MONGODB_URI")
-            if not mongo_uri:
-                raise ValueError("MONGODB_URI not configured")
-            self.mongo_client = MongoClient(mongo_uri)
-            self.mongo_client.admin.command('ping')
-            self.db = self.mongo_client["yusr_db"]
-            self.conversations = self.db["language_agent_conversations"]
-            logger.info(f"✅ Connected to MongoDB for session persistence")
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to MongoDB: {e}")
-            logger.warning("⚠️ Falling back to in-memory storage (will lose data on restart)")
-            self.mongo_client = None
-            self.conversations = None
+        # Use the shared pooled Mongo client rather than per-agent clients.
+        self.mongo_client = None
+        self.db = get_database("yusr_db")
+        self.conversations = self.db["language_agent_conversations"] if self.db is not None else None
+        if self.conversations is not None:
+            logger.info("✅ Connected to shared MongoDB for session persistence")
+        else:
+            logger.warning("⚠️ MongoDB not available, falling back to in-memory storage")
 
         self.memory = self._load_conversation()
 
         logger.info(f"✅ Language Agent initialized for session {session_id}, user {user_id}")
         logger.info(f"📚 Loaded {len(self.memory) - 1} previous messages")
+
+    def touch(self) -> None:
+        self.last_used = time.time()
 
     def _load_conversation(self) -> List[Dict[str, str]]:
         """Load conversation history from MongoDB"""
@@ -591,6 +611,7 @@ class LanguageAgent:
             detected = detect_language_from_text(input_text)
             self.preferred_language = detected
             self.output_language = detected
+            self.touch()
             logger.info(f"🌐 Language detected from input text: {detected}")
             return
 
@@ -603,6 +624,7 @@ class LanguageAgent:
             self.preferred_language = "en"
             self.output_language = "en"
         # If lang is empty/unknown, keep the session-persisted value (Priority 3 — no-op)
+        self.touch()
 
     def set_user_profile(self, profile: Dict[str, Any]):
         """Update the user profile used for personalized communication."""
@@ -641,7 +663,7 @@ class LanguageAgent:
                 )
             }
         ]
-        repaired = call_groq_api(repair_messages, max_tokens=220)
+        repaired = call_groq_api(repair_messages, max_tokens=220, user_id=self.user_id)
         return repaired or response
 
     # -----------------------------------------------------------------------
@@ -662,6 +684,7 @@ class LanguageAgent:
             {"message": str, "follow_ups": List[str]}
         """
         effective_lang = lang or self.preferred_language
+        self.touch()
         comm_system = build_communication_prompt(self.user_profile, effective_lang)
 
         # Try the cache first for predictable follow-ups
@@ -680,7 +703,7 @@ class LanguageAgent:
             {"role": "user", "content": user_content}
         ]
 
-        raw = call_groq_api(messages, max_tokens=300)
+        raw = call_groq_api(messages, max_tokens=300, user_id=self.user_id)
         try:
             # Strip markdown fences if present
             cleaned = raw.strip()
@@ -729,6 +752,7 @@ class LanguageAgent:
     # -----------------------------------------------------------------------
     def resolve_contextual_follow_up(self, user_text: str) -> Optional[Dict[str, Any]]:
         context = self.awaiting_user_response or {}
+        self.touch()
         metadata = context.get("metadata") if isinstance(context, dict) else {}
         if not isinstance(metadata, dict):
             return None
@@ -792,6 +816,7 @@ class LanguageAgent:
             return None
 
         context = self.awaiting_user_response or {}
+        self.touch()
         pending_question = context.get("question", "")
         source = context.get("source", "")
 
@@ -854,7 +879,7 @@ class LanguageAgent:
         ]
 
         try:
-            continuation = call_groq_api(messages, max_tokens=300)
+            continuation = call_groq_api(messages, max_tokens=300, user_id=self.user_id)
         except Exception:
             continuation = (
                 "حسنًا، دعني أكمل..." if lang == "ar" else "Sure, let me continue..."
@@ -881,6 +906,7 @@ class LanguageAgent:
         clean_text = sanitize_text(text)
         if not clean_text:
             return
+        self.touch()
         self.memory.append({"role": "assistant", "content": clean_text})
         if len(self.memory) > 21:
             preserved = [self.memory[0]]
@@ -923,6 +949,7 @@ class LanguageAgent:
 
     def save_memory(self):
         """Save to both JSONL (backup) and MongoDB (persistence)"""
+        self.touch()
         try:
             append_jsonl(self.save_path, {
                 "id": uuid.uuid4().hex,
@@ -1163,6 +1190,7 @@ class LanguageAgent:
         Returns: (response_text, is_complete, personal_info, output_language)
         """
         user_text = sanitize_text(user_text)
+        self.touch()
         current_lang = self.preferred_language or "en"
         # self.memory.append({"role": "user", "content": user_text})
         wrapped_text = f"<user_input>{user_text}</user_input>"
@@ -1200,11 +1228,31 @@ class LanguageAgent:
             personal_info = None
             output_language = current_lang
             print("✓")
+        elif is_actionable_plan_learning_intent(user_text):
+            response_text = (
+                "ممتاز، سأجهز لك خطة تنفيذية الآن."
+                if current_lang == "ar"
+                else "Great, I will create an actionable plan for you now."
+            )
+            response = json.dumps(
+                {
+                    "is_complete": True,
+                    "response_text": response_text,
+                    "original_task": user_text,
+                    "personal_info": None,
+                    "output_language": current_lang,
+                },
+                ensure_ascii=False,
+            )
+            is_complete = True
+            personal_info = None
+            output_language = current_lang
+            print("✓")
         else:
             # max_tokens must be large enough to contain a full JSON response including
             # any story/answer text in response_text without truncation.
             # 200 was too small — raising to MAX_TOKENS (600) to match the global config.
-            response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=MAX_TOKENS)
+            response = call_groq_api(self._build_turn_messages(current_lang), max_tokens=MAX_TOKENS, user_id=self.user_id)
             print("✓")
 
             if not response:
@@ -1232,12 +1280,23 @@ class LanguageAgent:
     def clear_conversation(self):
         """Clear conversation history (for new chat)"""
         self.memory = [self.system_prompt]
+        self.touch()
         self._save_conversation()
         logger.info(f"🔄 Cleared conversation for session {self.session_id}")
 
 
 # Store active agents by agent_key {user_id}_{session_id}
 active_agents: Dict[str, LanguageAgent] = {}
+
+
+def _enforce_active_agent_limit(max_agents: int = 200) -> None:
+    if len(active_agents) <= max_agents:
+        return
+
+    overflow = len(active_agents) - max_agents
+    for key, _agent in sorted(active_agents.items(), key=lambda item: getattr(item[1], "last_used", 0))[:overflow]:
+        active_agents.pop(key, None)
+        logger.info(f"🧹 Evicted stale language agent: {key}")
 
 def get_agent_for_session(session_id: str) -> Optional[LanguageAgent]:
     """Retrieve an active agent purely by session_id suffix."""
@@ -1261,7 +1320,7 @@ def _get_agent_by_user(user_id: str) -> Optional[LanguageAgent]:
 
 async def start_language_agent(broker):
     print("=" * 70)
-    print("🤖 CONVERSATIONAL CLARITY AGENT - READY (GROQ)!")
+    print("🤖 CONVERSATIONAL CLARITY AGENT - READY (MISTRAL)!")
     print("=" * 70)
     print("Waiting for user requests...\n")
 
@@ -1272,7 +1331,9 @@ async def start_language_agent(broker):
         # If it exactly matches, return it.
         if agent_key in active_agents:
             logger.info(f"♻️ Reusing existing agent for session {session_id}")
-            return active_agents[agent_key]
+            agent = active_agents[agent_key]
+            agent.touch()
+            return agent
             
         # The mobile flutter app constantly creates new session IDs on every request,
         # destroying the pending confirmation context. 
@@ -1280,23 +1341,33 @@ async def start_language_agent(broker):
         existing_user_agent = _get_agent_by_user(user_id)
         if existing_user_agent and existing_user_agent.awaiting_user_response:
             logger.warning(f"⚠️ Mobile App Session drift detected. User {user_id} rotated session {existing_user_agent.session_id} -> {session_id}. Transferring state.")
-            # Transfer the pending response state to a new agent 
-            # Or instead of creating a new agent, we can just return the old one?
-            # Creating a new agent is safer so we comply with DB session structures.
-            new_agent = LanguageAgent(session_id, user_id)
-            new_agent.awaiting_user_response = existing_user_agent.awaiting_user_response
-            new_agent.preferred_language = existing_user_agent.preferred_language
-            
-            # Clean up old agent
+            try:
+                new_agent = LanguageAgent(session_id, user_id)
+                new_agent.awaiting_user_response = existing_user_agent.awaiting_user_response
+                new_agent.preferred_language = existing_user_agent.preferred_language
+                new_agent.output_language = existing_user_agent.output_language
+                if existing_user_agent.user_profile:
+                    new_agent.user_profile = dict(existing_user_agent.user_profile)
+                new_agent.touch()
+                new_agent.save_memory()
+            except Exception as transfer_exc:
+                logger.warning(f"⚠️ Session state transfer failed, falling back to persisted state: {transfer_exc}")
+                new_agent = LanguageAgent(session_id, user_id)
+                if existing_user_agent.awaiting_user_response and not new_agent.awaiting_user_response:
+                    new_agent.awaiting_user_response = existing_user_agent.awaiting_user_response
+                    new_agent.save_memory()
+
             old_key = f"{user_id}_{existing_user_agent.session_id}"
             if old_key in active_agents:
                 del active_agents[old_key]
-                
+
             active_agents[agent_key] = new_agent
+            _enforce_active_agent_limit()
             return new_agent
 
         logger.info(f"🆕 Creating new agent for session {session_id}, user {user_id}")
         active_agents[agent_key] = LanguageAgent(session_id, user_id)
+        _enforce_active_agent_limit()
         return active_agents[agent_key]
 
     async def handle_user_input(message: dict):
@@ -1337,6 +1408,7 @@ async def start_language_agent(broker):
         # ── NEW: Intent Classification (zero token cost) ─────────────────────
         # Get or create agent early to manage state
         agent = get_or_create_agent(session_id, user_id)
+        agent.touch()
 
         # ── Handle Security Confirmation ──────────────────────────────────────
         # ── Handle Security Confirmation ──────────────────────────────────────
@@ -1694,6 +1766,10 @@ async def start_language_agent(broker):
             # ──────────────────────────────────────────────────────────────────────
 
         if is_complete:
+            cross_platform_intent = detect_cross_platform_intent(input_text, source_platform=device_type)
+            if cross_platform_intent:
+                device_type = "mixed"
+
             await ThinkingStepManager.update_step(
                 session_id, "preparing_for_coordinator", http_request_id,
                 language=agent.preferred_language
@@ -1764,7 +1840,11 @@ async def start_language_agent(broker):
         agent = get_or_create_agent(session_id, user_id)
         
         is_ar = (agent.preferred_language == "ar")
-        question = "هل يجب أن أكمل؟\n\n" if is_ar else "I have drafted the content. Should I proceed?\n\n"
+        question = (
+            "هل تريد أن أقرأ المحتوى المُسود بصوت عالٍ؟"
+            if is_ar
+            else "Do you want to listen to the drafted content?"
+        )
         if input_content:
             try:
                 import json

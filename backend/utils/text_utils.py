@@ -1,4 +1,8 @@
 import re
+from utils.semantic_intent import (
+    classify_interrupt_semantic,
+    classify_polar_intent,
+)
 
 INTERRUPT_COMMANDS = {
     # English
@@ -37,15 +41,10 @@ def normalize_arabic(text: str) -> str:
 
 
 def detect_interrupt(text: str):
-    """Detect interrupt command in text (case-insensitive, supports prefix match)."""
-    text_lower = (text or "").strip().lower()
-    if not text_lower:
-        return None
+    """Detect interrupt command in text using semantic matching."""
+    return classify_interrupt_semantic(text, INTERRUPT_COMMANDS)
 
-    if text_lower in INTERRUPT_COMMANDS:
-        return INTERRUPT_COMMANDS[text_lower]
 
-    for cmd, action in INTERRUPT_COMMANDS.items():
-        if text_lower.startswith(cmd):
-            return action
-    return None
+def classify_confirmation_intent(text: str) -> str:
+    """Classify user answer as affirmative, negative, or unknown."""
+    return classify_polar_intent(text).label

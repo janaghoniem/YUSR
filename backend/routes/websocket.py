@@ -13,7 +13,7 @@ from core.dependencies import (
     pending_responses,
     ws_manager,
 )
-from utils.text_utils import detect_interrupt, detect_language_from_text
+from utils.text_utils import classify_confirmation_intent, detect_interrupt, detect_language_from_text
 
 router = APIRouter()
 
@@ -127,9 +127,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 frontend_hint = data.get("user_language", "en")
                 user_language = detected_language if detected_language in ("en", "ar") else frontend_hint
 
+                from routes.cross_platform_manager import get_cross_platform_manager
                 if not user_text:
                     continue
 
+
+                # Cache session -> device linkage so we can update device online status on disconnect.
+                _WS_DEVICE_CONTEXT: dict[str, dict] = {}
                 interrupt_action = detect_interrupt(user_text)
                 if interrupt_action:
                     logger.info(f"🛑 Voice/text interrupt detected: '{user_text}' → {interrupt_action}")
@@ -150,7 +154,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             is_reversible=False
                         )
                         context_snapshots[session_id] = snapshot
-
+                    await ws_manager.connect(session_id, websocket)
                     await ws_manager.send_to_session(session_id, {
                         "type": "interrupt_ack",
                         "command": interrupt_action,
@@ -185,10 +189,35 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         response = await asyncio.wait_for(fut, timeout=AGENT_RESPONSE_TIMEOUT_SECONDS)
                         await ThinkingStepManager.clear_steps(session_id)
 
+                                device_id = data.get("device_id") or session_id
+
+                                if user_id and device_id:
+                                    _WS_DEVICE_CONTEXT[session_id] = {
+                                        "user_id": user_id,
+                                        "device_id": device_id,
+                                        "platform": "mobile" if str(device_type).lower() == "mobile" else "desktop",
+                                    }
+                                    mgr = get_cross_platform_manager()
+                                    if mgr:
+                                        try:
+                                            await mgr._registry.register_device(
+                                                user_id=user_id,
+                                                device_id=device_id,
+                                                platform=_WS_DEVICE_CONTEXT[session_id]["platform"],
+                                                session_id=session_id,
+                                                label=f"{_WS_DEVICE_CONTEXT[session_id]['platform'].capitalize()} {device_id}",
+                                            )
+                                        except Exception as reg_err:
+                                            logger.debug(f"⚠️ WebSocket device registration failed: {reg_err}")
                         ws_response = {"type": "completion"}
                         if isinstance(response, dict):
                             if response.get("status") == "clarification_needed":
                                 structured = response.get("structured_response") or {}
+                                full_content = structured.get("full_content") or response.get("full_content", "")
+                                content_pages = structured.get("content_pages") or response.get("content_pages", [])
+                                offer_read_aloud = bool(
+                                    structured.get("offer_read_aloud", response.get("offer_read_aloud", False))
+                                )
                                 ws_response = {
                                     "type": "clarification",
                                     "question": response.get("question", ""),
@@ -197,8 +226,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     "text": response.get("text", ""),
                                     "spoken_text": response.get("text", ""),
                                     "structured_response": structured,
-                                    "full_content": structured.get("full_content", ""),
-                                    "offer_read_aloud": structured.get("offer_read_aloud", False),
+                                    "full_content": full_content,
+                                    "content_pages": content_pages,
+                                    "offer_read_aloud": offer_read_aloud,
                                     "offer_actions": structured.get("offer_actions", []),
                                 }
                             elif response.get("status") == "confirmation_needed":
@@ -282,17 +312,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                     continue
 
-                _CONFIRM_WORDS = {
-                    "yes", "y", "ok", "okay", "sure", "proceed", "do it", "done",
-                    "no", "cancel", "stop", "نعم", "موافق", "لا", "آه", "إلغاء",
-                }
-                _answer_lower = answer.lower().strip()
-                _is_short_confirmation = (
-                    _answer_lower in _CONFIRM_WORDS
-                    or (len(answer.split()) <= 4 and not any(
-                        kw in _answer_lower for kw in ["delete", "open", "create", "list", "send", "copy", "move", "show"]
-                    ))
-                )
+                _is_short_confirmation = classify_confirmation_intent(answer) in {"affirmative", "negative"}
 
                 _msg_type = MessageType.CONFIRMATION_RESPONSE if _is_short_confirmation else MessageType.TASK_REQUEST
 
@@ -332,6 +352,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 }
                             elif response.get("status") == "clarification_needed":
                                 structured = response.get("structured_response") or {}
+                                full_content = structured.get("full_content") or response.get("full_content", "")
+                                content_pages = structured.get("content_pages") or response.get("content_pages", [])
+                                offer_read_aloud = bool(
+                                    structured.get("offer_read_aloud", response.get("offer_read_aloud", False))
+                                )
                                 ws_resp = {
                                     "type": "clarification_needed",
                                     "question": response.get("question", ""),
@@ -340,8 +365,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     "text": response.get("text", ""),
                                     "spoken_text": response.get("text", ""),
                                     "structured_response": structured,
-                                    "full_content": structured.get("full_content", ""),
-                                    "offer_read_aloud": structured.get("offer_read_aloud", False),
+                                    "full_content": full_content,
+                                    "content_pages": content_pages,
+                                    "offer_read_aloud": offer_read_aloud,
                                     "offer_actions": structured.get("offer_actions", []),
                                 }
                             else:
@@ -374,6 +400,32 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         ws_manager.disconnect(session_id)
+        context = _WS_DEVICE_CONTEXT.pop(session_id, None)
+        if context:
+            mgr = get_cross_platform_manager()
+            if mgr:
+                try:
+                    await mgr._registry.set_device_online(
+                        user_id=context.get("user_id", ""),
+                        device_id=context.get("device_id", ""),
+                        session_id=session_id,
+                        online=False,
+                    )
+                except Exception as off_err:
+                    logger.debug(f"⚠️ WebSocket device offline update failed: {off_err}")
     except Exception as exc:
         logger.error(f"❌ WebSocket error: {exc}", exc_info=True)
         ws_manager.disconnect(session_id)
+        context = _WS_DEVICE_CONTEXT.pop(session_id, None)
+        if context:
+            mgr = get_cross_platform_manager()
+            if mgr:
+                try:
+                    await mgr._registry.set_device_online(
+                        user_id=context.get("user_id", ""),
+                        device_id=context.get("device_id", ""),
+                        session_id=session_id,
+                        online=False,
+                    )
+                except Exception as off_err:
+                    logger.debug(f"⚠️ WebSocket device offline update failed: {off_err}")

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from langgraph.func import task
 from langgraph.graph import StateGraph, END
 from typing import Dict, Any, List, Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pymongo import MongoClient
 from datetime import datetime
 from collections import deque
@@ -23,6 +23,7 @@ from agents.utils.broker import broker
 from agents.coordinator_agent.utils.intent_classifier import ExecutionMode  # kept for backward compat
 from utils.semantic_intent import is_relevant_to_task, relevance_score
 from ThinkingStepManager import ThinkingStepManager
+from routes.cross_platform_manager import get_cross_platform_manager
 
 # ICRL imports — In-Context Reinforcement Learning (arXiv:2506.06303)
 from agents.ICRL.icrl_buffer import ICRLBuffer
@@ -34,13 +35,14 @@ ICRL_ENABLED = False
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-# --- Initialize Groq LLM ---
+# --- Initialize LLMs ---
 from .config.settings import LLM_MODEL, GROQ_API_KEY, MONGODB_URI
 from langchain_groq import ChatGroq
-from mistralai.client import Mistral
+from mistralai import Mistral
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL","mistral-medium-latest")
+EXECUTION_PAUSED = os.getenv("AURA_EXECUTION_PAUSED", "false").strip().lower() in {"1", "true", "yes"}
 
 llm = ChatGroq(
     model=LLM_MODEL,
@@ -73,33 +75,37 @@ def _extract_mistral_text(response_obj: Any) -> str:
 
 
 async def llm_invoke_with_fallback(prompt: str) -> str:
-    if llm:
+    if mistral_client:
         try:
-            response = await llm.ainvoke(prompt)
-            return response.content if hasattr(response, "content") else str(response)
-        except Exception as groq_err:
-            logger.warning(f"⚠️ Coordinator Groq call failed, trying Mistral fallback: {groq_err}")
+            response = await asyncio.to_thread(
+                mistral_client.chat.complete,
+                model=MISTRAL_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.05,
+                max_tokens=2048,
+            )
+            text = _extract_mistral_text(response)
+            if text:
+                logger.info(f"✅ Coordinator primary succeeded with Mistral ({MISTRAL_MODEL})")
+                return text
+            logger.warning("⚠️ Coordinator Mistral returned an empty response; trying Groq backup.")
+        except Exception as mistral_err:
+            logger.warning(f"⚠️ Coordinator Mistral call failed, trying Groq backup: {mistral_err}")
     else:
-        logger.warning("⚠️ Coordinator Groq client unavailable: GROQ_API_KEY is not set")
+        logger.warning("⚠️ Coordinator Mistral client unavailable: MISTRAL_API_KEY is not set")
 
-    if not mistral_client:
-        logger.error("❌ Coordinator Mistral fallback unavailable: MISTRAL_API_KEY is not set")
+    if not llm:
+        logger.error("❌ Coordinator Groq backup unavailable: GROQ_API_KEY is not set")
         return ""
 
     try:
-        response = await asyncio.to_thread(
-            mistral_client.chat.complete,
-            model=MISTRAL_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.05,
-            max_tokens=2048,
-        )
-        text = _extract_mistral_text(response)
+        response = await llm.ainvoke(prompt)
+        text = response.content if hasattr(response, "content") else str(response)
         if text:
-            logger.info(f"✅ Coordinator fallback succeeded with Mistral ({MISTRAL_MODEL})")
+            logger.info(f"✅ Coordinator backup succeeded with Groq ({LLM_MODEL})")
         return text
-    except Exception as mistral_err:
-        logger.error(f"❌ Coordinator Mistral fallback failed: {mistral_err}")
+    except Exception as groq_err:
+        logger.error(f"❌ Coordinator Groq backup failed: {groq_err}")
         return ""
 
 
@@ -1426,6 +1432,13 @@ class ActionTask(BaseModel):
     depends_on: Optional[List[str]] = None
     success_message: Optional[str] = None
     failure_message: Optional[str] = None
+
+    @field_validator("task_id", mode="before")
+    @classmethod
+    def _coerce_task_id(cls, value):
+        if value is None or value == "":
+            return str(uuid.uuid4())
+        return str(value)
     
     class Config:
         use_enum_values = True
@@ -2520,6 +2533,48 @@ def create_coordinator_graph():
         original_message_id = state.get("original_message_id")
         device_type = _normalize_device_type(raw_task.get("device_type", "desktop"))
 
+        cross_device_target = raw_task.get("cross_device_target") or {}
+        target_platform = raw_task.get("target_device") or cross_device_target.get("target_platform")
+        is_cross_platform = bool(cross_device_target) or device_type == "mixed"
+        if is_cross_platform:
+            mgr = get_cross_platform_manager()
+            source_device_id = raw_task.get("source_device_id") or raw_task.get("device_id") or session_id or ""
+            original_request = raw_task.get("original_input") or raw_task.get("confirmation") or ""
+            if mgr and session_id:
+                delivery = await mgr.deliver_task(
+                    user_id=user_id,
+                    source_device_id=source_device_id,
+                    source_session_id=session_id,
+                    target_platform=target_platform,
+                    task_payload=raw_task,
+                    original_request=original_request,
+                )
+                return {
+                    "input": state["input"],
+                    "tasks": [],
+                    "primary_tasks": [],
+                    "queued_task_plans": [],
+                    "status": "routed",
+                    "session_id": session_id,
+                    "original_message_id": original_message_id,
+                    "user_id": user_id,
+                    "preferences_context": "Cross-platform request routed",
+                    "plan_error": "",
+                    "routing_result": delivery,
+                }
+            return {
+                "input": state["input"],
+                "tasks": [],
+                "primary_tasks": [],
+                "queued_task_plans": [],
+                "status": "failed",
+                "session_id": session_id,
+                "original_message_id": original_message_id,
+                "user_id": user_id,
+                "preferences_context": "Cross-platform request failed",
+                "plan_error": "Cross-platform manager unavailable or session missing.",
+            }
+
         # Resume paused credentials-required tasks instead of decomposing a fresh plan.
         saved_browser = _session_browser_state.get(session_id, {}) if session_id else {}
         if saved_browser.get("pending_clarification_type") == "credentials_required":
@@ -2735,6 +2790,37 @@ def create_coordinator_graph():
         # user_profile: personalization data forwarded from Language Agent
         user_profile = state.get("input", {}).get("user_profile") or {}
         user_id = state.get("input", {}).get("user_id", "default_user")
+
+        if EXECUTION_PAUSED or state.get("input", {}).get("execution_mode") == "plan_only":
+            try:
+                await broker.publish(
+                    Channels.WEBSOCKET_OUTPUT,
+                    AgentMessage(
+                        message_type=MessageType.TASK_PROGRESS,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=original_message_id,
+                        payload={
+                            "ws_type": "task_progress",
+                            "stage": "coordinator",
+                            "phase": "execution_paused",
+                            "active": False,
+                            "queue_snapshot": task_queue.snapshot(),
+                        },
+                    ),
+                )
+            except Exception as pause_err:
+                logger.debug(f"⚠️ Failed to publish execution_paused update: {pause_err}")
+
+            return {
+                **state,
+                "results": {},
+                "execution_paused": True,
+                "status": "paused",
+                "session_id": session_id,
+                "original_message_id": original_message_id,
+            }
 
         async def handle_confirmation_revision_loop(current_task: ActionTask, initial_result: TaskResult) -> TaskResult:
             """
@@ -3422,6 +3508,131 @@ def create_coordinator_graph():
         success_count = sum(1 for r in results.values() if r.status == "success")
         total_count = len(results)
         plan_error = state.get("plan_error", "")
+
+        original_request = state["input"].get("original_input", state["input"].get("confirmation", state["input"].get("action", "")))
+        user_language = state["input"].get("user_language") or "en"
+        output_language = state["input"].get("output_language") or user_language
+        user_profile = state["input"].get("user_profile") or {}
+        is_arabic = user_language == "ar"
+
+        routing_result = state.get("routing_result")
+        if routing_result:
+            status = routing_result.get("status")
+            target_id = routing_result.get("target_device_id")
+            delivery_method = routing_result.get("delivery_method")
+
+            if status == "delivered":
+                response_text = (
+                    "تم إرسال المهمة للجهاز الآخر الآن."
+                    if is_arabic
+                    else "Sent the task to your other device now."
+                )
+            elif status == "queued":
+                response_text = (
+                    "الجهاز الآخر غير متصل الآن. تم حفظ المهمة وسيتم إرسالها عند الاتصال."
+                    if is_arabic
+                    else "The target device is offline. The task is queued and will be delivered when it reconnects."
+                )
+            else:
+                response_text = (
+                    "لم أجد جهازاً آخر متاحاً لهذا المستخدم. تأكد أن جهازاً آخر متصل."
+                    if is_arabic
+                    else "No other target device was found. Please make sure another device is connected."
+                )
+
+            structured = StructuredResponse(
+                type=ResponseType.SIMPLE_ACK,
+                spoken_text=response_text,
+                full_content="",
+                offer_read_aloud=False,
+                offer_actions=["retry"],
+                context_for_undo={"original_request": original_request},
+            )
+
+            response_msg = AgentMessage(
+                message_type=MessageType.TASK_RESPONSE,
+                sender=AgentType.COORDINATOR,
+                receiver=AgentType.LANGUAGE,
+                session_id=session_id,
+                response_to=original_message_id,
+                payload={
+                    "status": "completed",
+                    "response": response_text,
+                    "user_language": user_language,
+                    "output_language": output_language,
+                    "structured_response": structured.model_dump(),
+                    "routing": {
+                        "status": status,
+                        "target_device_id": target_id,
+                        "delivery_method": delivery_method,
+                    },
+                },
+            )
+            await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
+
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.STRUCTURED_RESPONSE,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        **structured.model_dump(),
+                        "user_language": user_language,
+                    },
+                ),
+            )
+            return {"status": "completed"}
+
+        if state.get("execution_paused"):
+            plan_count = len(state.get("tasks", []))
+            response_text = (
+                f"تم إيقاف التنفيذ مؤقتًا. الخطة جاهزة وبها {plan_count} خطوة."
+                if is_arabic
+                else f"Execution is paused. The plan is ready with {plan_count} steps."
+            )
+
+            structured = StructuredResponse(
+                type=ResponseType.SIMPLE_ACK,
+                spoken_text=response_text,
+                full_content="",
+                offer_read_aloud=False,
+                offer_actions=["resume", "retry"],
+                context_for_undo={"original_request": original_request},
+            )
+
+            response_msg = AgentMessage(
+                message_type=MessageType.TASK_RESPONSE,
+                sender=AgentType.COORDINATOR,
+                receiver=AgentType.LANGUAGE,
+                session_id=session_id,
+                response_to=original_message_id,
+                payload={
+                    "status": "paused",
+                    "response": response_text,
+                    "user_language": user_language,
+                    "output_language": output_language,
+                    "structured_response": structured.model_dump(),
+                },
+            )
+            await broker.publish(Channels.COORDINATOR_TO_LANGUAGE, response_msg)
+            await broker.publish(
+                Channels.WEBSOCKET_OUTPUT,
+                AgentMessage(
+                    message_type=MessageType.STRUCTURED_RESPONSE,
+                    sender=AgentType.COORDINATOR,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=original_message_id,
+                    payload={
+                        **structured.model_dump(),
+                        "user_language": user_language,
+                    },
+                ),
+            )
+            return {"status": "paused"}
         
 
         # Signal UI layers that coordinator execution phase finished.
@@ -3496,11 +3707,7 @@ def create_coordinator_graph():
             if len(state["conversation_history"]) > 10:
                 state["conversation_history"] = state["conversation_history"][-10:]
         
-        original_request = state["input"].get("original_input", state["input"].get("confirmation", state["input"].get("action", "")))
-        user_language = state["input"].get("user_language") or "en"
-        output_language = state["input"].get("output_language") or user_language
-        user_profile = state["input"].get("user_profile") or {}
-        is_arabic = user_language == "ar"
+        # original_request, user_language, output_language, user_profile, is_arabic are already defined above.
 
         if execution_clarification:
             decision = execution_clarification.get("decision")

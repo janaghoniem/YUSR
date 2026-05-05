@@ -355,6 +355,18 @@ async def observe_page_state(page) -> Dict[str, Any]:
         # Get comprehensive state
         state = await page.evaluate("""
             () => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                };
+
+                const modalCandidates = Array.from(document.querySelectorAll(
+                    '[role="dialog"], [aria-modal="true"], .modal, [class*="modal"], [class*="overlay"], [class*="popup"], [class*="pop-up"], [class*="lightbox"], [class*="backdrop"]'
+                ));
+                const visibleModals = modalCandidates.filter(isVisible);
+
                 const state = {
                     url: window.location.href,
                     title: document.title,
@@ -375,7 +387,9 @@ async def observe_page_state(page) -> Dict[str, Any]:
                         hasButtons: document.querySelectorAll('button, [role="button"]').length > 0,
                         hasInputs: document.querySelectorAll('input, textarea, select').length > 0,
                         hasLinks: document.querySelectorAll('a[href]').length > 0,
-                        hasModals: document.querySelectorAll('[role="dialog"], .modal, [class*="modal"]').length > 0,
+                        hasModals: visibleModals.length > 0,
+                        modalCount: modalCandidates.length,
+                        visibleModalCount: visibleModals.length,
                     },
                     
                     // Shopping features (ecommerce sites)
@@ -566,6 +580,7 @@ async def compare_states(before: Dict, after: Dict) -> Dict[str, Any]:
         'media_state_changed': False,
         'focus_changed': before.get('activeElement') != after.get('activeElement'),
         'scroll_changed': before.get('scrollPosition') != after.get('scrollPosition'),
+        'modal_changed': False,
     }
     
     # Check video state changes
@@ -595,11 +610,32 @@ async def compare_states(before: Dict, after: Dict) -> Dict[str, Any]:
                 audio_before.get('paused') != audio_after.get('paused') or
                 audio_before.get('muted') != audio_after.get('muted')
             )
+
+    interactive_before = before.get('interactive') or {}
+    interactive_after = after.get('interactive') or {}
+    modal_before = interactive_before.get('visibleModalCount')
+    modal_after = interactive_after.get('visibleModalCount')
+    if modal_before is not None and modal_after is not None:
+        changes['modal_changed'] = modal_before != modal_after
+        changes['modal_details'] = {
+            'before': modal_before,
+            'after': modal_after,
+        }
+    elif isinstance(interactive_before, dict) and isinstance(interactive_after, dict):
+        has_modals_before = interactive_before.get('hasModals')
+        has_modals_after = interactive_after.get('hasModals')
+        if has_modals_before is not None and has_modals_after is not None:
+            changes['modal_changed'] = has_modals_before != has_modals_after
+            changes['modal_details'] = {
+                'before': has_modals_before,
+                'after': has_modals_after,
+            }
     
     changes['any_change'] = any([
         changes['url_changed'],
         changes['media_state_changed'],
         changes['focus_changed'],
+        changes['modal_changed'],
     ])
     
     return changes
@@ -1190,6 +1226,8 @@ class WebExecutionPipeline:
             except Exception as e:
                 logger.warning(f"⚠️ OmniParser fallback unavailable: {e}")
                 self.omniparser_detector = None
+        else:
+            logger.info("ℹ️ OmniParser visual fallback disabled by config")
         
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -2292,6 +2330,54 @@ class WebExecutionPipeline:
         except Exception as e:
             logger.warning(f"⚠️ Visual fallback failed: {e}")
             return None
+
+    def _is_dismiss_popup_prompt(self, prompt_text: str) -> bool:
+        text = (prompt_text or "").lower()
+        return any(k in text for k in ["dismiss", "close", "popup", "pop up", "modal", "overlay", "banner", "no thanks", "not now"])
+
+    async def _dom_has_close_control(self, page) -> bool:
+        if not page:
+            return False
+        try:
+            return await page.evaluate("""
+                () => {
+                    const keywords = ['close', 'dismiss', 'no thanks', 'not now', 'cancel'];
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                    };
+                    const nodes = Array.from(document.querySelectorAll('button, [role="button"], [aria-label], [title], [data-action], [data-testid]'));
+                    for (const el of nodes) {
+                        if (!isVisible(el)) continue;
+                        const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().toLowerCase();
+                        if (!text) continue;
+                        if (keywords.some(k => text.includes(k)) || text === 'x') {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+        except Exception:
+            return False
+
+    async def _try_visual_fallback_popup_dismiss(self, page, task: Dict[str, Any], task_id: str) -> Optional[Dict[str, Any]]:
+        if not self.config.enable_visual_fallback or self.omniparser_detector is None:
+            return None
+
+        candidates = ["dismiss", "close", "no thanks", "not now", "x"]
+        for candidate in candidates:
+            task_override = dict(task)
+            task_override["web_params"] = dict(task.get("web_params", {}) or {})
+            task_override["web_params"]["text"] = candidate
+            logger.info(f"🔍 Visual fallback popup dismiss using target '{candidate}'")
+            result = await self._try_visual_fallback_action(page, task_override, task_id)
+            if result is not None:
+                return result
+
+        return None
     
     def _initialize_proxy_rotator(self) -> Optional[ProxyRotator]:
         """Initialize proxy rotator if proxies are configured"""
@@ -3430,7 +3516,22 @@ class WebExecutionPipeline:
                 # The page inspector already extracted all link texts from the DOM — use that
                 # instead of OmniParser image captioning which can't read text.
                 dom_fallback_tried = False
-                if action_type == 'click' and any(kw in clean_prompt.lower() for kw in ('link', 'click', 'open', 'result')):
+                popup_visual_tried = False
+                dismiss_intent = self._is_dismiss_popup_prompt(clean_prompt)
+                if action_type == 'click' and dismiss_intent:
+                    dom_has_close = await self._dom_has_close_control(page)
+                    popup_visual_tried = True
+                    if dom_has_close:
+                        logger.info("🔧 Close control detected in DOM; trying visual fallback for popup dismiss anyway")
+                    else:
+                        logger.info("🔧 No close control found in DOM; trying visual fallback for popup dismiss")
+                    visual_result = await self._try_visual_fallback_popup_dismiss(page, task, task_id)
+                    if visual_result is not None:
+                        result = visual_result
+                        if result.get('success'):
+                            logger.info("✅ Visual fallback dismiss succeeded")
+
+                if not result.get('success') and action_type == 'click' and not dismiss_intent and any(kw in clean_prompt.lower() for kw in ('link', 'click', 'open', 'result')):
                     logger.info(f"🔧 RAG code failed — trying DOM-based fallback link click")
                     try:
                         fallback_code = self._generate_fallback_link_click(clean_prompt)
@@ -3442,7 +3543,7 @@ class WebExecutionPipeline:
                         logger.warning(f"⚠️ DOM fallback link click failed: {fb_err}")
 
                 # Only try OmniParser if DOM fallback didn't work
-                if not result.get('success') and not dom_fallback_tried:
+                if not result.get('success') and not dom_fallback_tried and not popup_visual_tried:
                     visual_result = await self._try_visual_fallback_action(page, task, task_id)
                     if visual_result is not None:
                         result = visual_result
@@ -3493,29 +3594,53 @@ class WebExecutionPipeline:
                     else:
                         # ℹ️ For click actions: no URL change could mean download, modal, or off-page action
                         if action_type == 'click':
-                            # Check if this was a navigation intent (link/open/go to)
-                            _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
-                            _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
-                            if _is_nav_intent:
-                                # Wait briefly and re-check URL — gives navigation time to happen
-                                await page.wait_for_timeout(1500)
-                                _url_after_wait = page.url
-                                _pages_after_wait = len(self.context.pages) if self.context else 1
-                                if _url_after_wait != _url_before_exec:
-                                    verification_message = f"✅ Navigation confirmed: {_url_after_wait}"
-                                    logger.info(f"✅ Verification: URL changed after wait → {_url_after_wait}")
-                                elif _pages_after_wait > _pages_before_exec:
-                                    verification_message = "✅ New tab opened after click"
-                                    logger.info(f"✅ Verification: New tab opened")
+                            dismiss_intent = self._is_dismiss_popup_prompt(clean_prompt)
+                            if dismiss_intent:
+                                before_interactive = (page_state_before or {}).get('interactive', {})
+                                after_interactive = (page_state_after or {}).get('interactive', {})
+                                before_visible = before_interactive.get('visibleModalCount')
+                                after_visible = after_interactive.get('visibleModalCount')
+
+                                if before_visible is not None and after_visible is not None:
+                                    if after_visible < before_visible:
+                                        verification_message = f"✅ Popup dismissed (visible modals {before_visible}→{after_visible})"
+                                        logger.info("✅ Verification: Popup dismissed (visible modals reduced)")
+                                    elif before_interactive.get('hasModals') and not after_interactive.get('hasModals'):
+                                        verification_message = "✅ Popup dismissed (no visible modals)"
+                                        logger.info("✅ Verification: Popup dismissed (no visible modals)")
+                                    else:
+                                        verification_message = "⚠️ Popup dismiss not verified (no modal reduction)"
+                                        logger.warning("⚠️ Verification: Popup dismiss not verified")
+                                elif before_interactive.get('hasModals') and not after_interactive.get('hasModals'):
+                                    verification_message = "✅ Popup dismissed (no visible modals)"
+                                    logger.info("✅ Verification: Popup dismissed (no visible modals)")
                                 else:
-                                    # No navigation happened — the click was a no-op, mark as failure
-                                    result['success'] = False
-                                    result['error'] = 'Click executed but page did not navigate — element may not have been found or was the wrong element'
-                                    verification_message = "❌ Click did not cause navigation"
-                                    logger.warning(f"❌ Verification: Click reported success but URL unchanged after wait")
+                                    verification_message = "⚠️ Popup dismiss not verified (no modal signal)"
+                                    logger.warning("⚠️ Verification: Popup dismiss not verified (no modal signal)")
                             else:
-                                verification_message = "✅ Click executed (no navigation expected)"
-                                logger.info(f"✅ Verification: Click action executed (non-navigation click)")
+                                # Check if this was a navigation intent (link/open/go to)
+                                _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
+                                _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
+                                if _is_nav_intent:
+                                    # Wait briefly and re-check URL — gives navigation time to happen
+                                    await page.wait_for_timeout(1500)
+                                    _url_after_wait = page.url
+                                    _pages_after_wait = len(self.context.pages) if self.context else 1
+                                    if _url_after_wait != _url_before_exec:
+                                        verification_message = f"✅ Navigation confirmed: {_url_after_wait}"
+                                        logger.info(f"✅ Verification: URL changed after wait → {_url_after_wait}")
+                                    elif _pages_after_wait > _pages_before_exec:
+                                        verification_message = "✅ New tab opened after click"
+                                        logger.info(f"✅ Verification: New tab opened")
+                                    else:
+                                        # No navigation happened — the click was a no-op, mark as failure
+                                        result['success'] = False
+                                        result['error'] = 'Click executed but page did not navigate — element may not have been found or was the wrong element'
+                                        verification_message = "❌ Click did not cause navigation"
+                                        logger.warning(f"❌ Verification: Click reported success but URL unchanged after wait")
+                                else:
+                                    verification_message = "✅ Click executed (no navigation expected)"
+                                    logger.info(f"✅ Verification: Click action executed (non-navigation click)")
                         else:
                             verification_message = "⚠️ No page state change detected"
                             logger.warning(f"⚠️ Verification: No state change")

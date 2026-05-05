@@ -61,6 +61,7 @@ GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send",
                 "https://www.googleapis.com/auth/youtube.readonly",
                 "https://www.googleapis.com/auth/calendar",
                 "https://www.googleapis.com/auth/drive.file",
+                "https://www.googleapis.com/auth/drive.metadata.readonly",
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile"
@@ -1414,6 +1415,20 @@ class ApiAgent:
             drive = build('drive', 'v3', credentials=creds)
 
             effective_query = (query or "").strip() or "trashed = false"
+            starts_with_prefix = None
+
+            # Normalize natural-language patterns like:
+            # "name starts with 'I'" into a valid Drive query + local prefix filter.
+            starts_with_match = re.search(
+                r"name\s+starts\s+with\s+['\"]([^'\"]+)['\"]",
+                effective_query,
+                flags=re.IGNORECASE,
+            )
+            if starts_with_match:
+                starts_with_prefix = starts_with_match.group(1).strip()
+                escaped_prefix = starts_with_prefix.replace("'", "\\'")
+                effective_query = f"name contains '{escaped_prefix}'"
+
             if "trashed" not in effective_query.lower():
                 effective_query = f"({effective_query}) and trashed = false"
 
@@ -1421,7 +1436,9 @@ class ApiAgent:
                 q=effective_query,
                 pageSize=max_results,
                 fields='files(id,name,mimeType,modifiedTime,webViewLink)',
-                orderBy='name_natural'
+                orderBy='name_natural',
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
             ).execute()
 
             files = []
@@ -1433,6 +1450,10 @@ class ApiAgent:
                     'modified': file.get('modifiedTime', ''),
                     'link': file.get('webViewLink', ''),
                 })
+
+            if starts_with_prefix:
+                prefix_l = starts_with_prefix.lower()
+                files = [f for f in files if (f.get('name', '').lower().startswith(prefix_l))]
 
             logger.info(f"âœ… Drive search returned {len(files)} files for user {user_id}")
 

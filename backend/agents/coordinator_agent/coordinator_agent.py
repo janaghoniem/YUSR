@@ -44,6 +44,7 @@ llm = ChatGroq(
     model=LLM_MODEL,
     temperature=0.05,
     max_tokens=2048,
+    # max_retries=0,          # fail fast → Mistral fallback handles retries
     groq_api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
@@ -357,7 +358,7 @@ EMAIL ON MOBILE:
 - Add language confirmation before send for generated content ONLY.
 
 GENERAL RULES:
-1. One action per task - never combine multiple actions
+1. One action per task - never combine multiple actions, except for search submission where typing the query and submitting (Enter/click) may be combined in a single fill task
 2. Explicit dependencies - if task B needs task A's output, set "depends_on"
 3. Descriptive prompts - ai_prompt should be detailed enough for RAG to understand
 4. Correct context - all mobile tasks use context: "local"
@@ -760,41 +761,31 @@ Each task must have:
 # WEB_PARAMS STRUCTURE (for context: "web")
 
 Do NOT hardcode CSS selectors or wait strategies. The execution layer uses RAG to determine selectors and interaction strategies from ai_prompt.
-You SHOULD construct full URLs for well-known sites (see table below) — this is a fast path.
+You MAY construct homepage URLs for well-known sites (Google, YouTube, Gmail, Amazon, etc.).
+Do NOT construct search URLs for any site. For searches, navigate to the site homepage first and then use interaction tasks to enter the query and submit.
 For unknown sites, put enough detail in ai_prompt and let RAG resolve navigation.
 
-For well-known sites, include the full URL in both web_params AND extra_params.
-
-URL CONSTRUCTION RULES:
-
-| User intent | URL to construct |
-|---|---|
-| "open google and search for X" | https://www.google.com/search?q=X (replace spaces with +) |
-| "search for X" / "look up X" / "find X" | https://www.google.com/search?q=X |
-| "go to google" / "open google" | https://www.google.com |
-| "play X" / "watch X" | https://www.youtube.com/results?search_query=X |
-| "search youtube for X" | https://www.youtube.com/results?search_query=X |
-| "go to youtube" | https://www.youtube.com |
-| "open facebook" | https://www.facebook.com |
-| "go to reddit" | https://www.reddit.com |
-| "open gmail" | https://mail.google.com |
-| "go to <any_known_site>" | https://www.<site>.com |
-| "go to <explicit URL>" | Use the URL as-is |
+SEARCH WORKFLOW RULES:
+- "open google and search for X" -> task 1: navigate to https://www.google.com, task 2: type X in the search box and submit (press Enter or click Search).
+- "search for X on Amazon" -> task 1: navigate to https://www.amazon.com, task 2: type X in the search box and submit.
+- If a browser tab is already open on the target site, skip the navigation step and only perform the search input + submit.
 
 CRITICAL DISTINCTIONS:
-- "open google and search for X" -> Google search, NOT YouTube
-- "play X" / "watch X" -> YouTube search, NOT Google
-- "search for X" without mentioning a specific site -> default to Google search
-- "search youtube for X" -> YouTube search
+- "open google and search for X" -> Google search (multi-step), NOT YouTube
+- "play X" / "watch X" -> YouTube search (multi-step), NOT Google
+- "search for X" without mentioning a specific site -> default to Google search (multi-step)
+- "search youtube for X" -> YouTube search (multi-step)
 - "open the link named X" / "click on X" / "open the X result" WHEN A PAGE IS ALREADY OPEN -> CLICK on the current page, do NOT guess a URL
-- Only construct navigation URLs when the user explicitly asks to go to a NEW site or search engine
+- Only construct navigation URLs for well-known site homepages or when the user provides an explicit URL
 
-For navigation tasks WITH a known URL:
+For navigation tasks WITH a known URL (explicit URL or homepage URL only):
 {
     "action": "navigate",
-    "url": "<constructed URL>"
+    "url": "<explicit URL or homepage URL>"
 }
 extra_params must ALSO include: {"action": "navigate", "url": "<same URL>"}
+
+Never encode a search query into the URL for search tasks.
 
 For navigation tasks WITHOUT a known URL (unknown/unfamiliar sites):
 {
@@ -814,7 +805,8 @@ For extraction tasks:
 }
 
 Summary:
-- DO construct URLs for well-known sites (Google, YouTube, Gmail, etc.)
+- DO construct homepage URLs for well-known sites (Google, YouTube, Gmail, Amazon, etc.)
+- DO use homepage navigation + search box interaction for any search
 - DO put descriptive text in ai_prompt for RAG to use
 - Do not hardcode CSS selectors — RAG finds them from the live page
 - Do not hardcode wait strategies — the execution layer handles timing
@@ -827,7 +819,7 @@ Summary:
 3. Descriptive prompts - ai_prompt should be detailed enough for RAG to understand
 4. Correct context - web tasks get context: "web", desktop tasks get "local"
 5. Minimal extra_params - ONLY include action type and text (for fill), nothing else
-6. Include URLs for known sites - For well-known sites (Google, YouTube, Facebook, etc.), construct and include the URL in web_params and extra_params. For unknown sites, let RAG resolve them from ai_prompt.
+6. Include URLs for well-known site homepages or explicit URLs only - Do NOT construct search URLs. Use a multi-step flow (open site -> search input -> submit).
 7. NO selectors - NEVER hardcode CSS selectors, let RAG find them from ai_prompt
 8. Empty web_params - For local tasks, set web_params: {}
 9. Include confirmation steps - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
@@ -847,27 +839,40 @@ Summary:
 EXAMPLES (DESKTOP/WEB/EMAIL)
 ============================
 
-## Example 0: Browser Navigation — Google Search
+## Example 0: Browser Navigation — Google Search (Multi-step)
 
 User: "open google and search for web automation"
 
 - task_id: task_1
     goal: open google and search for web automation
-    ai_prompt: Navigate to Google and search for web automation
+    ai_prompt: Navigate to https://www.google.com
     device: desktop
     context: web
     target_agent: action
     extra_params:
         action: navigate
-        url: "https://www.google.com/search?q=web+automation"
+        url: "https://www.google.com"
     web_params:
         action: navigate
-        url: "https://www.google.com/search?q=web+automation"
-    success_message: "Search results loaded successfully"
-    failure_message: "Failed to load Google search. Please check your internet connection"
+        url: "https://www.google.com"
+    success_message: "Google homepage loaded successfully"
+    failure_message: "Failed to open Google. Please check your internet connection"
     depends_on: null
 
-EXPLANATION: The user wants Google search, NOT YouTube. Construct the Google search URL with the query. This is a SINGLE task — just navigate to the search results page.
+- task_id: task_2
+    goal: open google and search for web automation
+    ai_prompt: Type "web automation" in the Google search box and submit the search (press Enter or click Search)
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "web automation"
+    success_message: "Search submitted successfully"
+    failure_message: "Failed to submit the search. Please try again"
+    depends_on: ["task_1"]
+
+EXPLANATION: Do NOT hardcode search URLs. Open the homepage first, then perform the search via the search box.
 
 ## Example 0b: Browser Navigation — Play/Watch Video
 
@@ -875,21 +880,69 @@ User: "play relaxing music"
 
 - task_id: task_1
     goal: play relaxing music
-    ai_prompt: Search YouTube for relaxing music
+    ai_prompt: Navigate to https://www.youtube.com
     device: desktop
     context: web
     target_agent: action
     extra_params:
         action: navigate
-        url: "https://www.youtube.com/results?search_query=relaxing+music"
+        url: "https://www.youtube.com"
     web_params:
         action: navigate
-        url: "https://www.youtube.com/results?search_query=relaxing+music"
-    success_message: "YouTube music search loaded. Enjoy!"
+        url: "https://www.youtube.com"
+    success_message: "YouTube opened successfully"
     failure_message: "Could not reach YouTube. Check your connection and try again"
     depends_on: null
 
-EXPLANATION: "play" implies video/music -> route to YouTube search.
+- task_id: task_2
+    goal: play relaxing music
+    ai_prompt: Type "relaxing music" in the YouTube search box and submit the search (press Enter or click Search)
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "relaxing music"
+    success_message: "YouTube search submitted"
+    failure_message: "Failed to submit the YouTube search"
+    depends_on: ["task_1"]
+
+EXPLANATION: "play" implies video/music, but searches must be multi-step (open site, then search).
+
+## Example 0e: Browser Navigation — Amazon Search (Multi-step)
+
+User: "search for wireless mouse on Amazon"
+
+- task_id: task_1
+    goal: search for wireless mouse on Amazon
+    ai_prompt: Navigate to https://www.amazon.com
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.amazon.com"
+    web_params:
+        action: navigate
+        url: "https://www.amazon.com"
+    success_message: "Amazon homepage loaded successfully"
+    failure_message: "Failed to open Amazon. Please check your internet connection"
+    depends_on: null
+
+- task_id: task_2
+    goal: search for wireless mouse on Amazon
+    ai_prompt: Type "wireless mouse" in the Amazon search box and submit the search (press Enter or click Search)
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "wireless mouse"
+    success_message: "Amazon search submitted"
+    failure_message: "Failed to submit the Amazon search"
+    depends_on: ["task_1"]
+
+EXPLANATION: Do NOT hardcode search URLs. Always open the site first, then search via the UI.
 
 ## Example 0c: YouTube API Search (get structured results)
 
@@ -3085,48 +3138,6 @@ def create_coordinator_graph():
                 input_task_id = current_task.extra_params["input_from"]
                 if input_task_id in task_outputs:
                     current_task.extra_params["input_content"] = task_outputs[input_task_id]
-
-            # For API email send, replace SUBJECT/BODY placeholders from upstream draft output.
-            if current_task.target_agent in {"api", "email"}:
-                _extra = current_task.extra_params or {}
-                _op = str(_extra.get("operation") or "").strip().lower()
-                _subject = str(_extra.get("subject") or "").strip()
-                _body = str(_extra.get("body") or "").strip()
-                _needs_subject = (not _subject) or (_subject.upper() in {"{SUBJECT}", "SUBJECT"})
-                _needs_body = (not _body) or (_body.upper() in {"{BODY}", "BODY"})
-
-                if _op == "send" and (_needs_subject or _needs_body) and current_task.depends_on:
-                    _dep_id = current_task.depends_on[0].strip()
-                    _draft_source = task_outputs.get(_dep_id)
-
-                    # If dependency is a confirmation task, follow its input_from chain to draft task output.
-                    if isinstance(_draft_source, str) and not _draft_source.strip().startswith("{"):
-                        _dep_task = next(
-                            (t for t in state.get("tasks", []) if getattr(t, "task_id", None) == _dep_id),
-                            None,
-                        )
-                        _upstream_id = ((_dep_task.extra_params or {}).get("input_from") if _dep_task else None)
-                        if _upstream_id and _upstream_id in task_outputs:
-                            _draft_source = task_outputs[_upstream_id]
-
-                    if isinstance(_draft_source, str):
-                        try:
-                            _parsed = json.loads(_draft_source)
-                            if isinstance(_parsed, dict) and "result" in _parsed and isinstance(_parsed["result"], dict):
-                                _parsed = _parsed["result"]
-                            if isinstance(_parsed, dict):
-                                if _needs_subject:
-                                    _parsed_subject = str(_parsed.get("SUBJECT") or _parsed.get("subject") or "").strip()
-                                    if _parsed_subject:
-                                        _extra["subject"] = _parsed_subject
-                                if _needs_body:
-                                    _parsed_body = str(_parsed.get("BODY") or _parsed.get("body") or "").strip()
-                                    if _parsed_body:
-                                        _extra["body"] = _parsed_body
-                        except Exception:
-                            pass
-
-                    current_task.extra_params = _extra
             
             # Auto-inject reasoning output into dependent action tasks.
             # IMPORTANT: Only inject the clean text content — never raw fenced JSON blocks.
@@ -4757,13 +4768,6 @@ async def start_coordinator_agent(broker_instance):
     async def handle_task_from_language(message: AgentMessage):
         """Handle task from Language Agent"""
 
-        # Language agent sends EXECUTION_RESPONSE after a task_confirmation is answered.
-        # Those must resolve the coordinator's pending_results future, so delegate them
-        # to the same handler used by reasoning/api agents.
-        if message.message_type == MessageType.EXECUTION_RESPONSE:
-            await handle_action_result(message)
-            return
-
         if message.message_type != MessageType.TASK_REQUEST:
             return
 
@@ -5000,6 +5004,13 @@ async def start_coordinator_agent(broker_instance):
         - Silent failures when results arrive out of order
         """
         if message.message_type != MessageType.EXECUTION_RESPONSE:
+            return
+
+        sender = str(getattr(message, "sender", "") or "").lower()
+        if not sender or sender not in {"execution", "reasoning", "api"}:
+            logger.warning(
+                f"⚠️ Ignoring EXECUTION_RESPONSE from non-executor sender '{sender or 'unknown'}'"
+            )
             return
             
         task_id = message.task_id

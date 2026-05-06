@@ -189,26 +189,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         response = await asyncio.wait_for(fut, timeout=AGENT_RESPONSE_TIMEOUT_SECONDS)
                         await ThinkingStepManager.clear_steps(session_id)
 
-                                device_id = data.get("device_id") or session_id
+                        device_id = data.get("device_id") or session_id
 
-                                if user_id and device_id:
-                                    _WS_DEVICE_CONTEXT[session_id] = {
-                                        "user_id": user_id,
-                                        "device_id": device_id,
-                                        "platform": "mobile" if str(device_type).lower() == "mobile" else "desktop",
-                                    }
-                                    mgr = get_cross_platform_manager()
-                                    if mgr:
-                                        try:
-                                            await mgr._registry.register_device(
-                                                user_id=user_id,
-                                                device_id=device_id,
-                                                platform=_WS_DEVICE_CONTEXT[session_id]["platform"],
-                                                session_id=session_id,
-                                                label=f"{_WS_DEVICE_CONTEXT[session_id]['platform'].capitalize()} {device_id}",
-                                            )
-                                        except Exception as reg_err:
-                                            logger.debug(f"⚠️ WebSocket device registration failed: {reg_err}")
+                        if user_id and device_id:
+                            _WS_DEVICE_CONTEXT[session_id] = {
+                                "user_id": user_id,
+                                "device_id": device_id,
+                                "platform": "mobile" if str(device_type).lower() == "mobile" else "desktop",
+                            }
+                            mgr = get_cross_platform_manager()
+                            if mgr:
+                                try:
+                                    await mgr._registry.register_device(
+                                        user_id=user_id,
+                                        device_id=device_id,
+                                        platform=_WS_DEVICE_CONTEXT[session_id]["platform"],
+                                        session_id=session_id,
+                                        label=f"{_WS_DEVICE_CONTEXT[session_id]['platform'].capitalize()} {device_id}",
+                                    )
+                                except Exception as reg_err:
+                                    logger.debug(f"⚠️ WebSocket device registration failed: {reg_err}")
                         ws_response = {"type": "completion"}
                         if isinstance(response, dict):
                             if response.get("status") == "clarification_needed":

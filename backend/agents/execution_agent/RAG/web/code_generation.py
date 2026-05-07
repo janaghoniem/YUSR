@@ -468,6 +468,7 @@ class PlaywrightRAGSystem:
         prompt_parts.append("## Requirements:")
         prompt_parts.append("Generate Playwright Python code that:")
         prompt_parts.append("1. Uses async/await pattern with the existing 'page' variable (do NOT create browser/page)")
+        prompt_parts.append("1b. ALWAYS await async Playwright actions (locator.click(), locator.scroll_into_view_if_needed(), page.keyboard.press(), page.wait_for_*), never call them without await")
         prompt_parts.append("2. Handles errors with try/except")
         prompt_parts.append("3. Prints 'EXECUTION_SUCCESS' on success")
         prompt_parts.append("4. Prints 'FAILED: {error}' on failure")
@@ -527,6 +528,13 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 ✅ CORRECT: await page.locator('a:has-text("X")').first.click()
 ✅ CORRECT: link = page.locator('a')  # no await
 ✅ CORRECT: count = await page.locator('a').count()  # await the ACTION
+
+⚠️ ALWAYS await async Playwright actions (otherwise they do NOTHING):
+❌ WRONG: page.locator('a:has-text("X")').first.click()
+❌ WRONG: page.locator('a').first.scroll_into_view_if_needed()
+✅ CORRECT: await page.locator('a:has-text("X")').first.click()
+✅ CORRECT: await page.locator('a').first.scroll_into_view_if_needed()
+✅ CORRECT: await page.keyboard.press('Enter')
 
 ================================================================
 ❗ MANDATORY PATTERN: GOOGLE SEARCHES

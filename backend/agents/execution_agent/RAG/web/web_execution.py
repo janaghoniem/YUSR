@@ -3777,6 +3777,7 @@ class WebExecutionPipeline:
             )
             
             generated_code = rag_result.get('code', '')
+            generated_code = self._auto_await_async_calls(generated_code)
             
             if not generated_code:
                 raise ValueError("RAG system returned empty code")
@@ -3788,6 +3789,84 @@ class WebExecutionPipeline:
         except Exception as e:
             logger.error(f"❌ RAG code generation failed: {e}")
             raise
+
+    def _auto_await_async_calls(self, code: str) -> str:
+        """
+        Ensure common async Playwright actions are awaited.
+        This guards against generated sync-style calls that do nothing at runtime.
+        """
+        if not code:
+            return code
+
+        async_methods = [
+            "click",
+            "dblclick",
+            "hover",
+            "fill",
+            "type",
+            "press",
+            "scroll_into_view_if_needed",
+            "check",
+            "uncheck",
+            "select_option",
+            "set_input_files",
+            "tap",
+            "drag_to",
+            "wait_for_selector",
+            "wait_for_load_state",
+            "wait_for_timeout",
+            "wait_for",
+            "goto",
+            "evaluate",
+            "evaluate_handle",
+            "text_content",
+            "inner_text",
+            "input_value",
+            "get_attribute",
+            "count",
+            "is_visible",
+            "is_hidden",
+            "is_enabled",
+            "is_disabled",
+            "is_checked",
+        ]
+
+        method_group = "|".join(re.escape(m) for m in async_methods)
+        call_pattern = re.compile(
+            rf"^(?P<expr>(?:[A-Za-z_][\w]*)(?:\.[A-Za-z_][\w]*)*\.(?:{method_group})\s*\(.*\))(?P<comment>\s*#.*)?$"
+        )
+
+        fixed_lines = []
+        for line in code.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                fixed_lines.append(line)
+                continue
+            if "await " in line:
+                fixed_lines.append(line)
+                continue
+
+            if stripped.startswith("return "):
+                remainder = stripped[len("return "):].strip()
+                match = call_pattern.match(remainder)
+                if match:
+                    indent = line[:len(line) - len(line.lstrip())]
+                    expr = match.group("expr")
+                    comment = match.group("comment") or ""
+                    fixed_lines.append(f"{indent}return await {expr}{comment}")
+                    continue
+
+            match = call_pattern.match(stripped)
+            if match:
+                indent = line[:len(line) - len(line.lstrip())]
+                expr = match.group("expr")
+                comment = match.group("comment") or ""
+                fixed_lines.append(f"{indent}await {expr}{comment}")
+                continue
+
+            fixed_lines.append(line)
+
+        return "\n".join(fixed_lines)
     
     def _generate_fallback_link_click(self, ai_prompt: str) -> str:
         """

@@ -99,6 +99,7 @@ class StructuredResponse(BaseModel):
     type: str  # ResponseType value
     spoken_text: str
     full_content: str = ""
+    content_pages: List[Dict[str, Any]] = Field(default_factory=list)
     offer_read_aloud: bool = False
     offer_actions: List[str] = Field(default_factory=list)
     context_for_undo: Dict[str, Any] = Field(default_factory=dict)

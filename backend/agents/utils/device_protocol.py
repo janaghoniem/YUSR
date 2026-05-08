@@ -234,6 +234,15 @@ class ActionResult(BaseModel):
 
 class MobileTaskRequest(BaseModel):
     """Request sent to mobile execution handler"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "task_id": "task_1",
+            "ai_prompt": "Click the Send button to send the email",
+            "device_id": "device_abc123",
+            "session_id": "session_xyz"
+        }
+    })
+    
     task_id: str
     ai_prompt: str  # Natural language instruction
     device_id: str
@@ -246,20 +255,26 @@ class MobileTaskRequest(BaseModel):
     # Constraints
     max_steps: int = 15  # Max ReAct iterations (increased for task completion)
     timeout_seconds: int = 30
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "task_id": "task_1",
-                "ai_prompt": "Click the Send button to send the email",
-                "device_id": "device_abc123",
-                "session_id": "session_xyz"
-            }
-        }
 
 
 class MobileTaskResult(BaseModel):
     """Result from mobile task execution"""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "task_id": "task_1",
+            "status": "success",
+            "steps_taken": 2,
+            "actions_executed": [
+                {
+                    "action_id": "action_1",
+                    "action_type": "click",
+                    "element_id": 1
+                }
+            ],
+            "execution_time_ms": 2500
+        }
+    })
+    
     task_id: str
     status: Literal["success", "failed", "timeout", "error"]
     
@@ -279,23 +294,6 @@ class MobileTaskResult(BaseModel):
     # LLM usage metrics (populated by MobileReActStrategy)
     token_usage: Optional[Dict[str, int]] = None  # {"prompt": N, "completion": N, "total": N}
     llm_calls: int = 0
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "task_id": "task_1",
-                "status": "success",
-                "steps_taken": 2,
-                "actions_executed": [
-                    {
-                        "action_id": "action_1",
-                        "action_type": "click",
-                        "element_id": 1
-                    }
-                ],
-                "execution_time_ms": 2500
-            }
-        }
 
 
 # ============================================================================

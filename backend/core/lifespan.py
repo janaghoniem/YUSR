@@ -7,6 +7,7 @@ from agents.language_agent import start_language_agent
 from agents.reasoning_agent import start_reasoning_agent
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
+from core.mongo import close_mongo_client, get_database, get_mongo_client
 
 from utils.response_handlers import handle_coordinator_output, handle_language_output, handle_ws_output
 from core.dependencies import logger
@@ -30,6 +31,14 @@ async def lifespan(app):
     """Lifespan context manager for startup/shutdown"""
     logger.info("🚀 Starting AURA Backend...")
 
+    mongo_client = get_mongo_client()
+    if mongo_client:
+        try:
+            mongo_client.admin.command("ping")
+            logger.info("✅ Shared Mongo client initialized")
+        except Exception as exc:
+            logger.warning(f"⚠️ Mongo ping failed during startup: {exc}")
+
     await broker.start()
     logger.info("✅ Broker started")
 
@@ -37,6 +46,15 @@ async def lifespan(app):
     broker.subscribe(Channels.COORDINATOR_TO_LANGUAGE, handle_coordinator_output)
     broker.subscribe(Channels.WEBSOCKET_OUTPUT, handle_ws_output)
     logger.info("✅ Subscribed to output channels")
+
+    try:
+        from routes.cross_platform_manager import init_cross_platform_manager
+        from core.dependencies import ws_manager
+
+        init_cross_platform_manager(get_database("aura_db"), ws_manager)
+        logger.info("✅ Cross-platform task manager initialized")
+    except Exception as exc:
+        logger.warning(f"⚠️ Cross-platform manager initialization skipped: {exc}")
 
     await asyncio.to_thread(_preload_task_memory_embedding)
 
@@ -65,4 +83,5 @@ async def lifespan(app):
 
     logger.info("🛑 Shutting down AURA Backend...")
     await broker.stop()
+    close_mongo_client()
     logger.info("✅ Broker stopped")

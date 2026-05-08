@@ -140,6 +140,8 @@ class SiteDetector:
             platform = 'ebay'
         elif 'google.com' in url or 'google.' in url:
             platform = 'google'
+        elif 'arxiv.org' in url:
+            platform = 'arxiv'
         elif 'facebook.com' in url or 'fb.com' in url:
             platform = 'facebook'
         elif 'twitter.com' in url or 'x.com' in url:
@@ -155,12 +157,14 @@ class SiteDetector:
         try:
             site_info = await page.evaluate("""
                 () => {
+                    const contentType = document.contentType || '';
                     const hasVideo = !!document.querySelector('video');
                     const hasAudio = !!document.querySelector('audio');
                     const hasSearch = !!document.querySelector('[type="search"], [role="search"], input[placeholder*="search" i]');
                     const hasCart = !!document.querySelector('[data-testid*="cart" i], [aria-label*="cart" i], .cart, #cart, [id*="cart" i]');
                     const hasPrices = !!document.querySelector('[data-price], .price, [class*="price" i], [aria-label*="price" i]');
                     const hasProducts = !!document.querySelector('[data-product], [class*="product" i], [data-testid*="product" i]');
+                    const isPdf = contentType.toLowerCase().includes('pdf') || window.location.pathname.toLowerCase().endsWith('.pdf') || window.location.pathname.toLowerCase().includes('/pdf/');
                     
                     return {
                         hasVideo,
@@ -168,7 +172,8 @@ class SiteDetector:
                         hasSearch,
                         hasCart,
                         hasPrices,
-                        hasProducts
+                        hasProducts,
+                        isPdf
                     };
                 }
             """)
@@ -185,24 +190,29 @@ class SiteDetector:
         # Determine site type
         site_type = 'generic'
         capabilities = []
-        
-        if site_info['hasVideo'] or site_info['hasAudio']:
-            site_type = 'video'
-            capabilities.append('media_player')
-        
-        if site_info['hasSearch']:
-            capabilities.append('search')
-        
-        if site_info['hasCart'] or site_info['hasPrices'] or site_info['hasProducts']:
-            if site_type == 'generic':
-                site_type = 'ecommerce'
-            capabilities.append('shopping')
+
+        if site_info.get('isPdf') or url.endswith('.pdf') or '/pdf/' in url:
+            site_type = 'pdf'
+            capabilities.append('pdf_viewer')
+        else:
+            if site_info['hasVideo'] or site_info['hasAudio']:
+                site_type = 'video'
+                capabilities.append('media_player')
+            
+            if site_info['hasSearch']:
+                capabilities.append('search')
+            
+            if site_info['hasCart'] or site_info['hasPrices'] or site_info['hasProducts']:
+                if site_type == 'generic':
+                    site_type = 'ecommerce'
+                capabilities.append('shopping')
         
         return {
             'site_type': site_type,
             'platform': platform,
             'capabilities': capabilities,
-            'url': page.url
+            'url': page.url,
+            'isPdf': site_info.get('isPdf', False)
         }
 
 # ============================================================================
@@ -464,6 +474,7 @@ async def observe_page_state(page) -> Dict[str, Any]:
         state['platform'] = site_info.get('platform', 'unknown')
         state['siteType'] = site_info.get('site_type', 'generic')
         state['capabilities'] = site_info.get('capabilities', [])
+        state['isPdf'] = bool(site_info.get('isPdf')) or 'pdf_viewer' in state.get('capabilities', [])
         
         # Platform-specific detection (for backward compatibility)
         state['isYouTube'] = state.get('platform') == 'youtube'
@@ -3308,9 +3319,11 @@ class WebExecutionPipeline:
             page_state_before = None
             if self.config.enable_page_state_layer:
                 page_state_before = await observe_page_state(page)
-                
-                # ✅ FIXED: action_type comes from web_params, never from ai_prompt
-# ✅ FIXED: Extract action_type with fallback to ai_prompt inference
+
+            downloads_before = set(self.session_downloads.get(session_id, []))
+
+            # ✅ FIXED: action_type comes from web_params, never from ai_prompt
+            # ✅ FIXED: Extract action_type with fallback to ai_prompt inference
             web_params = task.get('web_params') or {}
             action_type = web_params.get('action', 'unknown')
             
@@ -3338,6 +3351,39 @@ class WebExecutionPipeline:
                     validation_passed=False,
                     security_passed=True,
                     error=f"Context validation failed: {reason}",
+                    page_state_before=page_state_before,
+                    execution_time=(datetime.now() - start_time).total_seconds()
+                )
+
+            # ✅ PDF VIEWER DOWNLOAD SHORT-CIRCUIT
+            download_intent = self._is_download_intent(clean_prompt, action_type, web_params)
+            is_pdf_viewer = False
+            if page_state_before:
+                is_pdf_viewer = (
+                    page_state_before.get('isPdf')
+                    or page_state_before.get('siteType') == 'pdf'
+                    or 'pdf_viewer' in page_state_before.get('capabilities', [])
+                )
+            if download_intent and (is_pdf_viewer or self._looks_like_pdf_url(page.url)):
+                logger.info("📄 PDF viewer detected with download intent - using direct download")
+                pdf_result = await self._handle_pdf_viewer_download(page, session_id)
+                if pdf_result.get('success'):
+                    filepath = pdf_result.get('filepath')
+                    output_msg = f"Downloaded PDF to {filepath}" if filepath else "PDF download completed"
+                    return WebExecutionResult(
+                        validation_passed=True,
+                        security_passed=True,
+                        output=output_msg,
+                        page_url=page.url,
+                        page_title=await page.title(),
+                        page_state_before=page_state_before,
+                        execution_time=(datetime.now() - start_time).total_seconds()
+                    )
+
+                return WebExecutionResult(
+                    validation_passed=False,
+                    security_passed=True,
+                    error=pdf_result.get('error') or 'PDF download failed',
                     page_state_before=page_state_before,
                     execution_time=(datetime.now() - start_time).total_seconds()
                 )
@@ -3584,6 +3630,8 @@ class WebExecutionPipeline:
             verification_message = None
             
             if self.config.enable_verification and result.get('success'):
+                downloads_after = set(self.session_downloads.get(session_id, []))
+                new_downloads = downloads_after - downloads_before
                 # Compare states
                 if page_state_before and page_state_after:
                     changes = await compare_states(page_state_before, page_state_after)
@@ -3618,9 +3666,16 @@ class WebExecutionPipeline:
                                     verification_message = "⚠️ Popup dismiss not verified (no modal signal)"
                                     logger.warning("⚠️ Verification: Popup dismiss not verified (no modal signal)")
                             else:
+                                if new_downloads:
+                                    verification_message = f"✅ Download detected ({len(new_downloads)} file(s))"
+                                    logger.info("✅ Verification: Download detected after click")
+                                elif download_intent:
+                                    verification_message = "⚠️ Download intent but no download detected"
+                                    logger.warning("⚠️ Verification: Download intent but no download detected")
+                                else:
                                 # Check if this was a navigation intent (link/open/go to)
-                                _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
-                                _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
+                                 _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
+                                 _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
                                 if _is_nav_intent:
                                     # Wait briefly and re-check URL — gives navigation time to happen
                                     await page.wait_for_timeout(1500)
@@ -3867,6 +3922,121 @@ class WebExecutionPipeline:
             fixed_lines.append(line)
 
         return "\n".join(fixed_lines)
+
+    def _is_download_intent(self, prompt: str, action_type: str, web_params: Dict[str, Any]) -> bool:
+        if action_type in {'download', 'save', 'export'}:
+            return True
+        if isinstance(web_params, dict) and web_params.get('download'):
+            return True
+        prompt_lower = (prompt or '').lower()
+        download_keywords = ['download', 'save pdf', 'save file', 'export', 'get pdf', 'pdf']
+        return any(k in prompt_lower for k in download_keywords)
+
+    def _looks_like_pdf_url(self, url: str) -> bool:
+        if not url:
+            return False
+        url_lower = url.lower()
+        return url_lower.endswith('.pdf') or '/pdf/' in url_lower or 'format=pdf' in url_lower
+
+    def _guess_pdf_filename(self, headers: Dict[str, str], url: str) -> str:
+        from urllib.parse import urlparse, unquote
+
+        content_disposition = (headers or {}).get('content-disposition', '')
+        filename = None
+
+        if content_disposition:
+            match = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition, re.IGNORECASE)
+            if match:
+                filename = unquote(match.group(1))
+            else:
+                match = re.search(r"filename=\"?([^\";]+)\"?", content_disposition, re.IGNORECASE)
+                if match:
+                    filename = match.group(1)
+
+        if not filename:
+            parsed = urlparse(url)
+            filename = os.path.basename(parsed.path)
+
+        filename = os.path.basename(filename) if filename else ''
+        if not filename:
+            filename = f"download_{int(datetime.now().timestamp())}.pdf"
+        if not filename.lower().endswith('.pdf'):
+            filename = f"{filename}.pdf"
+
+        return filename
+
+    async def _download_pdf_via_request(self, page, pdf_url: str, session_id: str) -> Dict[str, Any]:
+        try:
+            response = await page.context.request.get(pdf_url)
+            status = response.status
+            if status < 200 or status >= 300:
+                return {'success': False, 'error': f"HTTP {status} for {pdf_url}"}
+
+            body = await response.body()
+            if not body:
+                return {'success': False, 'error': "Empty response body"}
+
+            headers = response.headers
+            filename = self._guess_pdf_filename(headers, pdf_url)
+            downloads_dir = str(Path.home() / 'Downloads')
+            os.makedirs(downloads_dir, exist_ok=True)
+            filepath = os.path.join(downloads_dir, filename)
+
+            with open(filepath, 'wb') as f:
+                f.write(body)
+
+            if session_id not in self.session_downloads:
+                self.session_downloads[session_id] = []
+            self.session_downloads[session_id].append(filepath)
+
+            logger.info(f"✅ Saved PDF via request: {filepath}")
+            return {'success': True, 'filepath': filepath}
+
+        except Exception as e:
+            logger.warning(f"⚠️ Request-based PDF download failed: {e}")
+            return {'success': False, 'error': str(e)}
+
+    async def _wait_for_new_download(self, session_id: str, before: set, timeout_ms: int = 8000) -> Optional[str]:
+        start_time = _time_module.time()
+        while (_time_module.time() - start_time) * 1000 < timeout_ms:
+            downloads = self.session_downloads.get(session_id, [])
+            for path in downloads:
+                if path not in before and os.path.exists(path):
+                    return path
+            await asyncio.sleep(0.25)
+        return None
+
+    async def _handle_pdf_viewer_download(self, page, session_id: str) -> Dict[str, Any]:
+        pdf_url = page.url
+        if not self._looks_like_pdf_url(pdf_url):
+            pdf_url = page.url
+
+        logger.info(f"📄 PDF viewer download path: {pdf_url}")
+
+        # Prefer direct request download to avoid non-DOM PDF toolbar issues
+        request_result = await self._download_pdf_via_request(page, pdf_url, session_id)
+        if request_result.get('success'):
+            return request_result
+
+        # Fallback: attempt browser save shortcut (may or may not trigger a download)
+        before = set(self.session_downloads.get(session_id, []))
+        try:
+            await page.keyboard.press('Control+S')
+        except Exception:
+            pass
+        try:
+            await page.keyboard.press('Meta+S')
+        except Exception:
+            pass
+
+        new_download = await self._wait_for_new_download(session_id, before)
+        if new_download:
+            return {'success': True, 'filepath': new_download}
+
+        return {
+            'success': False,
+            'error': 'PDF viewer download failed: no toolbar DOM and no direct download response'
+        }
     
     def _generate_fallback_link_click(self, ai_prompt: str) -> str:
         """

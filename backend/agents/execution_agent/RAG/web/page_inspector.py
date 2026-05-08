@@ -314,6 +314,12 @@ async def get_page_context(page) -> Dict:
         
         # Check if page is loaded
         ready_state = await page.evaluate("() => document.readyState")
+
+        # Best-effort content type for PDF detection and diagnostics
+        try:
+            content_type = await page.evaluate("() => document.contentType || ''")
+        except Exception:
+            content_type = ''
         
         # ✅ NEW: Detect page type
         page_type = await detect_page_type(page)
@@ -336,6 +342,7 @@ async def get_page_context(page) -> Dict:
             'ready_state': ready_state,
             'is_loaded': ready_state == 'complete',
             'page_type': page_type,
+            'content_type': content_type,
             'auth_state': auth_state,  # FIX: which fields are currently visible
         }
     
@@ -410,6 +417,7 @@ async def detect_page_type(page) -> str:
             () => {
                 const url = window.location.href;
                 const hostname = window.location.hostname;
+                const contentType = document.contentType || '';
                 
                 // Gmail-specific detection
                 const isGmailCompose = hostname.includes('mail.google.com') && url.includes('compose');
@@ -448,6 +456,7 @@ async def detect_page_type(page) -> str:
                     isAudio: !!document.querySelector('audio'),
                     isForm: !!document.querySelector('form'),
                     isSearch: !!document.querySelector('input[type="search"], input[placeholder*="search" i]'),
+                    isPdf: contentType.toLowerCase().includes('pdf') || url.toLowerCase().endsWith('.pdf') || url.toLowerCase().includes('/pdf/'),
                     // Gmail detection
                     isGmailCompose: isGmailCompose,
                     isGmail: isGmail,
@@ -469,6 +478,10 @@ async def detect_page_type(page) -> str:
         if page_info.get('isGmailCompose') or (page_info.get('isGmail') and page_info.get('hasComposeArea')):
             return 'gmail_compose'
         
+        # ✅ PRIORITY: PDF viewer detection (before auth/media)
+        if page_info.get('isPdf'):
+            return 'pdf_viewer'
+
         # ⚠️ PRIORITY 1: Multi-page auth detection (BEFORE media detection)
         # This MUST come before video/audio detection because auth pages may have captcha audio
         if page_info.get('isGoogleAuth'):
@@ -662,6 +675,13 @@ async def build_rag_context(page, task_description: str) -> str:
 - Only password field is visible (email was on previous page)
 - Look for "Sign in" or "Login" button
 """
+    elif context.get('page_type') == 'pdf_viewer':
+        page_type_guidance = """
+📄 PDF VIEWER DETECTED:
+- This is a browser PDF viewer; toolbar buttons are NOT in the page DOM.
+- Prefer keyboard save (Ctrl+S / Cmd+S) or a direct PDF download URL.
+- If no DOM controls exist, do NOT search for "Download" buttons in the page.
+"""
     elif context.get('page_type') == 'youtube':
         page_type_guidance = """
 📺 YOUTUBE DETECTED - Special Guidelines:
@@ -683,6 +703,7 @@ async def build_rag_context(page, task_description: str) -> str:
         f"URL: {context['url']}",
         f"Title: {context['title']}",
         f"Page Type: {context.get('page_type', 'unknown')}",
+        f"Content Type: {context.get('content_type', 'unknown')}",
         f"Page Loaded: {context['is_loaded']}",
         "",
         page_type_guidance,

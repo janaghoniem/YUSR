@@ -475,6 +475,7 @@ class PlaywrightRAGSystem:
         prompt_parts.append("5. Waits for elements before interacting: await page.wait_for_selector(sel, state='visible', timeout=10000)")
         prompt_parts.append("6. After click-triggered navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)")
         prompt_parts.append("7. If browser is already on the correct domain, interact with page elements instead of calling page.goto()")
+        prompt_parts.append("8. If the page is a PDF viewer (document.contentType includes 'pdf'), do NOT look for DOM download buttons; prefer direct PDF URL or keyboard save (Ctrl+S / Cmd+S)")
         prompt_parts.append("")
         prompt_parts.append("Format:")
         prompt_parts.append("```python")
@@ -535,6 +536,11 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 ✅ CORRECT: await page.locator('a:has-text("X")').first.click()
 ✅ CORRECT: await page.locator('a').first.scroll_into_view_if_needed()
 ✅ CORRECT: await page.keyboard.press('Enter')
+
+📄 PDF VIEWER RULE:
+- Browser PDF toolbars are NOT in the DOM.
+- If document.contentType includes "pdf", do NOT search for "Download" buttons.
+- Prefer direct PDF URL requests or Ctrl+S / Cmd+S.
 
 ================================================================
 ❗ MANDATORY PATTERN: GOOGLE SEARCHES

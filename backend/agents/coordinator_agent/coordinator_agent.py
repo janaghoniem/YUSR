@@ -1069,10 +1069,16 @@ TARGET AGENTS:
 - language
 - email (desktop-only)
 
-HANDOFF RULES (for cross-device control):
+HANDOFF AND CONFIRMATION RULES:
 - When cross-device control/session transfer is required, add an explicit preparation task first.
-- Use target_agent: "language" for confirmation before sensitive cross-device operations.
-- For cross-device steps, include extra_params fields:
+- IMPORTANT: Do NOT insert a language confirmation task for pure action tasks like:
+  - Opening/closing files, documents, or applications
+  - Navigating to URLs or locations
+  - Launching programs or services
+  - Uploading/downloading files
+  - Clicking buttons or menu items
+- ONLY use target_agent: "language" for confirmation when content has been GENERATED (e.g., drafting an email, writing a document, composing a message) that will be sent, committed, or saved.
+- For cross-device operations that DO need confirmation, include extra_params fields:
   - handoff_required: true
   - handoff_from: "desktop" | "mobile"
   - handoff_to: "desktop" | "mobile"
@@ -1100,6 +1106,40 @@ def _get_decomposition_prompt_sop(device_type: Literal["desktop", "mobile", "mix
         return _get_mixed_decomposition_prompt_sop()
 
     return _get_desktop_decomposition_prompt_sop()
+
+
+def _sanitize_task_dicts(task_dicts: List[Dict[str, Any]]) -> None:
+    """Sanitize task dictionaries to ensure task_id and depends_on are strings.
+    
+    This fixes LLM outputs where numeric task IDs or indices are used instead of strings.
+    Mutates task_dicts in place.
+    """
+    for t in task_dicts:
+        if not isinstance(t, dict):
+            continue
+            
+        # task_id must be string
+        if "task_id" in t and t["task_id"] is not None:
+            t["task_id"] = str(t["task_id"])
+            
+        # depends_on must be list of strings or None
+        if "depends_on" in t and t["depends_on"] is not None:
+            # If it's a single value (int or str), wrap in a list
+            if not isinstance(t["depends_on"], list):
+                t["depends_on"] = [t["depends_on"]]
+            
+            # Convert each element to string and filter out empty/None
+            t["depends_on"] = [
+                str(d) for d in t["depends_on"] 
+                if d is not None and str(d).strip()
+            ]
+            
+            # If list is now empty, set to None
+            if not t["depends_on"]:
+                t["depends_on"] = None
+        else:
+            # Explicitly set to None if missing or already None
+            t["depends_on"] = None
 
 
 def _apply_device_specific_task_routing(task_dicts: List[Dict[str, Any]], device_type: Literal["desktop", "mobile", "mixed"]) -> None:
@@ -1407,6 +1447,101 @@ def extract_credentials_from_request(user_request: Dict) -> Dict[str, Optional[s
     logger.info(f"✅ Credential extraction result - Email: {email}, Password: {'[EXTRACTED]' if password else 'NOT FOUND'}")
     
     return {'email': email, 'password': password}
+
+# ============================================================================
+# DEVICE INFERENCE & HANDOFF FUNCTIONS
+# ============================================================================
+
+def infer_device_from_context(prompt: str, original_request: str, last_device: str) -> str:
+    """Decide if this task should run on desktop or mobile."""
+    prompt_lower = (prompt or "").lower()
+    request_lower = (original_request or "").lower()
+    
+    # 1. Explicit mention in prompt
+    if "on my phone" in prompt_lower or "on my mobile" in prompt_lower:
+        return "mobile"
+    if "on my desktop" in prompt_lower or "on my laptop" in prompt_lower:
+        return "desktop"
+    
+    # 2. Fallback: last device or source device from original request
+    if "from my phone" in request_lower:
+        return last_device if last_device else "mobile"
+    if "from my desktop" in request_lower or "from my laptop" in request_lower:
+        return "desktop"
+    
+    return "desktop"
+
+
+def create_handoff_task(from_device: str, to_device: str, data_key: str = "input_content") -> Dict[str, Any]:
+    """Create a handoff task that transfers data between devices."""
+    return {
+        "task_id": f"handoff_{uuid.uuid4().hex[:8]}",
+        "goal": "Transfer data between devices",
+        "ai_prompt": f"Transfer the output of the previous task from {from_device} to {to_device}.",
+        "device": from_device,
+        "context": "local",
+        "target_agent": "action",
+        "extra_params": {
+            "handoff_required": True,
+            "handoff_to": to_device,
+            "handoff_data_key": data_key,
+            "single_task_handoff": True
+        },
+        "web_params": {},
+        "depends_on": None,
+        "success_message": f"Data sent to {to_device}.",
+        "failure_message": "Handoff failed."
+    }
+
+
+def assign_devices_and_handoffs(tasks: List[Dict[str, Any]], original_request: str) -> List[Dict[str, Any]]:
+    """Post-process tasks to assign devices and insert handoff tasks when crossing devices."""
+    if not tasks or not isinstance(tasks, list):
+        return tasks
+    
+    new_tasks = []
+    last_output_device = "desktop"
+    
+    # Check if user request has device hints
+    request_lower = (original_request or "").lower()
+    if "from my phone" in request_lower or "on my phone" in request_lower:
+        last_output_device = "mobile"
+    
+    for task in tasks:
+        if not isinstance(task, dict):
+            new_tasks.append(task)
+            continue
+        
+        # 1. Decide target device for this task
+        ai_prompt = task.get("ai_prompt", "")
+        target_device = infer_device_from_context(ai_prompt, original_request, last_output_device)
+        
+        # Override if device is already set in task
+        if "device" not in task or not task.get("device"):
+            task["device"] = target_device
+        else:
+            target_device = task.get("device")
+        
+        # 2. If device changed from previous task, insert a handoff task
+        if last_output_device != target_device and len(new_tasks) > 0:
+            # Get the task ID of the previous task to create dependency
+            prev_task_id = None
+            if new_tasks:
+                prev_task_id = new_tasks[-1].get("task_id")
+            
+            handoff_task = create_handoff_task(last_output_device, target_device)
+            if prev_task_id:
+                handoff_task["depends_on"] = [prev_task_id]
+            
+            # Current task should depend on handoff task
+            task["depends_on"] = [handoff_task["task_id"]] if not task.get("depends_on") else [handoff_task["task_id"]] + (task.get("depends_on") or [])
+            
+            new_tasks.append(handoff_task)
+        
+        new_tasks.append(task)
+        last_output_device = target_device
+    
+    return new_tasks
 
 # ============================================================================
 # WEB AUTOMATION SUPPORT - NO HARDCODED URLs
@@ -1831,12 +1966,26 @@ class TaskQueue:
             return retry_tasks
         return []
 
-# Global task queue
-task_queue = TaskQueue()
+# Global task queues keyed by session_id.
+# Keep a default alias for legacy call sites, but always bind the session
+# queue locally inside execution / interrupt handlers.
+task_queues: Dict[str, TaskQueue] = {}
+
+
+def get_session_task_queue(session_id: Optional[str]) -> TaskQueue:
+    queue_key = session_id or "__default__"
+    if queue_key not in task_queues:
+        task_queues[queue_key] = TaskQueue()
+    return task_queues[queue_key]
+
+
+task_queue = get_session_task_queue(None)
 coordinator_processing_lock = asyncio.Lock()
 
 # Track pending results
 pending_results: Dict[str, asyncio.Future] = {}
+# Track pending remote subtasks created for cross-device execution
+_pending_remote_tasks: Dict[str, asyncio.Future] = {}
 #hala edit ashan el web 
 _session_browser_state: Dict[str, Dict] = {}
 _session_youtube_results: Dict[str, List[Dict[str, Any]]] = {}
@@ -1882,6 +2031,20 @@ def create_guarded_future(task_id: str) -> asyncio.Future:
     future._task_id = task_id  # Attach ID for debugging
     future._created_at = datetime.now()
     return future
+
+
+def resolve_remote_task(task_id: str, result: Dict[str, Any]) -> bool:
+    """Resolve a pending remote task future when the device posts a result."""
+    future = _pending_remote_tasks.get(task_id)
+    if not future:
+        return False
+    if future.done():
+        return True
+    try:
+        future.set_result(result)
+        return True
+    except Exception:
+        return False
 
 # --- LangGraph State ---
 class CoordinatorState(BaseModel):
@@ -2186,6 +2349,9 @@ Do NOT repeat the same task prompt, same approach, or same tool sequence.
         if not task_dicts:
             raise ValueError("JSON array contained no task objects")
 
+        # Step E.5: sanitize task dicts to ensure string task_ids and depends_on
+        _sanitize_task_dicts(task_dicts)
+
         # Step F: normalize/validate shared goal across all tasks.
         # If missing, derive from first prompt to keep downstream execution safe.
         shared_goal = next(
@@ -2242,7 +2408,26 @@ Do NOT repeat the same task prompt, same approach, or same tool sequence.
             for t in task_dicts:
                 _normalize_cross_device_handoff_metadata(t)
 
-        action_tasks = [ActionTask(**task) for task in task_dicts]
+        # Create ActionTask objects with error handling for any remaining validation issues
+        action_tasks = []
+        for idx, task in enumerate(task_dicts):
+            try:
+                action_task = ActionTask(**task)
+                action_tasks.append(action_task)
+            except Exception as e:
+                logger.error(
+                    f"❌ Failed to create ActionTask for task {idx} ({task.get('task_id', 'unknown')}): {e}\n"
+                    f"Raw task dict: {json.dumps(task, indent=2, default=str)}"
+                )
+                # Re-sanitize and retry once
+                try:
+                    _sanitize_task_dicts([task])
+                    action_task = ActionTask(**task)
+                    action_tasks.append(action_task)
+                    logger.info(f"✅ ActionTask created successfully after re-sanitization")
+                except Exception as retry_err:
+                    logger.error(f"❌ ActionTask creation failed even after re-sanitization: {retry_err}")
+                    raise
 
         # ── LLM VALIDATION PASS ────────────────────────────────────────────────
         validation_prompt = f"""You are the AURA Task Decomposition Validator. Review the proposed decomposition for the user request.
@@ -2341,6 +2526,13 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
 
         #here
         logger.info(f"📋 Decomposed into {len(action_tasks)} tasks")
+        
+        # ── POST-PROCESS: Assign devices and insert handoff tasks ────────────
+        task_dicts_for_handoff = [t.dict() for t in action_tasks]
+        processed_task_dicts = assign_devices_and_handoffs(task_dicts_for_handoff, request_text)
+        action_tasks = [ActionTask(**task) for task in processed_task_dicts]
+        logger.info(f"📋 After device assignment and handoffs: {len(action_tasks)} tasks")
+        
         return {"tasks": action_tasks}
 
     except Exception as e:
@@ -2536,44 +2728,6 @@ def create_coordinator_graph():
         cross_device_target = raw_task.get("cross_device_target") or {}
         target_platform = raw_task.get("target_device") or cross_device_target.get("target_platform")
         is_cross_platform = bool(cross_device_target) or device_type == "mixed"
-        if is_cross_platform:
-            mgr = get_cross_platform_manager()
-            source_device_id = raw_task.get("source_device_id") or raw_task.get("device_id") or session_id or ""
-            original_request = raw_task.get("original_input") or raw_task.get("confirmation") or ""
-            if mgr and session_id:
-                delivery = await mgr.deliver_task(
-                    user_id=user_id,
-                    source_device_id=source_device_id,
-                    source_session_id=session_id,
-                    target_platform=target_platform,
-                    task_payload=raw_task,
-                    original_request=original_request,
-                )
-                return {
-                    "input": state["input"],
-                    "tasks": [],
-                    "primary_tasks": [],
-                    "queued_task_plans": [],
-                    "status": "routed",
-                    "session_id": session_id,
-                    "original_message_id": original_message_id,
-                    "user_id": user_id,
-                    "preferences_context": "Cross-platform request routed",
-                    "plan_error": "",
-                    "routing_result": delivery,
-                }
-            return {
-                "input": state["input"],
-                "tasks": [],
-                "primary_tasks": [],
-                "queued_task_plans": [],
-                "status": "failed",
-                "session_id": session_id,
-                "original_message_id": original_message_id,
-                "user_id": user_id,
-                "preferences_context": "Cross-platform request failed",
-                "plan_error": "Cross-platform manager unavailable or session missing.",
-            }
 
         # Resume paused credentials-required tasks instead of decomposing a fresh plan.
         saved_browser = _session_browser_state.get(session_id, {}) if session_id else {}
@@ -2790,6 +2944,14 @@ def create_coordinator_graph():
         # user_profile: personalization data forwarded from Language Agent
         user_profile = state.get("input", {}).get("user_profile") or {}
         user_id = state.get("input", {}).get("user_id", "default_user")
+        task_queue = get_session_task_queue(session_id)
+        current_device = _normalize_device_type(state.get("input", {}).get("device_type", "desktop"))
+        current_device_id = (
+            state.get("input", {}).get("device_id")
+            or state.get("input", {}).get("source_device_id")
+            or session_id
+            or ""
+        )
 
         if EXECUTION_PAUSED or state.get("input", {}).get("execution_mode") == "plan_only":
             try:
@@ -3207,11 +3369,31 @@ def create_coordinator_graph():
             except Exception as progress_err:
                 logger.debug(f"Could not publish per-task progress: {progress_err}")
 
-            result = await execute_single_task(
-                current_task, session_id, original_message_id,
-                user_language, output_language, user_profile,
-                user_id
-            )
+            task_device = _normalize_device_type(getattr(current_task, "device", "desktop"))
+            
+            # FIX: Language tasks must ALWAYS execute on the source device (where the user is)
+            # They require user interaction (confirmation/response) which cannot happen over remote dispatch
+            if current_task.target_agent == "language":
+                task_device = current_device
+                logger.info(f"🔧 Language task {current_task.task_id} forced to source device ({current_device}) for user interaction")
+            
+            if task_device and task_device != current_device:
+                result = await route_single_task(
+                    current_task,
+                    session_id,
+                    original_message_id,
+                    user_language,
+                    output_language,
+                    user_profile,
+                    user_id,
+                    current_device_id,
+                )
+            else:
+                result = await execute_single_task(
+                    current_task, session_id, original_message_id,
+                    user_language, output_language, user_profile,
+                    user_id
+                )
             result = await handle_confirmation_revision_loop(current_task, result)
 
             fallback_result = await _attempt_email_web_fallback(
@@ -4330,6 +4512,7 @@ Extract now:"""
             success_count = sum(1 for r in results.values() if _get_status(r) == "success")
             total_count = len(results)
             plan_reward = success_count / max(total_count, 1)
+            task_queue = get_session_task_queue(session_id)
 
             logger.info(
                 f"🔄 ICRL plan check: round={icrl_round}, "
@@ -4608,6 +4791,7 @@ async def execute_single_task(
     user_id: str = "default_user"
 ) -> TaskResult:
     """Execute a single task via action/reasoning layer or mobile strategy"""
+    task_queue = get_session_task_queue(session_id)
 
     # Native scheduled-delay handling prevents long waits from timing out in the
     # execution sandbox (which currently has a 60s cap for action tasks).
@@ -4944,6 +5128,118 @@ async def execute_single_task(
     finally:
         pending_results.pop(task.task_id, None)
 
+
+async def route_single_task(
+    task: ActionTask,
+    session_id: str,
+    original_message_id: str,
+    user_language: str = "en",
+    output_language: str = "en",
+    user_profile: Optional[Dict[str, Any]] = None,
+    user_id: str = "default_user",
+    source_device_id: str = "",
+) -> TaskResult:
+    """Route a single task to the best matching remote device and wait for its result."""
+    mgr = get_cross_platform_manager()
+    if not mgr:
+        return TaskResult(
+            task_id=task.task_id,
+            status="failed",
+            error="Cross-platform manager unavailable",
+        )
+
+    future = create_guarded_future(task.task_id)
+    _pending_remote_tasks[task.task_id] = future
+
+    target_device = await mgr._registry.get_target_device(  # noqa: SLF001 - coordinator needs registry lookup
+        user_id=user_id,
+        target_platform=_normalize_device_type(getattr(task, "device", "") or None),
+        exclude_device_id=source_device_id or None,
+    )
+    if not target_device:
+        _pending_remote_tasks.pop(task.task_id, None)
+        return TaskResult(
+            task_id=task.task_id,
+            status="failed",
+            error="No matching target device available",
+        )
+
+    target_device_id = target_device.get("device_id")
+    target_session_id = target_device.get("session_id")
+    if not target_device_id or not target_session_id:
+        _pending_remote_tasks.pop(task.task_id, None)
+        return TaskResult(
+            task_id=task.task_id,
+            status="failed",
+            error="Target device is missing an active session",
+        )
+
+    task_payload = task.model_dump()
+    task_payload["user_id"] = user_id
+    task_payload["source_device_id"] = source_device_id
+    task_payload["source_session_id"] = session_id
+
+    if task.target_agent == "reasoning":
+        task_payload["user_language"] = user_language
+        task_payload["output_language"] = output_language or user_language
+        if user_profile:
+            task_payload["user_profile"] = user_profile
+
+    try:
+        # Include source server public URL so the executing device can POST results back
+        source_server_url = os.getenv("BASE_URL") or os.environ.get("BASE_URL")
+        await mgr.create_remote_task(
+            user_id=user_id,
+            target_device_id=target_device_id,
+            target_session_id=target_session_id,
+            task=task,
+            source_server_url=source_server_url,
+        )
+
+        if task.target_agent == "language":
+            wait_timeout = 180
+        elif task.target_agent == "action" and str(getattr(task, "device", "")).strip().lower() == "mobile":
+            task_timeout_hint = task.extra_params.get("timeout_seconds") if isinstance(task.extra_params, dict) else None
+            if not isinstance(task_timeout_hint, (int, float)):
+                task_timeout_hint = 0
+            wait_timeout = max(180, int(task_timeout_hint) + 30)
+        else:
+            wait_timeout = 60
+
+        result_payload = await asyncio.wait_for(future, timeout=wait_timeout)
+        payload_status = result_payload.get("status", "failed")
+        if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
+            payload_status = "failed"
+
+        content = result_payload.get("content")
+        if not content:
+            content = result_payload.get("details")
+        if isinstance(content, dict):
+            content = json.dumps(content, indent=2)
+
+        return TaskResult(
+            task_id=task.task_id,
+            status=payload_status,
+            content=content,
+            error=result_payload.get("error"),
+            details=result_payload.get("details"),
+            metadata=result_payload.get("metadata") or {},
+            needs_clarification=bool(result_payload.get("needs_clarification", False)),
+            clarification_question=result_payload.get("clarification_question"),
+            clarification_type=result_payload.get("clarification_type"),
+            recoverable=bool(result_payload.get("recoverable", False)),
+        )
+
+    except asyncio.TimeoutError:
+        logger.error(f"⏰ Routed task {task.task_id} timeout while waiting for device result")
+        return TaskResult(
+            task_id=task.task_id,
+            status="failed",
+            error="Routed task timeout",
+        )
+    finally:
+        _pending_remote_tasks.pop(task.task_id, None)
+
 # Initialize graph
 coordinator_graph = create_coordinator_graph()
 
@@ -5261,6 +5557,7 @@ async def start_coordinator_agent(broker_instance):
     async def handle_interrupt_command(message: AgentMessage):
         """Handle pause/stop/resume commands with context snapshot support"""
         command = message.payload.get("command")
+        task_queue = get_session_task_queue(message.session_id)
         
         if command == "pause":
             task_queue.pause()

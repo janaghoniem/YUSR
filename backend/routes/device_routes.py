@@ -19,6 +19,7 @@ from typing import Dict, Any, Optional, List
 import logging
 
 from routes.cross_platform_manager import get_cross_platform_manager
+from agents.language_agent import active_agents
 
 logger = logging.getLogger(__name__)
 
@@ -366,48 +367,19 @@ async def list_devices():
 # Cross-platform task endpoints (NEW)
 # ---------------------------------------------------------------------------
 
-@router.get("/cross-platform-tasks")
-async def get_cross_platform_tasks(
-    user_id: str = Query(..., description="Authenticated user ID"),
-    device_id: str = Query(..., description="This device's ID"),
-):
-    """
-    Poll for cross-platform tasks assigned to this device.
-    Called by the device after reconnecting or periodically.
-
-    Returns pending tasks and marks them as delivered.
-    user_id + device_id are validated server-side to prevent
-    one device claiming another user's tasks (FIX V-6).
-    """
-    if not user_id or not device_id:
-        raise HTTPException(status_code=400, detail="user_id and device_id are required")
-
-    try:
-        mgr = get_cross_platform_manager()
-        if not mgr:
-            return {"tasks": [], "count": 0}
-
-        tasks = await mgr.claim_pending_tasks(user_id=user_id, device_id=device_id)
-        return {"tasks": tasks, "count": len(tasks)}
-
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch cross-platform tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/cross-platform-result")
-async def post_cross_platform_result(
+@router.post("/remote-task-result")
+async def submit_remote_task_result(
     result_data: Dict[str, Any] = Body(...),
 ):
     """
-    Report the result of a cross-platform task back to the server.
-    The executing device calls this after completing the task.
+    Report the result of a remotely executed subtask.
+    The device calls this after executing a task received via WebSocket.
     """
     task_id = result_data.get("task_id", "")
     user_id = result_data.get("user_id", "")
     device_id = result_data.get("device_id", "")
     result = result_data.get("result", {})
-    status = result_data.get("status", "completed")
+    status = result.get("status", "completed")
 
     if not task_id or not user_id or not device_id:
         raise HTTPException(status_code=400, detail="task_id, user_id, and device_id are required")
@@ -417,15 +389,49 @@ async def post_cross_platform_result(
         if not mgr:
             return {"status": "ok", "message": "Manager not initialized"}
 
-        success = await mgr.update_task_result(
+        success = await mgr.complete_remote_task(
             task_id=task_id,
             user_id=user_id,
             device_id=device_id,
             result=result,
             status=status,
         )
+        # Inside submit_remote_task_result, after mgr.complete_remote_task
+        result_for_future = {
+            "status": status,
+            "task_id": task_id,
+            "content": result.get("content") or result.get("details") or "",
+            "details": str(result.get("details")) if result.get("details") else None,
+            "error": result.get("error"),
+            "metadata": result.get("metadata", {}),
+            "needs_clarification": result.get("needs_clarification", False),
+            "clarification_question": result.get("clarification_question"),
+            "clarification_type": result.get("clarification_type"),
+            "recoverable": result.get("recoverable", False),
+        }
+        resolve_remote_task(task_id, result_for_future)
         if not success:
             raise HTTPException(status_code=404, detail="Task not found or access denied")
+
+        from agents.coordinator_agent.coordinator_agent import resolve_remote_task
+
+        if not resolve_remote_task(task_id, {
+            "status": status,
+            "task_id": task_id,
+            "content": result,
+            "details": result,
+        }):
+            logger.warning(f"⚠️ Remote task {task_id} result arrived but no pending future (maybe already timed out)")
+
+        # Clear any stale clarification waiting on this session if available.
+        session_id = result_data.get("session_id", "")
+        if session_id:
+            agent_key = f"{user_id}_{session_id}"
+            if agent_key in active_agents:
+                try:
+                    active_agents[agent_key].awaiting_user_response = None
+                except Exception:
+                    pass
 
         return {"status": "ok", "task_id": task_id}
 
@@ -433,4 +439,45 @@ async def post_cross_platform_result(
         raise
     except Exception as e:
         logger.error(f"❌ Failed to store cross-platform task result: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/clear-pending-confirmations")
+async def clear_pending_confirmations(
+    user_id: str = Query(..., description="Authenticated user ID"),
+    session_id: str = Query(..., description="Session ID"),
+    reason: str = Query("timeout", description="Reason for clearing: timeout, failed, or success"),
+):
+    """
+    Explicitly clear pending confirmations/clarifications for a session.
+    Called when:
+    - Task times out (device didn't respond in time)
+    - Task fails with error
+    - Task succeeds but pending confirmation still exists
+    
+    This prevents stale confirmations from blocking subsequent messages.
+    """
+    if not user_id or not session_id:
+        raise HTTPException(status_code=400, detail="user_id and session_id are required")
+
+    try:
+        agent_key = f"{user_id}_{session_id}"
+        
+        if agent_key in active_agents:
+            try:
+                agent = active_agents[agent_key]
+                # Clear the awaiting_user_response field
+                agent.awaiting_user_response = None
+                logger.info(f"✅ Cleared pending confirmations for {agent_key} (reason: {reason})")
+                return {"status": "ok", "message": "Pending confirmations cleared"}
+            except Exception as e:
+                logger.warning(f"⚠️ Could not clear pending confirmations for {agent_key}: {e}")
+                # Still return success to avoid blocking the calling code
+                return {"status": "ok", "message": f"Clear attempted: {str(e)}"}
+        else:
+            logger.debug(f"ℹ️ No active agent found for {agent_key}, nothing to clear")
+            return {"status": "ok", "message": "No active agent found"}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to clear pending confirmations: {e}")
         raise HTTPException(status_code=500, detail=str(e))

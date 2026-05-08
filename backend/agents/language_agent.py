@@ -356,7 +356,7 @@ Before asking ANY question, verify:
 - **System actions** (screenshot/alarm/reminder): Action itself (parameters like time can be inferred from "tomorrow at 7am")
 
 ### OUTPUT SCHEMA (Strict JSON Only)
-Output ONLY valid JSON with this structure. NO BACKSLASHES IN STRINGS:
+Output ONLY valid JSON with this structure. Use standard JSON escaping: double quotes for strings, backslashes to escape quotes and backslashes.
 {
     "is_complete": boolean,
     "response_text": "Brief answer/confirmation/single clarification question in the USER's language",
@@ -713,7 +713,6 @@ class LanguageAgent:
                 if inner and inner[-1].strip() == "```":
                     inner = inner[:-1]
                 cleaned = "\n".join(inner).strip()
-            cleaned = cleaned.replace("\\\\", "/").replace("\\", "/")
             
             # Additional cleanup for literal string wrapping
             if cleaned.startswith('"') and cleaned.endswith('"'):
@@ -1046,107 +1045,113 @@ class LanguageAgent:
 
     def parse_response(self, response: str) -> Tuple[str, bool, Optional[str], str]:
         """
-        Parse LLM response — HARDENED after pentest.
-        F2: Extract first valid JSON only, type-check is_complete,
-        scan response_text for injection markers.
-        Also extracts personal_info and output_language from main branch schema.
+        Parse LLM response — HARDENED.
+        Extracts first valid JSON object, repairs common issues, and returns
+        (response_text, is_complete, personal_info, output_language).
         """
-
-        # F2: Injection markers that should never appear in response_text
         INJECTION_MARKERS = [
-            "ignore previous", "ignore all previous",
-            "forget everything", "disregard your",
-            "system note", "important system",
-            "you must also", "set response_text",
-            "set your response_text", "when forming your json",
-            "<|system|>", "<|user|>", "<|assistant|>",
-            "also add a second task", "add a task to",
+            "ignore previous", "ignore all previous", "forget everything", "disregard your",
+            "system note", "important system", "you must also", "set response_text",
+            "set your response_text", "when forming your json", "<|system|>", "<|user|>",
+            "<|assistant|>", "also add a second task", "add a task to",
             "using pathlib", "using shutil",
         ]
 
-        def _attempt_repair(raw: str):
-            s = raw.strip()
-            opens = s.count('{') - s.count('}')
-            quotes = s.count('"') % 2
-            suffix = ""
-            if quotes:
-                suffix += '"'
-            suffix += "}" * max(opens, 0)
-            repaired = s + suffix
-            try:
-                import json as _json
-                _json.loads(repaired)
-                return repaired
-            except Exception:
-                return None
-
-        def _extract_first_json_object(text: str) -> Optional[str]:
-            """Extract first balanced JSON object while respecting quoted strings."""
-            start = text.find("{")
+        def extract_first_json(raw: str) -> Optional[str]:
+            """Return the first balanced JSON object/array found in raw text."""
+            start = raw.find("{")
+            if start == -1:
+                start = raw.find("[")
             if start == -1:
                 return None
 
             depth = 0
             in_string = False
-            escape_next = False
-            for i in range(start, len(text)):
-                ch = text[i]
-
-                if escape_next:
-                    escape_next = False
+            escape = False
+            for i in range(start, len(raw)):
+                ch = raw[i]
+                if escape:
+                    escape = False
                     continue
-
-                if ch == "\\" and in_string:
-                    escape_next = True
+                if ch == '\\' and in_string:
+                    escape = True
                     continue
-
                 if ch == '"':
                     in_string = not in_string
                     continue
-
                 if in_string:
                     continue
-
-                if ch == "{":
+                if ch == '{' or ch == '[':
                     depth += 1
-                elif ch == "}":
+                elif ch == '}' or ch == ']':
                     depth -= 1
                     if depth == 0:
-                        return text[start:i + 1]
-
+                        return raw[start:i+1]
             return None
 
+        def repair_json(text: str) -> str:
+            """Fix common JSON errors: single quotes, trailing commas, unclosed strings."""
+            import re
+            # Replace single quotes around keys/values with double quotes
+            fixed = []
+            in_double = False
+            in_single = False
+            escape = False
+            i = 0
+            while i < len(text):
+                ch = text[i]
+                if escape:
+                    fixed.append(ch)
+                    escape = False
+                    i += 1
+                    continue
+                if ch == '\\':
+                    fixed.append(ch)
+                    escape = True
+                    i += 1
+                    continue
+                if ch == '"' and not in_single:
+                    in_double = not in_double
+                    fixed.append(ch)
+                    i += 1
+                    continue
+                if ch == "'" and not in_double:
+                    in_single = not in_single
+                    fixed.append('"')   # replace single quote with double
+                    i += 1
+                    continue
+                fixed.append(ch)
+                i += 1
+
+            text = ''.join(fixed)
+            # Remove trailing commas before } or ]
+            text = re.sub(r',\s*}', '}', text)
+            text = re.sub(r',\s*]', ']', text)
+            # Close unclosed strings: if odd number of quotes, add one at the end
+            if text.count('"') % 2 == 1:
+                text += '"'
+            return text
+
         try:
-            cleaned_response = str(response or "").strip()
+            raw_response = str(response or "").strip()
 
-            # F2: Extract FIRST valid JSON object only — ignore anything after it
-            json_obj = _extract_first_json_object(cleaned_response)
-            if not json_obj:
-                # Try repair
-                repaired = _attempt_repair(cleaned_response)
-                if repaired:
-                    import json as _json
-                    parsed = _json.loads(repaired)
-                else:
-                    return "I'm sorry, I didn't quite understand. Could you clarify?", False, None, self.preferred_language
-            else:
-                import json as _json
-                try:
-                    parsed = _json.loads(json_obj)
-                except _json.JSONDecodeError:
-                    repaired = _attempt_repair(json_obj)
-                    if repaired:
-                        parsed = _json.loads(repaired)
-                    else:
-                        return "I'm sorry, I didn't quite understand. Could you clarify?", False, None, self.preferred_language
+            # 1. Extract the first JSON object/array
+            json_chunk = extract_first_json(raw_response)
+            if not json_chunk:
+                logger.warning("No JSON object found in response")
+                return self._fallback_parse_response()
 
-            # F2: Type-check is_complete — must be a boolean, not a string
-            is_complete_raw = parsed.get("is_complete", False)
-            if not isinstance(is_complete_raw, bool):
-                logger.warning(f"⚠️ is_complete was not bool: {type(is_complete_raw)} — forcing False")
+            # 2. Repair common issues
+            repaired = repair_json(json_chunk)
+
+            # 3. Parse
+            parsed = json.loads(repaired)
+
+            # 4. Validate and extract fields
+            is_complete = parsed.get("is_complete", False)
+            if not isinstance(is_complete, bool):
+                logger.warning(f"is_complete is not bool: {type(is_complete)} -> forcing False")
                 is_complete = False
-            else:
-                is_complete = is_complete_raw
 
             response_text = parsed.get("response_text", "")
             personal_info = parsed.get("personal_info", None)
@@ -1157,31 +1162,30 @@ class LanguageAgent:
             if output_language not in ("en", "ar"):
                 output_language = self.preferred_language
 
-            # F2: Scan response_text for injection markers
-            response_text_lower = response_text.lower()
+            # 5. Injection detection
+            lower_text = response_text.lower()
             for marker in INJECTION_MARKERS:
-                if marker in response_text_lower:
-                    logger.warning(
-                        f"🚫 F2: Injection marker in response_text: '{marker}' — "
-                        f"blocking task completion"
-                    )
-                    return (
-                        "I'm not able to process that request. Blocked by security.",
-                        False,
-                        None,
-                        self.preferred_language,
-                    )
+                if marker in lower_text:
+                    logger.warning(f"🚫 Injection marker in response_text: '{marker}'")
+                    return self._fallback_parse_response(blocked=True)
 
             return response_text, is_complete, personal_info, output_language
 
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e}\nResponse snippet: {response[:200]}")
+            return self._fallback_parse_response()
         except Exception as e:
-            logger.warning(f"⚠️ Failed to parse response: {e}")
-            fallback_text = (
-                "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟"
-                if self.preferred_language == "ar"
-                else "I'm sorry, I didn't quite understand. Could you clarify?"
-            )
-            return fallback_text, False, None, self.preferred_language
+            logger.warning(f"Unexpected parse error: {e}")
+            return self._fallback_parse_response()
+
+    def _fallback_parse_response(self, blocked=False) -> Tuple[str, bool, Optional[str], str]:
+        """Unified fallback when parsing fails or injection detected."""
+        lang = self.preferred_language
+        if blocked:
+            msg = "I'm not able to process that request. Blocked by security."
+            return msg, False, None, lang
+        msg = "عذرًا، لم أفهم ذلك جيداً. هل يمكنك التوضيح؟" if lang == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+        return msg, False, None, lang
         
 
     def user_turn(self, user_text: str) -> tuple:

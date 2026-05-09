@@ -5148,9 +5148,6 @@ async def route_single_task(
             error="Cross-platform manager unavailable",
         )
 
-    future = create_guarded_future(task.task_id)
-    _pending_remote_tasks[task.task_id] = future
-
     target_device = await mgr._registry.get_target_device(  # noqa: SLF001 - coordinator needs registry lookup
         user_id=user_id,
         target_platform=_normalize_device_type(getattr(task, "device", "") or None),
@@ -5186,16 +5183,16 @@ async def route_single_task(
             task_payload["user_profile"] = user_profile
 
     try:
-        # Include source server public URL so the executing device can POST results back
-        source_server_url = os.getenv("BASE_URL") or os.environ.get("BASE_URL")
+        # Create a pending remote task in MongoDB (no HTTP callback)
         await mgr.create_remote_task(
             user_id=user_id,
             target_device_id=target_device_id,
             target_session_id=target_session_id,
             task=task,
-            source_server_url=source_server_url,
+            source_server_url=None,
         )
 
+        # Determine reasonable timeout based on agent type
         if task.target_agent == "language":
             wait_timeout = 180
         elif task.target_agent == "action" and str(getattr(task, "device", "")).strip().lower() == "mobile":
@@ -5206,39 +5203,51 @@ async def route_single_task(
         else:
             wait_timeout = 60
 
-        result_payload = await asyncio.wait_for(future, timeout=wait_timeout)
-        payload_status = result_payload.get("status", "failed")
-        if payload_status not in {"success", "failed", "pending", "awaiting_confirmation"}:
-            payload_status = "failed"
+        # Poll MongoDB for completion
+        from core.mongo import get_database
 
-        content = result_payload.get("content")
-        if not content:
-            content = result_payload.get("details")
-        if isinstance(content, dict):
-            content = json.dumps(content, indent=2)
+        db = get_database("aura_db")
+        if db is None:
+            return TaskResult(task_id=task.task_id, status="failed", error="MongoDB unavailable")
+        col = db["cross_platform_tasks"]
 
-        return TaskResult(
-            task_id=task.task_id,
-            status=payload_status,
-            content=content,
-            error=result_payload.get("error"),
-            details=result_payload.get("details"),
-            metadata=result_payload.get("metadata") or {},
-            needs_clarification=bool(result_payload.get("needs_clarification", False)),
-            clarification_question=result_payload.get("clarification_question"),
-            clarification_type=result_payload.get("clarification_type"),
-            recoverable=bool(result_payload.get("recoverable", False)),
-        )
+        start = asyncio.get_event_loop().time()
+        poll_interval = 1.0
+        while True:
+            doc = await asyncio.to_thread(col.find_one, {"task_id": task.task_id, "user_id": user_id})
+            if doc:
+                status = doc.get("status")
+                if status in ("completed", "failed", "delivered"):
+                    result_data = doc.get("result", {}) or {}
+                    payload_status = "success" if status == "completed" else "failed"
+                    content = result_data.get("content") or result_data.get("details")
+                    if isinstance(content, dict):
+                        content = json.dumps(content, indent=2)
+                    return TaskResult(
+                        task_id=task.task_id,
+                        status=payload_status,
+                        content=content,
+                        error=result_data.get("error"),
+                        details=result_data.get("details"),
+                        metadata=result_data.get("metadata") or {},
+                        needs_clarification=bool(result_data.get("needs_clarification", False)),
+                        clarification_question=result_data.get("clarification_question"),
+                        clarification_type=result_data.get("clarification_type"),
+                        recoverable=bool(result_data.get("recoverable", False)),
+                    )
+            elapsed = asyncio.get_event_loop().time() - start
+            if elapsed >= wait_timeout:
+                logger.error(f"⏰ Routed task {task.task_id} timeout while polling for device result")
+                return TaskResult(
+                    task_id=task.task_id,
+                    status="failed",
+                    error="Routed task timeout",
+                )
+            await asyncio.sleep(poll_interval)
 
-    except asyncio.TimeoutError:
-        logger.error(f"⏰ Routed task {task.task_id} timeout while waiting for device result")
-        return TaskResult(
-            task_id=task.task_id,
-            status="failed",
-            error="Routed task timeout",
-        )
-    finally:
-        _pending_remote_tasks.pop(task.task_id, None)
+    except Exception as e:
+        logger.error(f"❌ Failed routing remote task {task.task_id}: {e}")
+        return TaskResult(task_id=task.task_id, status="failed", error=str(e))
 
 # Initialize graph
 coordinator_graph = create_coordinator_graph()

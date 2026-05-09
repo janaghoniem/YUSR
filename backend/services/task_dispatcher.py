@@ -79,10 +79,9 @@ class TaskDispatcher:
         from core.dependencies import ws_manager
         # Local execution helpers
         try:
-            from agents.coordinator_agent.coordinator_agent import execute_single_task, resolve_remote_task
+            from agents.coordinator_agent.coordinator_agent import execute_single_task
         except Exception:
             execute_single_task = None
-            resolve_remote_task = None
 
         db = get_database("aura_db")
         if db is None:
@@ -93,12 +92,12 @@ class TaskDispatcher:
 
         while self._running:
             try:
-                await self._tick(collection, ws_manager, execute_single_task, resolve_remote_task)
+                await self._tick(collection, ws_manager, execute_single_task)
             except Exception as exc:
                 logger.error(f"❌ TaskDispatcher error: {exc}", exc_info=True)
             await asyncio.sleep(self.poll_interval)
 
-    async def _tick(self, collection, ws_manager, execute_single_task, resolve_remote_task) -> None:
+    async def _tick(self, collection, ws_manager, execute_single_task) -> None:
         """One poll cycle: find pending tasks and push to connected devices."""
         now = datetime.now(timezone.utc)
 
@@ -167,31 +166,8 @@ class TaskDispatcher:
                     logger.error(f"Local execution failed for task {task_id}: {e}", exc_info=True)
                     result = None
 
-                # Report back to source server if URL present
-                source_url = task_doc.get("source_server_url")
-                if source_url and result is not None:
-                    try:
-                        import aiohttp
-                        payload = {
-                            "task_id": task_id,
-                            "user_id": task_doc.get("user_id"),
-                            "device_id": self.device_id,
-                            "result": result.model_dump() if hasattr(result, 'model_dump') else result,
-                        }
-                        async with aiohttp.ClientSession() as session:
-                            await session.post(f"{source_url}/device/remote-task-result", json=payload)
-                    except Exception as e:
-                        logger.warning(f"Failed to POST result to source {source_url} for task {task_id}: {e}")
-                else:
-                    # As fallback, update MongoDB doc and try resolving local future if present
-                    try:
-                        if result is not None and resolve_remote_task:
-                            try:
-                                resolve_remote_task(task_id, result.model_dump())
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                # Result is persisted to MongoDB below; no HTTP callback to source server
+                logger.info(f"📥 Task {task_id} executed locally on {self.device_id}; result will be persisted in MongoDB")
 
                 # Persist completion
                 await asyncio.to_thread(

@@ -248,6 +248,7 @@ async def register_device_get(
     name: Optional[str] = None,
     android_version: Optional[str] = None,
     session_id: str = Query(default=""),
+    platform: str = Query(default="mobile", description="Device platform: 'mobile' or 'desktop'"),
 ):
     """Register device via GET (used by Android app startup)."""
     logger.info(f"✅ Registering device: {device_id} for user: {user_id}")
@@ -277,7 +278,7 @@ async def register_device_get(
                     mgr._registry.register_device(
                         user_id=user_id,
                         device_id=device_id,
-                        platform="mobile",
+                        platform=platform,
                         session_id=session_id,
                         label=name or f"Device {device_id}",
                     )
@@ -396,32 +397,8 @@ async def submit_remote_task_result(
             result=result,
             status=status,
         )
-        # Inside submit_remote_task_result, after mgr.complete_remote_task
-        result_for_future = {
-            "status": status,
-            "task_id": task_id,
-            "content": result.get("content") or result.get("details") or "",
-            "details": str(result.get("details")) if result.get("details") else None,
-            "error": result.get("error"),
-            "metadata": result.get("metadata", {}),
-            "needs_clarification": result.get("needs_clarification", False),
-            "clarification_question": result.get("clarification_question"),
-            "clarification_type": result.get("clarification_type"),
-            "recoverable": result.get("recoverable", False),
-        }
-        resolve_remote_task(task_id, result_for_future)
         if not success:
             raise HTTPException(status_code=404, detail="Task not found or access denied")
-
-        from agents.coordinator_agent.coordinator_agent import resolve_remote_task
-
-        if not resolve_remote_task(task_id, {
-            "status": status,
-            "task_id": task_id,
-            "content": result,
-            "details": result,
-        }):
-            logger.warning(f"⚠️ Remote task {task_id} result arrived but no pending future (maybe already timed out)")
 
         # Clear any stale clarification waiting on this session if available.
         session_id = result_data.get("session_id", "")
@@ -433,6 +410,7 @@ async def submit_remote_task_result(
                 except Exception:
                     pass
 
+        logger.info(f"✅ Remote task {task_id} result stored in MongoDB (status={status})")
         return {"status": "ok", "task_id": task_id}
 
     except HTTPException:

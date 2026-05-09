@@ -101,7 +101,7 @@ const VoiceControls = ({
     return (
       <div className="chat-input-wrapper" role="search" aria-label="Text input area">
         <BorderGlow 
-          style={{ width: '100%', maxWidth: '700px', display: 'flex' }} 
+          style={{ width: '100%', maxWidth: '760px', display: 'block' }} 
           className="rounded-2xl" 
           glowColor="40 80 80" 
           colors={['#c084fc', '#f472b6', '#38bdf8']}
@@ -214,12 +214,12 @@ const VoiceControls = ({
 
   /* ── VOICE MODE ───────────────────────────────────────────── */
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', marginTop: 'auto' }}>
+    <div style={{ display: 'block', flexDirection: 'column', alignItems: 'center', marginTop: 'auto' }}>
       <BorderGlow 
         className={`rounded-full ${isRecording ? "recording" : ""} ${wakePulse ? "wake-pulse" : ""}`}
         style={{ 
           width: 'fit-content', 
-          display: 'flex', 
+          display: 'block', 
           borderRadius: '9999px',
           alignSelf: 'center'
         }}

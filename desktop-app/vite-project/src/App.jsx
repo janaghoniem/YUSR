@@ -1,5 +1,5 @@
 // App.jsx
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import Sidebar from "./components/SideBar";
 import HeaderContent from "./components/HeaderContent";
 import VoiceControls from "./components/VoiceControls";
@@ -9,9 +9,15 @@ import LoginPage from "./components/onboarding/LoginPage";
 import ChatHistory from "./components/ChatHistory";
 import TitleBar from "./components/TitleBar";
 import Aurora from "./components/onboarding/Aurora";
-import SplitText from "./components/onboarding/SplitText";
+import { TaskQueuesPopover } from "./components/TaskQueuesPopover";
+import { DraftPanel } from "./components/DraftPanel";
 import screenReader from "./utils/ScreenReader";
 import { requestTranscription } from "./utils/transcribeClient";
+import {
+  classifyInterruptSemantic,
+  classifyPolarIntent,
+  isReadAloudIntentSemantic,
+} from "./utils/semanticIntent";
 import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucide-react";
 
 function App() {
@@ -44,11 +50,7 @@ function App() {
   const [authState, setAuthState] = useState(() => {
     const onboardingComplete = localStorage.getItem("onboardingComplete") === "true";
     const storedUserId = localStorage.getItem("userId");
-
-    if (onboardingComplete && storedUserId) {
-      return "app";
-    }
-
+    if (onboardingComplete && storedUserId) return "app";
     return "login";
   });
   // ✅ SESSION ID - Can be changed when switching chats or creating new chat
@@ -67,7 +69,7 @@ function App() {
   const [clarificationResponseToId, setClarificationResponseToId] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [chatMode, setChatMode] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true); // ✅ Default collapsed
   const [showSettings, setShowSettings] = useState(false);
   const [deviceType, setDeviceType] = useState("desktop");
   const [ttsVoice, setTtsVoice] = useState(() => localStorage.getItem("ttsVoice") || "Gacrux");
@@ -104,16 +106,30 @@ function App() {
   // Structured response state
   const [structuredResponse, setStructuredResponse] = useState(null);
   const [offerReadAloud, setOfferReadAloud] = useState(false);
+  const [queueSnapshot, setQueueSnapshot] = useState({ active: [], pending: [], deferred: [] });
+  const [workspaceArtifacts, setWorkspaceArtifacts] = useState([]);
+  const [activeWorkspacePanelId, setActiveWorkspacePanelId] = useState(null);
+  const [draftFlow, setDraftFlow] = useState({
+    active: false,
+    awaitingListenChoice: false,
+    awaitingPageApproval: false,
+    awaitingFinalApproval: false,
+    pageIndex: 0,
+    pages: [],
+    fullContent: "",
+    confirmationId: null,
+  });
 
-  // Interrupt commands (EN + AR)
-  const INTERRUPT_COMMANDS = {
-    "aura stop": "stop", "aura pause": "pause", "aura undo": "stop",
-    "aura resume": "resume", "aura continue": "resume",
-    "أورا وقف": "stop", "أورا توقف": "stop", "أورا إيقاف": "stop",
-    "أورا استمر": "resume", "أورا كمل": "resume", "أورا تراجع": "stop",
-  };
+  // Completed tasks tracking for the new UI
+  const [completedQueuedTasks, setCompletedQueuedTasks] = useState([]);
+  const [completedScheduledTasks, setCompletedScheduledTasks] = useState([]);
+  const [liveCaptionPage, setLiveCaptionPage] = useState(0);
+  const [typedCaption, setTypedCaption] = useState("");
+  const prevQueueSnapshotRef = useRef({ active: [], pending: [], deferred: [] });
+  
+  // ✅ Cross-platform session-scoped tasks
+  const [sessionScopedTasks, setSessionScopedTasks] = useState([]);
 
-  // Detected user language — set on first voice interaction, persists for session
   const [userLanguage, setUserLanguage] = useState(() => localStorage.getItem("userLanguage") || null);
   const userLanguageRef = useRef(localStorage.getItem("userLanguage") || null);
   const preferredLanguageRef = useRef(localStorage.getItem("preferredLanguage") || localStorage.getItem("appLanguage") || localStorage.getItem("userLanguage") || "en");
@@ -144,6 +160,42 @@ function App() {
   const lastSpeechAtRef = useRef(0);
   const recordingStartedAtRef = useRef(0);
   const audioRef = useRef(new Audio());
+  const draftDecisionTimerRef = useRef(null);
+  const draftFlowRef = useRef(draftFlow);
+
+  // Track completed tasks from queue changes
+  useEffect(() => {
+    const prev = prevQueueSnapshotRef.current;
+    const currentActive = queueSnapshot.active || [];
+    const currentPending = queueSnapshot.pending || [];
+    const currentDeferred = queueSnapshot.deferred || [];
+    const prevActive = prev.active || [];
+    const prevPending = prev.pending || [];
+    const prevDeferred = prev.deferred || [];
+    
+    const allCurrent = [...currentActive, ...currentPending, ...currentDeferred];
+    const allPrev = [...prevActive, ...prevPending, ...prevDeferred];
+    
+    const completed = allPrev.filter(prevTask => 
+      !allCurrent.some(currTask => currTask.task_id === prevTask.task_id)
+    );
+    
+    if (completed.length > 0) {
+      setCompletedQueuedTasks(prevCompleted => [
+        ...completed.map(t => ({ ...t, completedAt: Date.now() })),
+        ...prevCompleted
+      ].slice(0, 50));
+    }
+    
+    prevQueueSnapshotRef.current = { active: currentActive, pending: currentPending, deferred: currentDeferred };
+  }, [queueSnapshot]);
+
+  // Similar for scheduled tasks if you have them (from separate state)
+  // ...
+
+  useEffect(() => {
+    draftFlowRef.current = draftFlow;
+  }, [draftFlow]);
 
   const playWakePing = useCallback(() => {
     try {
@@ -160,25 +212,18 @@ function App() {
       gain.connect(ctx.destination);
       osc.start();
       osc.stop(ctx.currentTime + 0.25);
-      osc.onended = () => {
-        ctx.close().catch(() => {
-          // no-op
-        });
-      };
+      osc.onended = () => ctx.close().catch(() => {});
     } catch (error) {
       console.warn("[Wake] Ping sound failed:", error);
     }
   }, []);
 
   const isArabicText = useCallback((text) => /[\u0600-\u06FF]/.test(text || ""), []);
-
   const detectLanguageFromText = useCallback((text) => {
     if (!text || typeof text !== "string") return userLanguage || "en";
     return isArabicText(text) ? "ar" : "en";
   }, [isArabicText, userLanguage]);
-
   const t = useCallback((en, ar) => (userLanguage === "ar" ? ar : en), [userLanguage]);
-
   const rememberUserLanguageFromText = useCallback((text) => {
     const detected = detectLanguageFromText(text);
     if (detected && (detected === "ar" || !userLanguage)) {
@@ -197,6 +242,11 @@ function App() {
     preferredLanguageRef.current = preferredLanguage;
     localStorage.setItem("preferredLanguage", preferredLanguage);
     screenReader.setLanguage(preferredLanguage);
+    
+    // ✅ Set HTML document direction for RTL/LTR support
+    const direction = preferredLanguage === "ar" ? "rtl" : "ltr";
+    document.documentElement.dir = direction;
+    document.documentElement.lang = preferredLanguage;
   }, [preferredLanguage]);
 
   useEffect(() => {
@@ -205,34 +255,55 @@ function App() {
     }
   }, [authState]);
 
-  const normalizeThinkingStep = useCallback((step) => {
-    return (step || "")
-      .toLowerCase()
-      .replace(/[\u{1F300}-\u{1FAFF}]/gu, " ")
-      .replace(/[.]{3,}/g, "")
-      .replace(/[!؟?]+$/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }, []);
+  // ✅ Fetch session-scoped cross-platform tasks from backend
+  useEffect(() => {
+    if (!sessionId || !userId || authState !== "app") {
+      setSessionScopedTasks([]);
+      return;
+    }
 
+    const fetchSessionTasks = async () => {
+      try {
+        const response = await fetch(
+          `http://localhost:8000/device/cross-platform-tasks?user_id=${encodeURIComponent(userId)}&device_id=desktop&session_id=${encodeURIComponent(sessionId)}`,
+          {
+            method: "GET",
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+        if (response.ok) {
+          const data = await response.json();
+          const tasks = data.tasks || [];
+          // Filter to only session-scoped tasks (already filtered by backend)
+          setSessionScopedTasks(tasks.map((task, idx) => ({
+            id: task.task_id || `xp-${idx}`,
+            name: task.task_payload?.description || task.original_request || `Cross-platform task ${idx + 1}`,
+            info: task.status || "pending",
+            status: task.status,
+            device: task.source_platform || "unknown",
+          })));
+          console.log(`[SessionTasks] Fetched ${tasks.length} session-scoped tasks`);
+        }
+      } catch (err) {
+        console.warn("[SessionTasks] Failed to fetch:", err);
+        // Silently fail - not critical
+      }
+    };
+
+    // Fetch immediately and then poll periodically
+    fetchSessionTasks();
+    const pollInterval = setInterval(fetchSessionTasks, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [sessionId, userId, authState]);
+
+  const normalizeThinkingStep = useCallback((step) => {
+    return (step || "").toLowerCase().replace(/[\u{1F300}-\u{1FAFF}]/gu, " ").replace(/[.]{3,}/g, "").replace(/[!؟?]+$/g, "").replace(/\s+/g, " ").trim();
+  }, []);
   const translateThinkingStep = useCallback((step) => {
     if (!step || userLanguageRef.current !== "ar") return step;
     const normalized = normalizeThinkingStep(step);
-    const map = {
-      "processing input": "جاري معالجة الإدخال...",
-      "analyzing your request": "جاري تحليل طلبك...",
-      "checking your preferences": "جاري التحقق من تفضيلاتك...",
-      "processing your request": "جاري تنفيذ طلبك...",
-      "preparing for coordinator": "جاري التحضير للمنسق...",
-      "received your request": "استلمت طلبك...",
-      "preparing tasks": "جاري تجهيز الخطوات...",
-      "creating execution plan": "جاري إنشاء خطة التنفيذ...",
-      "searching": "جاري البحث...",
-      "analyzing": "جاري التحليل...",
-      "processing": "جاري المعالجة...",
-      "responding": "جاري تجهيز الرد...",
-      "thinking": "جاري التفكير..."
-    };
+    const map = { "processing input": "جاري معالجة الإدخال...", "analyzing your request": "جاري تحليل طلبك...", "checking your preferences": "جاري التحقق من تفضيلاتك...", "processing your request": "جاري تنفيذ طلبك...", "preparing for coordinator": "جاري التحضير للمنسق...", "received your request": "استلمت طلبك...", "preparing tasks": "جاري تجهيز الخطوات...", "creating execution plan": "جاري إنشاء خطة التنفيذ...", "searching": "جاري البحث...", "analyzing": "جاري التحليل...", "processing": "جاري المعالجة...", "responding": "جاري تجهيز الرد...", "thinking": "جاري التفكير..." };
     return map[normalized] || step;
   }, [normalizeThinkingStep]);
 
@@ -242,43 +313,40 @@ function App() {
       const trimmed = value.trim();
       if (!trimmed) return "";
       if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-        try {
-          const parsed = JSON.parse(trimmed);
-          return extractReadableText(parsed);
-        } catch {
-          return trimmed;
-        }
+        try { const parsed = JSON.parse(trimmed); return extractReadableText(parsed); } catch { return trimmed; }
       }
       return trimmed;
     }
-    if (Array.isArray(value)) {
-      return value.map((item) => extractReadableText(item)).filter(Boolean).join("\n\n");
-    }
+    if (Array.isArray(value)) return value.map((item) => extractReadableText(item)).filter(Boolean).join("\n\n");
     if (typeof value === "object") {
       const preferredKeys = ["full_content", "content", "spoken_text", "text", "response", "message", "summary", "result"];
-      for (const key of preferredKeys) {
-        if (value[key]) {
-          const extracted = extractReadableText(value[key]);
-          if (extracted) return extracted;
-        }
-      }
-      if (Array.isArray(value.details)) {
-        const detailText = value.details
-          .map((d) => extractReadableText(d?.content || d?.text || d?.result || d))
-          .filter(Boolean)
-          .join("\n\n");
-        if (detailText) return detailText;
-      }
+      for (const key of preferredKeys) { if (value[key]) { const extracted = extractReadableText(value[key]); if (extracted) return extracted; } }
+      if (Array.isArray(value.details)) { const detailText = value.details.map((d) => extractReadableText(d?.content || d?.text || d?.result || d)).filter(Boolean).join("\n\n"); if (detailText) return detailText; }
       return "";
     }
     return String(value);
   }, []);
 
-  const stopThinkingSpeech = useCallback(() => {
-    thinkingSpeechQueueRef.current = [];
-    thinkingSpeechRunningRef.current = false;
-    screenReader.stop();
-  }, []);
+  const registerWorkspaceArtifacts = useCallback((rawValue, sourceLabel = "Result") => {
+    const sourceText = extractReadableText(rawValue);
+    if (!sourceText) return;
+    const urlMatches = sourceText.match(/https?:\/\/[^\s<>"')]+/gi) || [];
+    const fileMatches = sourceText.match(/(?:[A-Za-z]:[\\/][^\n\r<>:"|?*]+?\.[A-Za-z0-9]{1,8}|(?:\.{0,2}[\\/])?(?:[\w\- ]+[\\/])*[\w\- ]+\.(?:txt|md|doc|docx|pdf|csv|json|xlsx|xls|ppt|pptx|py|js|ts|html|css))/gi) || [];
+    const uniqueUrls = [...new Set(urlMatches.map((item) => item.trim()))].slice(0, 12);
+    const uniqueFiles = [...new Set(fileMatches.map((item) => item.trim()))].slice(0, 12);
+    if (!uniqueUrls.length && !uniqueFiles.length) return;
+    setWorkspaceArtifacts((prev) => {
+      const existingKeys = new Set(prev.map((item) => `${item.type}:${item.value}`));
+      const additions = [];
+      uniqueUrls.forEach((url, index) => { const key = `url:${url}`; if (existingKeys.has(key)) return; additions.push({ id: `artifact-url-${Date.now()}-${index}`, type: "url", title: `${sourceLabel} URL`, label: url, value: url, sourceLabel }); });
+      uniqueFiles.forEach((filePath, index) => { const key = `file:${filePath}`; if (existingKeys.has(key)) return; const normalized = filePath.replace(/\\/g, "/"); const name = normalized.split("/").pop() || normalized; additions.push({ id: `artifact-file-${Date.now()}-${index}`, type: "file", title: `${sourceLabel} File`, label: name, value: filePath, sourceLabel }); });
+      return additions.length ? [...additions, ...prev].slice(0, 40) : prev;
+    });
+  }, [extractReadableText]);
+
+  const stopThinkingSpeech = useCallback(() => { thinkingSpeechQueueRef.current = []; thinkingSpeechRunningRef.current = false; screenReader.stop(); }, []);
+  // const clearDraftDecisionTimer = useCallback(() => { if (draftDecisionTimerRef.current) { clearTimeout(draftDecisionTimerRef.current); draftDecisionTimerRef.current = null; } }, []);
+
 
   const speakAssistantResponse = useCallback(async (text, languageHint = null) => {
     const normalizedText = extractReadableText(text);
@@ -320,6 +388,177 @@ function App() {
       setExecutionMode((prev) => (prev === "transparent" ? "normal" : prev));
     }
   }, [detectLanguageFromText, extractReadableText, rememberUserLanguageFromText, stopThinkingSpeech]);
+
+  const clearDraftDecisionTimer = useCallback(() => {
+    if (draftDecisionTimerRef.current) {
+      clearTimeout(draftDecisionTimerRef.current);
+      draftDecisionTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearDraftDecisionTimer();
+    };
+  }, [clearDraftDecisionTimer]);
+
+  const sendClarificationAnswer = useCallback(async (answerText, clarificationIdOverride = null) => {
+    const clarificationId = clarificationIdOverride || clarificationResponseToId;
+    if (!clarificationId) return;
+
+    const payload = {
+      type: "clarification_response",
+      user_id: userId,
+      device_type: deviceType,
+      device_id: sessionId,
+      clarification_id: clarificationId,
+      answer: answerText,
+      user_language: userLanguageRef.current || "en",
+    };
+
+    setClarificationResponseToId(null);
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(payload));
+      return;
+    }
+
+    await fetch("http://localhost:8000/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        user_id: userId,
+        input: answerText,
+        is_clarification: true,
+        clarification_id: clarificationId,
+        device_type: deviceType,
+        device_id: sessionId,
+        user_language: userLanguageRef.current || "en",
+      }),
+    });
+  }, [clarificationResponseToId, deviceType, sessionId, userId]);
+
+  const buildDraftPages = useCallback((payload) => {
+    const fallbackContent = extractReadableText(payload?.full_content || payload?.draft_content || payload?.question || "");
+    const sourcePages = Array.isArray(payload?.content_pages) ? payload.content_pages : [];
+
+    const normalizedPages = sourcePages
+      .map((page, index) => {
+        const content = extractReadableText(page?.content || page?.page_content || page?.text || "");
+        return {
+          page_number: Number(page?.page_number || index + 1),
+          content,
+        };
+      })
+      .filter((page) => !!page.content);
+
+    if (normalizedPages.length > 0) {
+      return {
+        pages: normalizedPages,
+        fullContent: extractReadableText(payload?.full_content || fallbackContent),
+      };
+    }
+
+    if (!fallbackContent) {
+      return { pages: [], fullContent: "" };
+    }
+
+    const paragraphs = fallbackContent
+      .split(/\n{2,}/)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+
+    const pages = [];
+    let cursor = "";
+    for (const paragraph of paragraphs) {
+      const candidate = cursor ? `${cursor}\n\n${paragraph}` : paragraph;
+      if (candidate.length > 950 && cursor) {
+        pages.push({ page_number: pages.length + 1, content: cursor });
+        cursor = paragraph;
+      } else {
+        cursor = candidate;
+      }
+    }
+    if (cursor) {
+      pages.push({ page_number: pages.length + 1, content: cursor });
+    }
+
+    return {
+      pages,
+      fullContent: fallbackContent,
+    };
+  }, [extractReadableText]);
+
+  const promptDraftPage = useCallback((targetIndex = null) => {
+    clearDraftDecisionTimer();
+
+    const current = draftFlowRef.current;
+    const nextIndex = typeof targetIndex === "number" ? targetIndex : current.pageIndex;
+    const page = current.pages[nextIndex];
+
+    if (!page) {
+      const finalPrompt = t(
+        "That is the full draft. Do you approve this content?",
+        "ده كامل المحتوى. هل توافق عليه؟"
+      );
+      setDraftFlow((prev) => ({
+        ...prev,
+        pageIndex: prev.pages.length > 0 ? prev.pages.length - 1 : 0,
+        awaitingPageApproval: false,
+        awaitingFinalApproval: true,
+      }));
+      setAssistantMessage(finalPrompt);
+      void speakAssistantResponse(finalPrompt, userLanguageRef.current || "en");
+      return;
+    }
+
+    const pageLabel = t(
+      `Page ${nextIndex + 1} of ${current.pages.length}`,
+      `الصفحة ${nextIndex + 1} من ${current.pages.length}`
+    );
+    const approvePrompt = t(
+      "Do you approve this content? Say yes to approve now, or no to continue.",
+      "هل توافق على هذا المحتوى؟ قل نعم للموافقة الآن، أو لا للمتابعة."
+    );
+
+    setDraftFlow((prev) => ({
+      ...prev,
+      pageIndex: nextIndex,
+      awaitingPageApproval: true,
+      awaitingFinalApproval: false,
+    }));
+
+    const visibleText = `${pageLabel}\n\n${page.content}\n\n${approvePrompt}`;
+    setAssistantMessage(visibleText);
+    void speakAssistantResponse(`${pageLabel}. ${page.content}. ${approvePrompt}`, userLanguageRef.current || "en");
+
+    draftDecisionTimerRef.current = setTimeout(() => {
+      const latest = draftFlowRef.current;
+      if (!latest.awaitingPageApproval) return;
+
+      const upcoming = latest.pageIndex + 1;
+      if (upcoming < latest.pages.length) {
+        setAssistantMessage(t(
+          "No response detected. Continuing to the next page.",
+          "لا يوجد رد خلال 10 ثواني. سأكمل للصفحة التالية."
+        ));
+        promptDraftPage(upcoming);
+      } else {
+        const finalPrompt = t(
+          "That is the full draft. Do you approve this content?",
+          "ده كامل المحتوى. هل توافق عليه؟"
+        );
+        setDraftFlow((prev) => ({
+          ...prev,
+          awaitingPageApproval: false,
+          awaitingFinalApproval: true,
+        }));
+        setAssistantMessage(finalPrompt);
+        void speakAssistantResponse(finalPrompt, userLanguageRef.current || "en");
+      }
+    }, 10000);
+  }, [clearDraftDecisionTimer, speakAssistantResponse, t]);
 
   // Speech recognition (wake-word)
   const [listening,          setListening]           = useState(false);
@@ -539,6 +778,31 @@ function App() {
               break;
             }
 
+            if (msg.queue_snapshot) {
+              setQueueSnapshot(msg.queue_snapshot);
+            }
+
+            // Handle task result with success/failure message
+            if (msg.task_result) {
+              const taskResult = msg.task_result;
+              const message = taskResult.status === 'success' 
+                ? taskResult.success_message 
+                : taskResult.failure_message;
+
+              registerWorkspaceArtifacts(
+                taskResult?.content || taskResult?.details || taskResult?.metadata || "",
+                taskResult?.task_id || msg.task_id || "Task"
+              );
+              
+              if (message) {
+                // Add to thinking steps and vocalize
+                setThinkingSteps(prev => [...prev, message]);
+                if (vocalizeStepRef.current) {
+                  vocalizeStepRef.current(message);
+                }
+              }
+            }
+
             const phase = (msg.phase || '').toString().toLowerCase();
             const terminalPhases = new Set([
               'execution_finished',
@@ -564,6 +828,7 @@ function App() {
             } else {
               setIsThinking(false);
               setThinkingSteps([]);
+              setQueueSnapshot({ active: [], pending: [], deferred: [] });
               setOrbState((prev) => (prev === "speaking" ? prev : "idle"));
               if (autoWidgetTriggeredRef.current) {
                 window.electronAPI?.exitWidgetMode?.();
@@ -587,7 +852,8 @@ function App() {
             setIsThinking(false);
             setCoordinatorActive(false);
             setClarificationResponseToId(msg.response_id);
-            setAssistantMessage(msg.question || msg.full_content || msg.draft_content || "");
+            const promptText = msg.question || msg.full_content || msg.draft_content || "";
+            setAssistantMessage(promptText);
             if (msg.user_language) {
               setUserLanguage(msg.user_language);
               localStorage.setItem("userLanguage", msg.user_language);
@@ -595,9 +861,34 @@ function App() {
             if (msg.question) {
               rememberUserLanguageFromText(msg.question);
             }
+
+            if (msg.type === 'confirmation_needed') {
+              const { pages, fullContent } = buildDraftPages(msg);
+              const shouldOfferReadFlow = msg.offer_read_aloud === true || pages.length > 0 || !!fullContent;
+
+              if (shouldOfferReadFlow) {
+                setStructuredResponse({
+                  full_content: fullContent,
+                  content_pages: pages,
+                  offer_read_aloud: true,
+                });
+                setOfferReadAloud(true);
+                setDraftFlow({
+                  active: true,
+                  awaitingListenChoice: true,
+                  awaitingPageApproval: false,
+                  awaitingFinalApproval: false,
+                  pageIndex: 0,
+                  pages,
+                  fullContent,
+                  confirmationId: msg.response_id || null,
+                });
+              }
+            }
+
             if (msg.type === 'confirmation_needed') {
               setOrbState("speaking");
-              screenReader.speak((msg.question || msg.full_content || ""), {
+              screenReader.speak((promptText || ""), {
                 onComplete: () => setOrbState("idle"),
               });
             } else {
@@ -620,6 +911,17 @@ function App() {
             setIsThinking(false);
             setCoordinatorActive(false);
             setClarificationResponseToId(null);
+            clearDraftDecisionTimer();
+            setDraftFlow({
+              active: false,
+              awaitingListenChoice: false,
+              awaitingPageApproval: false,
+              awaitingFinalApproval: false,
+              pageIndex: 0,
+              pages: [],
+              fullContent: "",
+              confirmationId: null,
+            });
             
             const responseText = msg.spoken_text || msg.response || msg.text || t("Task completed", "تم تنفيذ المهمة بنجاح");
             const cleanResponseText = extractReadableText(responseText) || t("Task completed", "تم تنفيذ المهمة بنجاح");
@@ -636,7 +938,10 @@ function App() {
               const cleanFullContent = extractReadableText(sr.full_content || sr.content || sr.result || "");
               setStructuredResponse({ ...sr, full_content: cleanFullContent });
               setOfferReadAloud(sr.offer_read_aloud === true && !!cleanFullContent);
+              registerWorkspaceArtifacts(sr, "Structured result");
             }
+
+            registerWorkspaceArtifacts(cleanResponseText, "Completion");
 
             speakAssistantResponse(cleanResponseText, msg.user_language || userLanguage);
             break;
@@ -646,10 +951,21 @@ function App() {
             console.log('[WS] Interrupt acknowledged:', msg.command);
             if (msg.command === 'stop') {
               screenReader.stop();
+              clearDraftDecisionTimer();
               setOrbState("idle");
               setIsThinking(false);
               setCoordinatorActive(false);
               setThinkingSteps([]);
+              setDraftFlow({
+                active: false,
+                awaitingListenChoice: false,
+                awaitingPageApproval: false,
+                awaitingFinalApproval: false,
+                pageIndex: 0,
+                pages: [],
+                fullContent: "",
+                confirmationId: null,
+              });
               setAssistantMessage(t("Stopped. Task cancelled.", "تم الإيقاف. تم إلغاء المهمة."));
               // Exit widget if auto-triggered
               if (autoWidgetTriggeredRef.current) {
@@ -698,6 +1014,8 @@ function App() {
     ws.onclose = () => {
       console.log('[WS] Disconnected');
       setWsConnected(false);
+      setCoordinatorActive(false);
+      setQueueSnapshot({ active: [], pending: [], deferred: [] });
       // Auto-reconnect after 3s
       wsReconnectTimer.current = setTimeout(connectWebSocket, 3000);
     };
@@ -706,7 +1024,7 @@ function App() {
       console.warn('[WS] Error:', err);
       ws.close();
     };
-  }, [sessionId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, detectLanguageFromText, offerReadAloud, structuredResponse]);
+  }, [sessionId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, buildDraftPages, clearDraftDecisionTimer, registerWorkspaceArtifacts]);
 
   useEffect(() => {
     connectWebSocket();
@@ -1367,6 +1685,12 @@ function App() {
         localStorage.setItem("preferredLanguage", nextLanguage);
         localStorage.setItem("appLanguage", nextLanguage);
       }
+      if (preferences?.llm) {
+        localStorage.setItem("llmConfig", JSON.stringify(preferences.llm));
+      }
+      if (typeof preferences?.google_human_verified === "boolean") {
+        localStorage.setItem("googleHumanVerified", String(preferences.google_human_verified));
+      }
       localStorage.setItem("onboardingComplete", "true");
       setAuthState("app");
       wakeStoppedRef.current = false;
@@ -1416,14 +1740,15 @@ function App() {
     }
   
     // Stop any playing audio / thinking speech immediately
-    if (command === "AURA stop") {
+    if (command === "stop") {
       audioRef.current?.pause?.();
       if (audioRef.current) audioRef.current.currentTime = 0;
       stopThinkingSpeech();
       screenReader.stop();
-    } else if (command === "AURA pause") {
+      clearDraftDecisionTimer();
+    } else if (command === "pause") {
       screenReader.pause();
-    } else if (command === "AURA resume") {
+    } else if (command === "resume") {
       screenReader.resume();
     }
   
@@ -1445,7 +1770,7 @@ function App() {
         }),
       }).catch((err) => console.warn("[Interrupt] HTTP fallback failed:", err));
     }
-  }, [sessionId, userId, deviceType, stopThinkingSpeech, userLanguage]);
+  }, [sessionId, userId, deviceType, stopThinkingSpeech, userLanguage, clearDraftDecisionTimer]);
 
 
   /* ---------- READ ALOUD FULL CONTENT ---------- */
@@ -1472,76 +1797,127 @@ function App() {
       rememberUserLanguageFromText(normalized);
       const currentUserLanguage = userLanguageRef.current || detectLanguageFromText(normalized) || "en";
 
-      const isAffirmative = (value) => {
-        const v = (value || "").trim().toLowerCase();
-        return ["yes", "yeah", "yep", "sure", "ok", "okay", "نعم", "ايوه", "أيوا", "تمام", "موافق"].includes(v);
-      };
+      const lowerText = normalized.toLowerCase();
+      const polarIntent = classifyPolarIntent(normalized, currentUserLanguage);
+      const readAloudIntent = isReadAloudIntentSemantic(normalized);
+      const interruptCommand = classifyInterruptSemantic(normalized);
+      const activeDraftFlow = draftFlowRef.current;
 
-      const isReadAloudIntent = (value) => {
-        const v = (value || "").trim().toLowerCase();
-        const normalizedArabic = v
-          .replace(/أ|إ|آ/g, "ا")
-          .replace(/ى/g, "ي")
-          .replace(/ة/g, "ه")
-          .replace(/\s+/g, " ")
-          .trim();
-        return [
-          "read them out loud",
-          "read it out loud",
-          "read them aloud",
-          "read it aloud",
-          "read aloud",
-          "read the results",
-          "say it out loud",
-          "read results out loud",
-          "read the response out loud",
-          "read this out loud",
-          "read that out loud",
-          "explain it",
-          "explain the results",
-          "اقرأها بصوت عالي",
-          "اقراها بصوت عالي",
-          "اقرأهم بصوت عالي",
-          "اقراهم بصوت عالي",
-          "اقرا النتائج بصوت عالي",
-          "اقرأ النتائج بصوت عالي",
-          "اقرا النتايج بصوت عالي",
-          "اقرأ النتايج بصوت عالي",
-          "اقرأها بصوت عال",
-          "اقراها بصوت عال",
-          "اقرأهم بصوت عال",
-          "اقراهم بصوت عال",
-          "اقرأها لي",
-          "اقراها لي",
-          "اقريها",
-          "اقريهم",
-          "اقرأهم لي",
-          "اقراهم لي",
-          "اقراها",
-          "اقراهم",
-          "اقرا النتائج",
-          "اشرحها",
-          "اشرح النتائج"
-        ].some((phrase) => {
-          const p = phrase
-            .toLowerCase()
-            .replace(/أ|إ|آ/g, "ا")
-            .replace(/ى/g, "ي")
-            .replace(/ة/g, "ه")
-            .replace(/\s+/g, " ")
-            .trim();
-          return normalizedArabic === p || normalizedArabic.includes(p);
-        });
-      };
+      if (activeDraftFlow.active && activeDraftFlow.awaitingListenChoice) {
+        if (polarIntent === "negative") {
+          clearDraftDecisionTimer();
+          setDraftFlow({
+            active: false,
+            awaitingListenChoice: false,
+            awaitingPageApproval: false,
+            awaitingFinalApproval: false,
+            pageIndex: 0,
+            pages: [],
+            fullContent: "",
+            confirmationId: null,
+          });
+          await sendClarificationAnswer("yes", activeDraftFlow.confirmationId);
+          const msg = t("Skipping read-aloud and approving the drafted content now.", "هتخطى القراءة وهوافق على المحتوى دلوقتي.");
+          setAssistantMessage(msg);
+          await speakAssistantResponse(msg, currentUserLanguage);
+          return;
+        }
 
-      if (offerReadAloud && structuredResponse?.full_content && isReadAloudIntent(normalized)) {
+        if (polarIntent === "affirmative" || readAloudIntent) {
+          setDraftFlow((prev) => ({ ...prev, awaitingListenChoice: false, awaitingPageApproval: true }));
+          if (activeDraftFlow.pages.length > 0) {
+            promptDraftPage(0);
+          } else {
+            const fallback = extractReadableText(activeDraftFlow.fullContent || structuredResponse?.full_content || "");
+            if (fallback) {
+              setAssistantMessage(fallback);
+              await speakAssistantResponse(fallback, currentUserLanguage);
+            }
+            const finalPrompt = t("That is the full draft. Do you approve this content?", "ده كامل المحتوى. هل توافق عليه؟");
+            setDraftFlow((prev) => ({ ...prev, awaitingPageApproval: false, awaitingFinalApproval: true }));
+            setAssistantMessage(finalPrompt);
+            await speakAssistantResponse(finalPrompt, currentUserLanguage);
+          }
+          return;
+        }
+
+        const listenPrompt = t("Please answer with yes to listen, or no to skip reading.", "جاوب بنعم لو تحب أقرأ، أو لا لتخطي القراءة.");
+        setAssistantMessage(listenPrompt);
+        await speakAssistantResponse(listenPrompt, currentUserLanguage);
+        return;
+      }
+
+      if (activeDraftFlow.active && activeDraftFlow.awaitingPageApproval) {
+        if (polarIntent === "affirmative") {
+          clearDraftDecisionTimer();
+          await sendClarificationAnswer("yes", activeDraftFlow.confirmationId);
+          setDraftFlow({
+            active: false,
+            awaitingListenChoice: false,
+            awaitingPageApproval: false,
+            awaitingFinalApproval: false,
+            pageIndex: 0,
+            pages: [],
+            fullContent: "",
+            confirmationId: null,
+          });
+          const approved = t("Great, approved. Executing now.", "ممتاز، تمت الموافقة. هكمل التنفيذ الآن.");
+          setAssistantMessage(approved);
+          await speakAssistantResponse(approved, currentUserLanguage);
+          return;
+        }
+
+        if (polarIntent === "negative") {
+          clearDraftDecisionTimer();
+          const nextPage = activeDraftFlow.pageIndex + 1;
+          if (nextPage < activeDraftFlow.pages.length) {
+            promptDraftPage(nextPage);
+          } else {
+            const finalPrompt = t("That is the full draft. Do you approve this content?", "ده كامل المحتوى. هل توافق عليه؟");
+            setDraftFlow((prev) => ({ ...prev, awaitingPageApproval: false, awaitingFinalApproval: true }));
+            setAssistantMessage(finalPrompt);
+            await speakAssistantResponse(finalPrompt, currentUserLanguage);
+          }
+          return;
+        }
+
+        const pagePrompt = t("Say yes to approve now, or no so I keep reading.", "قل نعم للموافقة، أو لا عشان أكمل القراءة.");
+        setAssistantMessage(pagePrompt);
+        await speakAssistantResponse(pagePrompt, currentUserLanguage);
+        return;
+      }
+
+      if (activeDraftFlow.active && activeDraftFlow.awaitingFinalApproval) {
+        if (polarIntent === "affirmative" || polarIntent === "negative") {
+          clearDraftDecisionTimer();
+          await sendClarificationAnswer(polarIntent === "affirmative" ? "yes" : "no", activeDraftFlow.confirmationId);
+          setDraftFlow({
+            active: false,
+            awaitingListenChoice: false,
+            awaitingPageApproval: false,
+            awaitingFinalApproval: false,
+            pageIndex: 0,
+            pages: [],
+            fullContent: "",
+            confirmationId: null,
+          });
+          return;
+        }
+
+        const finalPrompt = t("Please answer yes to approve or no to reject.", "يرجى الرد بنعم للموافقة أو لا للرفض.");
+        setAssistantMessage(finalPrompt);
+        await speakAssistantResponse(finalPrompt, currentUserLanguage);
+        return;
+      }
+
+      if (offerReadAloud && structuredResponse?.full_content && readAloudIntent) {
         setClarificationResponseToId(null);
         handleReadAloud();
         setAssistantMessage(t("Reading the results now.", "حسنًا، سأقرأ النتائج الآن."));
         return;
       }
 
-      if (isAffirmative(normalized)) {
+      if (polarIntent === "affirmative") {
         if (offerReadAloud && structuredResponse?.full_content) {
           setClarificationResponseToId(null);
           handleReadAloud();
@@ -1557,21 +1933,12 @@ function App() {
         return;
       }
 
-      // Check for interrupt commands in text input too
-      const lowerText = normalized.toLowerCase();
-      for (const [phrase, command] of Object.entries(INTERRUPT_COMMANDS)) {
-        if (lowerText.includes(phrase) || lowerText === command) {
-          console.log(`[Agent] Interrupt command in text: "${phrase}" → ${command}`);
-          sendInterrupt(command);
-          return;
+      if (interruptCommand) {
+        console.log(`[Agent] Semantic interrupt command detected: ${interruptCommand}`);
+        sendInterrupt(interruptCommand);
+        if (interruptCommand === "stop") {
+          handleStopSequence();
         }
-      }
-
-      // Detect "stop" command (legacy)
-      if (lowerText === "stop" || lowerText === "aura stop") {
-        console.log("[Agent] STOP command detected");
-        sendInterrupt("stop");
-        handleStopSequence();
         return;
       }
 
@@ -1598,6 +1965,7 @@ function App() {
           type: msgType,
           user_id: userId,
           device_type: deviceType,
+          device_id: sessionId,
           user_language: currentUserLanguage,
         };
         if (clarificationResponseToId) {
@@ -1624,6 +1992,7 @@ function App() {
             is_clarification: !!clarificationResponseToId,
             clarification_id: clarificationResponseToId || null,
             device_type: deviceType,
+            device_id: sessionId,
             user_language: currentUserLanguage,
           }),
         });
@@ -1732,6 +2101,17 @@ function App() {
     setShowSettings(false);
     setThinkingSteps([]);
     setIsThinking(false);
+    clearDraftDecisionTimer();
+    setDraftFlow({
+      active: false,
+      awaitingListenChoice: false,
+      awaitingPageApproval: false,
+      awaitingFinalApproval: false,
+      pageIndex: 0,
+      pages: [],
+      fullContent: "",
+      confirmationId: null,
+    });
     setStructuredResponse(null);
     setOfferReadAloud(false);
     // Exit widget if auto-triggered
@@ -1835,21 +2215,263 @@ function App() {
 
   
 /* ---------- RENDER ---------- */
-  const isExecuting = orbState === "processing" || isThinking;
-  const appClassName = [
-    "app-root",
-    executionMode === "transparent" && isExecuting ? "transparent-mode" : "",
-    executionMode === "widget" ? "widget-mode" : "",
-  ].filter(Boolean).join(" ");
-  const liveCaptionText =
-    (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
-      ? userMessage
-      : (assistantMessage || (isThinking
-          ? t("Thinking...", "بفكر...")
-          : (listening
-              ? t("Listening for your voice...", "أستمع لصوتك...")
-              : t("Tap the mic to speak", "اضغط على الميكروفون للتحدث"))));
+  // const isExecuting = orbState === "processing" || isThinking;
+  // const appClassName = [
+  //   "app-root",
+  //   executionMode === "transparent" && isExecuting ? "transparent-mode" : "",
+  //   executionMode === "widget" ? "widget-mode" : "",
+  // ].filter(Boolean).join(" ");
+  // const liveCaptionText =
+  //   (userMessage && (!assistantMessage || orbState === "listening" || isRecording))
+  //     ? userMessage
+  //     : (assistantMessage || (isThinking
+  //         ? t("Thinking...", "بفكر...")
+  //         : (listening
+  //             ? t("Listening for your voice...", "أستمع لصوتك...")
+  //             : t("Tap the mic to speak", "اضغط على الميكروفون للتحدث"))));
 
+  const queueItems = useMemo(() => {
+    const activeItems = (queueSnapshot?.active || []).map((task, index) => ({
+      id: `active-${task.task_id || index}`,
+      title: task.task || task.description || t("Current task", "المهمة الحالية"),
+      state: "active",
+    }));
+    const pendingItems = (queueSnapshot?.pending || []).map((task, index) => ({
+      id: `pending-${task.task_id || index}`,
+      title: task.task || task.description || t("Queued task", "مهمة بالانتظار"),
+      state: "pending",
+    }));
+    const deferredItems = (queueSnapshot?.deferred || []).map((task, index) => ({
+      id: `deferred-${task.task_id || index}`,
+      title: task.task || task.description || t("Deferred task", "مهمة مؤجلة"),
+      state: "deferred",
+    }));
+
+    return [...activeItems, ...pendingItems, ...deferredItems].slice(0, 80);
+  }, [queueSnapshot, t]);
+
+  const scheduledQueueItems = useMemo(() => {
+    const schedulePattern = /(wait\s+for|scheduled?|in\s+\d+\s+(minute|minutes|hour|hours)|at\s+\d)/i;
+    return queueItems.filter((item) => schedulePattern.test(item.title || ""));
+  }, [queueItems]);
+
+  const workspacePanels = useMemo(() => {
+    const panels = [];
+
+    if (queueItems.length > 0 || coordinatorActive) {
+      panels.push({
+        id: "panel-queue",
+        kind: "queue",
+        title: t("Queued Tasks", "المهام في قائمة الانتظار"),
+      });
+    }
+
+    if (scheduledQueueItems.length > 0) {
+      panels.push({
+        id: "panel-scheduled",
+        kind: "scheduled",
+        title: t("Scheduled Tasks", "المهام المجدولة"),
+      });
+    }
+
+    if (draftFlow.active) {
+      panels.push({
+        id: "panel-draft",
+        kind: "draft",
+        title: t("Draft Confirmation", "تأكيد المسودة"),
+      });
+    }
+
+    if (structuredResponse?.full_content) {
+      panels.push({
+        id: "panel-result",
+        kind: "result",
+        title: t("Generated Content", "المحتوى المُنشأ"),
+      });
+    }
+
+    workspaceArtifacts.forEach((artifact) => {
+      panels.push({
+        id: `panel-${artifact.id}`,
+        kind: artifact.type,
+        title: artifact.label,
+        subtitle: artifact.sourceLabel,
+        artifact,
+      });
+    });
+
+    return panels;
+  }, [queueItems.length, coordinatorActive, scheduledQueueItems.length, draftFlow.active, structuredResponse, workspaceArtifacts, t]);
+
+  useEffect(() => {
+    if (workspacePanels.length === 0) {
+      setActiveWorkspacePanelId(null);
+      return;
+    }
+    if (!activeWorkspacePanelId || !workspacePanels.some((panel) => panel.id === activeWorkspacePanelId)) {
+      setActiveWorkspacePanelId(workspacePanels[0].id);
+    }
+  }, [workspacePanels, activeWorkspacePanelId]);
+
+  const activeWorkspacePanel = useMemo(
+    () => workspacePanels.find((panel) => panel.id === activeWorkspacePanelId) || null,
+    [workspacePanels, activeWorkspacePanelId]
+  );
+
+  const renderLineWithLinks = useCallback((line) => {
+    const matcher = /(https?:\/\/[^\s]+)/g;
+    const parts = line.split(matcher);
+    return parts.map((part, idx) => {
+      if (/^https?:\/\//i.test(part)) {
+        return (
+          <a key={`${part}-${idx}`} href={part} target="_blank" rel="noreferrer" className="workspace-link">
+            {part}
+          </a>
+        );
+      }
+      return <span key={`${part}-${idx}`}>{part}</span>;
+    });
+  }, []);
+
+  // Helper to ensure queue snapshot always has expected structure
+  const normalizeQueueSnapshot = useCallback((snapshot) => {
+    if (!snapshot) return { active: [], pending: [], deferred: [] };
+    return {
+      active: (snapshot.active || []).map((t, idx) => ({
+        task_id: t.task_id || `active-${idx}`,
+        task: t.title || t.task || t.description || t.ai_prompt || t.name || 'Unnamed task',
+        description: t.description || t.task || t.title || t.ai_prompt || t.name || 'Unnamed task',
+      })),
+      pending: (snapshot.pending || []).map((t, idx) => ({
+        task_id: t.task_id || `pending-${idx}`,
+        task: t.title || t.task || t.description || t.ai_prompt || t.name || 'Unnamed task',
+        description: t.description || t.task || t.title || t.ai_prompt || t.name || 'Unnamed task',
+      })),
+      deferred: (snapshot.deferred || []).map((t, idx) => ({
+        task_id: t.task_id || `deferred-${idx}`,
+        task: t.title || t.task || t.description || t.ai_prompt || t.name || 'Unnamed task',
+        description: t.description || t.task || t.title || t.ai_prompt || t.name || 'Unnamed task',
+      })),
+    };
+  }, []);
+
+  const renderWorkspaceText = useCallback((content) => {
+    const normalized = extractReadableText(content);
+    if (!normalized) return null;
+    return normalized.split("\n").map((line, index) => (
+      <p key={`line-${index}`} className="workspace-text-line">
+        {renderLineWithLinks(line)}
+      </p>
+    ));
+  }, [extractReadableText, renderLineWithLinks]);
+
+  // Build queue items for popover
+  const queuedTasksForPopover = useMemo(() => {
+    const normalized = normalizeQueueSnapshot(queueSnapshot);
+    const activeItems = (normalized.active || []).map((task, idx) => ({
+      id: task.task_id || `active-${idx}`,
+      name: task.task || task.description || t("Current task", "المهمة الحالية"),
+      info: t("Active", "نشط"),
+      status: "active"
+    }));
+    const pendingItems = (normalized.pending || []).map((task, idx) => ({
+      id: task.task_id || `pending-${idx}`,
+      name: task.task || task.description || t("Queued", "في الانتظار"),
+      info: t("Pending", "معلق"),
+      status: "pending"
+    }));
+    const deferredItems = (normalized.deferred || []).map((task, idx) => ({
+      id: task.task_id || `deferred-${idx}`,
+      name: task.task || task.description || t("Deferred", "مؤجل"),
+      info: t("Deferred", "مؤجل"),
+      status: "deferred"
+    }));
+    
+    // ✅ Add session-scoped cross-platform tasks (only if no local queue exists)
+    const sessionItems = (!activeItems.length && !pendingItems.length && !deferredItems.length) 
+      ? sessionScopedTasks.filter(t => t.status === 'pending')
+      : [];
+    
+    return [...activeItems, ...pendingItems, ...deferredItems, ...sessionItems];
+  }, [queueSnapshot, t, normalizeQueueSnapshot, sessionScopedTasks]);
+
+  const scheduledTasksForPopover = useMemo(() => {
+    // Extract scheduled tasks from your existing scheduledQueueItems
+    const schedulePattern = /(wait\s+for|scheduled?|in\s+\d+\s+(minute|minutes|hour|hours)|at\s+\d)/i;
+    const scheduled = (queueSnapshot.active || [])
+      .concat(queueSnapshot.pending || [])
+      .filter(task => schedulePattern.test(task.task || task.description || ""));
+    return scheduled.map((task, idx) => ({
+      id: task.task_id || `sched-${idx}`,
+      name: task.task || task.description || t("Scheduled task", "مهمة مجدولة"),
+      info: t("Scheduled", "مجدول"),
+      status: "scheduled"
+    }));
+  }, [queueSnapshot, t]);
+
+  const handleCompleteTask = useCallback((taskId, type) => {
+    if (type === 'queued') {
+      const task = queuedTasksForPopover.find(t => t.id === taskId);
+      if (task && !completedQueuedTasks.find(ct => ct.id === taskId)) {
+        setCompletedQueuedTasks(prev => [{ ...task, completedAt: Date.now() }, ...prev].slice(0, 50));
+      }
+    } else if (type === 'scheduled') {
+      const task = scheduledTasksForPopover.find(t => t.id === taskId);
+      if (task && !completedScheduledTasks.find(ct => ct.id === taskId)) {
+        setCompletedScheduledTasks(prev => [{ ...task, completedAt: Date.now() }, ...prev].slice(0, 50));
+      }
+    }
+  }, [queuedTasksForPopover, scheduledTasksForPopover, completedQueuedTasks, completedScheduledTasks]);
+
+  // Prepare completed task lists for popover
+  const completedQueuedForPopover = useMemo(() => completedQueuedTasks.map(t => ({ ...t, info: t.info || t.status, status: 'completed' })), [completedQueuedTasks]);
+  const completedScheduledForPopover = useMemo(() => completedScheduledTasks.map(t => ({ ...t, info: t.info || t.status, status: 'completed' })), [completedScheduledTasks]);
+
+  const isExecuting = orbState === "processing" || isThinking;
+  const appClassName = ["app-root", executionMode === "transparent" && isExecuting ? "transparent-mode" : "", executionMode === "widget" ? "widget-mode" : ""].filter(Boolean).join(" ");
+  const liveCaptionText = (userMessage && (!assistantMessage || orbState === "listening" || isRecording)) ? userMessage : (assistantMessage || (isThinking ? t("Thinking...", "بفكر...") : (listening ? t("Listening for your voice...", "أستمع لصوتك...") : t("Tap the mic to speak", "اضغط على الميكروفون للتحدث"))));
+
+  const liveCaptionPages = useMemo(() => {
+    const content = extractReadableText(liveCaptionText).trim();
+    if (!content) return [];
+
+    const segments = content.match(/[^\n.!?。！？]+[\n.!?。！？]*/g) || [content];
+    const pages = [];
+    let current = "";
+    const maxChars = 280;
+
+    for (const segment of segments) {
+      const part = segment.trim();
+      if (!part) continue;
+
+      const next = current ? `${current} ${part}` : part;
+      if (next.length > maxChars && current) {
+        pages.push(current);
+        current = part;
+      } else {
+        current = next;
+      }
+    }
+
+    if (current) {
+      pages.push(current);
+    }
+
+    return pages.length > 0 ? pages : [content];
+  }, [extractReadableText, liveCaptionText]);
+
+  useEffect(() => {
+    setLiveCaptionPage(0);
+  }, [liveCaptionText]);
+
+  useEffect(() => {
+    if (liveCaptionPages.length === 0) return;
+    if (liveCaptionPage >= liveCaptionPages.length) {
+      setLiveCaptionPage(liveCaptionPages.length - 1);
+    }
+  }, [liveCaptionPage, liveCaptionPages.length]);
+
+  // Return JSX with new UI
   return (
     <>
       {executionMode !== "widget" && (
@@ -1858,8 +2480,8 @@ function App() {
           showExtraControls={authState === "app"}
           isExecuting={isExecuting}
           executionMode={executionMode}
-          onToggleExecutionMode={toggleExecutionMode}
-          onEnterWidgetMode={enterWidgetMode}
+          onToggleExecutionMode={() => setExecutionMode(prev => prev === "normal" ? "widget" : "normal")}
+          onEnterWidgetMode={() => { window.electronAPI?.enterWidgetMode?.(); setExecutionMode("widget"); }}
         />
       )}
 
@@ -1924,65 +2546,27 @@ function App() {
               <div className="widget-input-area">
                 {!isExecuting ? (
                   <>
-                    <input
-                      className="widget-text-input"
-                      type="text"
-                      placeholder="Ask AURA..."
-                      value={widgetText}
-                      onChange={(e) => setWidgetText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && widgetText.trim()) {
-                          handleTextSubmit(widgetText);
-                          setWidgetText("");
-                        }
-                      }}
-                    />
-                    <button
-                      className="widget-mic-btn"
-                      onClick={handleMicClick}
-                      title={isRecording ? "Stop recording" : "Voice input"}
-                    >
-                      <Mic size={16} />
-                    </button>
+                    <input className="widget-text-input" type="text" placeholder="Ask AURA..." value={widgetText} onChange={(e) => setWidgetText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && widgetText.trim()) { handleTextSubmit(widgetText); setWidgetText(""); } }} />
+                    <button className="widget-mic-btn" onClick={handleMicClick} title={isRecording ? "Stop recording" : "Voice input"}><Mic size={16} /></button>
                   </>
                 ) : (
                   <div className="widget-exec-controls">
-                    <button
-                      className="widget-action-btn widget-pause"
-                      onClick={() => sendInterrupt("pause")}
-                      title="Pause"
-                    >
-                      <Pause size={14} />
-                    </button>
-                    <button
-                      className="widget-action-btn widget-stop"
-                      onClick={() => sendInterrupt("stop")}
-                      title="Stop"
-                    >
-                      <Square size={14} />
-                    </button>
+                    <button className="widget-action-btn widget-pause" onClick={() => sendInterrupt("pause")} title="Pause"><Pause size={14} /></button>
+                    <button className="widget-action-btn widget-stop" onClick={() => sendInterrupt("stop")} title="Stop"><Square size={14} /></button>
                   </div>
                 )}
               </div>
-
               <div className="widget-window-controls">
-                <button className="widget-win-btn" onClick={exitWidgetMode} title="Expand">
-                  <ArrowUpRight size={14} />
-                </button>
-                <button className="widget-win-btn widget-win-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close">
-                  <X size={14} />
-                </button>
+                <button className="widget-win-btn" onClick={() => { window.electronAPI?.exitWidgetMode?.(); setExecutionMode("normal"); }} title="Expand"><ArrowUpRight size={14} /></button>
+                <button className="widget-win-btn widget-win-close" onClick={() => window.electronAPI?.closeWindow?.()} title="Close"><X size={14} /></button>
               </div>
             </div>
           )}
 
           <Sidebar
             collapsed={isSidebarCollapsed || executionMode === "widget"}
-            onToggle={() => {
-              console.log("[UI] Sidebar toggled");
-              setIsSidebarCollapsed((p) => !p);
-            }}
-            onSettingsClick={handleSettingsClick}
+            onToggle={() => setIsSidebarCollapsed(p => !p)}
+            onSettingsClick={() => setShowSettings(true)}
             onNewChat={handleNewChat}
             chats={chats}
             onSwitchChat={handleSwitchChat}
@@ -1993,83 +2577,128 @@ function App() {
           <main className={`main-area ${isSidebarCollapsed && screenSize === "mobile" ? "mobile-sidebar-open" : ""}`}>
             <div className="main-bg-layer" aria-hidden="true">
               <Aurora />
+              <img src="/aura_icon_white.png" alt="AURA Logo" style={{ position: "absolute", width: "400px", height: "400px", top: "50%", left: "50%", transform: "translate(-50%, -50%)", zIndex: 1, opacity: 0.05, pointerEvents: "none", objectFit: "contain" }} />
               <iframe src="/aura-cinematic-bg.html"
                 style={{ position: "absolute", width: "100%", height: "100%", border: "none", pointerEvents: "none", zIndex: 0 }}
                 title="Cinematic Background"
-              />
-              <div className="main-bg-core">
-                <img src="/aura_icon_white.png" alt="" className="main-bg-aura-icon" />
-                <div className="main-bg-core-ring" />
-              </div>
-            </div>
+              />            </div>
 
             <div className="main-overlay">
-              <HeaderContent
-                userName={userName}
-                chatTitle={chatTitle}
-                onContentReady={handleHeaderContentReady}
-              />
-
-              <div className="mini-live-caption" role="status" aria-live="polite" aria-atomic="true" aria-label="Live caption">
-                <div className="mini-live-caption-kicker">
-                  {userMessage && (!assistantMessage || orbState === "listening") ? "You" : "AURA"}
+              <div className="workspace-toolbar">
+                <div className="workspace-toolbar-copy">
+                  <span className="workspace-toolbar-label">{t("Task queues", "قوائم المهام")}</span>
                 </div>
-                <div className="mini-live-caption-text">
-                  <SplitText
-                    key={liveCaptionText}
-                    text={liveCaptionText}
-                    delay={22}
-                  />
+
+                <div className="task-buttons-container">
+                <TaskQueuesPopover
+                  type="queued"
+                  title={t("Queued Tasks", "المهام في قائمة الانتظار")}
+                  activeTasks={queuedTasksForPopover}
+                  completedTasks={completedQueuedForPopover}
+                  onCompleteTask={(taskId) => handleCompleteTask(taskId, 'queued')}
+                />
+                <TaskQueuesPopover
+                  type="scheduled"
+                  title={t("Scheduled Tasks", "المهام المجدولة")}
+                  activeTasks={scheduledTasksForPopover}
+                  completedTasks={completedScheduledForPopover}
+                  onCompleteTask={(taskId) => handleCompleteTask(taskId, 'scheduled')}
+                />
                 </div>
               </div>
 
-              <VoiceControls
-                isRecording={isRecording}
-                orbState={orbState}
-                wakePulse={wakePulse || auraStatus === "armed"}
-                onMicClick={handleMicClick}
-                onCancel={handleCancel}
-                chatMode={chatMode}
-                setChatMode={setChatMode}
-                onSendText={handleTextSubmit}
-                onSettingsClick={handleSettingsClick}
-                isExecuting={isExecuting}
-                onInterrupt={sendInterrupt}
+              <div style={{ justifyContent: 'center', alignItems: 'center', display: 'flex', flexDirection: 'column', height: '100%' }}>
+              <HeaderContent userName={userName} chatTitle={chatTitle} onContentReady={({ greeting, headline, currentDate }) => {
+                if (authState !== "app" || hasSpokenHeaderWelcomeRef.current) return;
+                const safeGreeting = (greeting || "Welcome back").replace(/[\u{1F300}-\u{1FAFF}]/gu, "").trim();
+                const safeHeadline = (headline || "How can I help you today?").trim();
+                const safeDate = (currentDate || "today").trim();
+                hasSpokenHeaderWelcomeRef.current = true;
+                setOrbState("speaking");
+                screenReader.speak(`${safeGreeting}. Today is ${safeDate}. ${safeHeadline}`, { onComplete: () => setOrbState("idle") });
+              }} />
+
+              <section className="workspace-caption-stage" role="status" aria-live="polite" aria-atomic="true" aria-label="Live conversation text" tabIndex={0}>
+                <div className="workspace-caption-scroll">
+                  <p className={`workspace-caption-text ${liveCaptionPages.length === 0 ? "is-empty" : ""}`}>
+                    {liveCaptionPages[liveCaptionPage] || liveCaptionText}
+                  </p>
+                </div>
+
+                {liveCaptionPages.length > 1 && (
+                  <div className="workspace-caption-pagination" aria-label="Caption pagination controls">
+                    <button
+                      type="button"
+                      className="workspace-caption-page-btn"
+                      onClick={() => setLiveCaptionPage((prev) => Math.max(prev - 1, 0))}
+                      disabled={liveCaptionPage === 0}
+                      aria-label="Previous text page"
+                    >
+                      ←
+                    </button>
+                    <span className="workspace-caption-page-meta">
+                      {liveCaptionPage + 1} / {liveCaptionPages.length}
+                    </span>
+                    <button
+                      type="button"
+                      className="workspace-caption-page-btn"
+                      onClick={() => setLiveCaptionPage((prev) => Math.min(prev + 1, liveCaptionPages.length - 1))}
+                      disabled={liveCaptionPage >= liveCaptionPages.length - 1}
+                      aria-label="Next text page"
+                    >
+                      →
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {/* Draft Panel - slides from right */}
+              <DraftPanel
+                isOpen={draftFlow.active}
+                draftFlow={draftFlow}
+                onApprove={() => processText(userLanguageRef.current === "ar" ? "نعم" : "yes")}
+                onReject={() => processText(userLanguageRef.current === "ar" ? "لا" : "no")}
+                onContinue={() => {
+                  const nextPage = draftFlow.pageIndex + 1;
+                  if (nextPage < draftFlow.pages.length) promptDraftPage(nextPage);
+                  else setDraftFlow(prev => ({ ...prev, awaitingPageApproval: false, awaitingFinalApproval: true }));
+                }}
+                onListenChoice={(listen) => {
+                  if (listen) setDraftFlow(prev => ({ ...prev, awaitingListenChoice: false, awaitingPageApproval: true }));
+                  else sendClarificationAnswer("yes", draftFlow.confirmationId);
+                }}
+                t={t}
               />
+
+              <div style={{display: "flex", justifyContent: "center", width: "100%", zIndex: 10, alignItems: "center", marginTop: "20px",}}>
+                  <VoiceControls
+                  isRecording={isRecording}
+                  orbState={orbState}
+                  wakePulse={wakePulse || auraStatus === "armed"}
+                  onMicClick={handleMicClick}
+                  onCancel={() => { setOrbState("idle"); setUserMessage(""); setChatMode(true); }}
+                  chatMode={chatMode}
+                  setChatMode={setChatMode}
+                  onSendText={handleTextSubmit}
+                  onSettingsClick={() => setShowSettings(true)}
+                  isExecuting={isExecuting}
+                  onInterrupt={sendInterrupt}
+                />
+              </div>
+              </div>
             </div>
           </main>
 
-          {showSettings && (
-            <SettingsModal
-              onClose={() => setShowSettings(false)}
-              onSave={handleSettingsSave}
-              onLogout={handleLogout}
-              initialName={userName}
-              initialVoice={ttsVoice}
-              initialLanguage={preferredLanguage}
-            />
-          )}
+          {showSettings && (<SettingsModal onClose={() => setShowSettings(false)} onSave={(profileData) => {
+            if (profileData.username) { localStorage.setItem("userName", profileData.username); setUserName(profileData.username); }
+            if (profileData.voice) { localStorage.setItem("ttsVoice", profileData.voice); setTtsVoice(profileData.voice); }
+            if (profileData.language) { const nextLanguage = profileData.language === "ar" ? "ar" : "en"; localStorage.setItem("preferredLanguage", nextLanguage); localStorage.setItem("appLanguage", nextLanguage); preferredLanguageRef.current = nextLanguage; setPreferredLanguage(nextLanguage); }
+          }} onLogout={() => {
+            localStorage.removeItem("onboardingComplete"); localStorage.removeItem("currentSessionId"); localStorage.removeItem("userName"); localStorage.removeItem("ttsVoice"); localStorage.removeItem("authMethod"); localStorage.removeItem("userId"); const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`; setUserId(newUserId); setUserName("User"); setAuthState("login");
+          }} initialName={userName} initialVoice={ttsVoice} initialLanguage={preferredLanguage} />)}
 
-          {viewingChat && (
-            <ChatHistory
-              messages={viewingChat.messages}
-              chatTitle={viewingChat.title}
-              onClose={() => setViewingChat(null)}
-            />
-          )}
-
-          {loadingHistory && (
-            <div style={{
-              position: "fixed", inset: 0, zIndex: 2999,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)"
-            }}>
-              <div style={{ color: "white", fontSize: "14px", opacity: 0.7 }}>
-                Loading chat...
-              </div>
-            </div>
-          )}
-
+          {viewingChat && (<ChatHistory messages={viewingChat.messages} chatTitle={viewingChat.title} onClose={() => setViewingChat(null)} />)}
+          {loadingHistory && (<div style={{ position: "fixed", inset: 0, zIndex: 2999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}><div style={{ color: "white", fontSize: "14px", opacity: 0.7 }}>Loading chat...</div></div>)}
         </div>
       )}
     </>

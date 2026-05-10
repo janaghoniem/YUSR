@@ -3,7 +3,9 @@ Mem0 Integration for Long-Term Preference Management
 FIXED: Lowered threshold, added query expansion, improved retrieval, UPDATE support
 """
 
+from importlib import metadata
 import os
+from importlib_metadata import metadata
 from typing import List, Dict, Optional
 from mem0 import Memory
 from dotenv import load_dotenv
@@ -145,16 +147,13 @@ class Mem0PreferenceManager:
                       "user's name is Layla"  → "layla"
                       "name: admin"           → "admin"
                       "name=shahd"            → "shahd"
-                      "prefers English"       → "english"  (for language-like keys)
                     Skips filler words like 'is', 'are', 'the', 'a', 'an'.
                     """
                     _FILLERS = {"is", "are", "was", "be", "the", "a", "an", "my", "your",
                                 "their", "our", "has", "have", "had", "and", "or", "not"}
-                    # Find the key in text, then grab the next meaningful token
-                    pattern = rf"\b{re.escape(key)}\b[^a-z0-9]*([a-z0-9@._\-]+(?:\s+[a-z0-9@._\-]+)*)"
-                    match = _re_tc59b.search(text, re.IGNORECASE)
-                    if not match:
-                        match = _re_tc59b.search(pattern, text)
+                    # Build and apply the pattern correctly — key must be first arg to search
+                    pattern = rf"\b{_re_tc59b.escape(key)}\b[^a-z0-9]*([a-z0-9@._\-]+(?:\s+[a-z0-9@._\-]+)*)"
+                    match = _re_tc59b.search(pattern, text, _re_tc59b.IGNORECASE)
                     if match:
                         tokens = match.group(1).split()
                         # Skip filler words, return first meaningful token
@@ -162,7 +161,6 @@ class Mem0PreferenceManager:
                             if tok.lower() not in _FILLERS and len(tok) >= 2:
                                 return tok.lower()
                     return ""
-
                 # Smarter approach: use word-after-"is" pattern specifically
                 def _extract_name_value(text: str) -> str:
                     """Extract name value: text after 'name is/:/=' ignoring fillers."""
@@ -175,7 +173,10 @@ class Mem0PreferenceManager:
                             return val
                     return ""
 
-                _existing_all = self._direct_mongo_search(preference, limit=10)
+                try:
+                    _existing_all = self.get_all_preferences(use_cache=False)
+                except Exception:
+                    _existing_all = self._direct_mongo_search(preference, limit=10)
                 for _emem in _existing_all:
                     _emem_text = _emem.get("memory", "").lower()
                     for _key in _IDENTITY_KEYS_TC59:
@@ -212,8 +213,7 @@ class Mem0PreferenceManager:
                             )
                             return "TC59_BLOCKED"
             except Exception as _tc59_err:
-                logger.debug(f"TC59 guard check failed (non-fatal): {_tc59_err}")
-
+                logger.warning(f"⚠️ TC59 guard check failed — identity conflict check skipped: {_tc59_err}")
         # ── Dedup guard: skip if an identical or near-identical memory already exists ──
         # Uses word overlap to block true duplicates while allowing distinct memories.
         # The guard uses _direct_mongo_search (not vector search) so it works even
@@ -269,9 +269,9 @@ class Mem0PreferenceManager:
             if not _wrote_something:
                 logger.warning(
                     f"⚠️ Mem0 returned empty result (likely daily token limit) — "
-                    f"falling back to zero-token write for: '{preference[:50]}'"
+                    f"falling back to Mistral write for: '{preference[:50]}'"
                 )
-                return self.add_preference_zero_token(preference, metadata)
+                return self._add_preference_mistral_fallback(preference, metadata)
 
             logger.info(f"✅ Stored preference for {self.user_id}: {preference[:50]}...")
             # Invalidate entire search cache for this user so next retrieval is fresh
@@ -281,13 +281,83 @@ class Mem0PreferenceManager:
             error_str = str(e)
             if "429" in error_str or "rate_limit" in error_str.lower() or "tokens per day" in error_str.lower():
                 logger.warning(
-                    f"⚠️ Groq rate-limited — falling back to zero-token write for: '{preference[:50]}'"
+                    f"⚠️ Groq rate-limited — falling back to Mistral write for: '{preference[:50]}'"
                 )
-                return self.add_preference_zero_token(preference, metadata)
+                return self._add_preference_mistral_fallback(preference, metadata)
             logger.error(f"❌ Failed to store preference: {e}")
             return None
         
-        
+
+
+
+
+    def _add_preference_mistral_fallback(self, preference: str, metadata: Optional[Dict] = None) -> str:
+        """
+        Fallback writer that uses Mistral as the LLM provider instead of Groq.
+        This is used when Groq is rate-limited or exhausted. Mistral is a real LLM
+        so Mem0's dedup/merge logic still fires — unlike zero-token which bypasses it.
+        Falls back to zero-token only if Mistral is also unavailable.
+        """
+        MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+        MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-medium-latest")
+        if not MISTRAL_API_KEY:
+            logger.warning("⚠️ MISTRAL_API_KEY not set — falling back to zero-token write")
+            return self.add_preference_zero_token(preference, metadata)
+        try:
+            mistral_config = {
+                "vector_store": {
+                    "provider": "mongodb",
+                    "config": {
+                        "mongo_uri": os.getenv("MONGODB_URI"),
+                        "db_name": "yusr_db",
+                        "collection_name": "mem0_preferences",
+                        "embedding_model_dims": 384
+                    }
+                },
+                "llm": {
+                    "provider": "mistral",
+                    "config": {
+                        "model": MISTRAL_MODEL,
+                        "temperature": 0.1,
+                        "max_tokens": 2000,
+                        "api_key": MISTRAL_API_KEY
+                    }
+                },
+                "embedder": {
+                    "provider": "huggingface",
+                    "config": {
+                        "model": "sentence-transformers/all-MiniLM-L6-v2"
+                    }
+                }
+            }
+            mistral_memory = Memory.from_config(mistral_config)
+            messages = [{"role": "user", "content": preference}]
+            result = mistral_memory.add(
+                messages=messages,
+                user_id=self.user_id,
+                metadata=metadata or {}
+            )
+            _wrote = False
+            if result is not None:
+                if isinstance(result, dict):
+                    _wrote = bool(result.get("results", []))
+                elif isinstance(result, list):
+                    _wrote = bool(result)
+                else:
+                    _wrote = bool(str(result).strip())
+            if not _wrote:
+                logger.warning("⚠️ Mistral fallback also returned empty — using zero-token write")
+                return self.add_preference_zero_token(preference, metadata)
+            self._search_cache.clear()
+            logger.info(f"✅ Stored via Mistral fallback for {self.user_id}: {preference[:50]}...")
+            return result
+        except Exception as e:
+            logger.warning(f"⚠️ Mistral fallback failed ({e}) — using zero-token write")
+            return self.add_preference_zero_token(preference, metadata)
+
+
+
+ 
     def add_preference_zero_token(self, preference: str, metadata: Optional[Dict] = None) -> str:
         """
         Store preference WITHOUT Mem0's internal LLM call.
@@ -699,9 +769,18 @@ class Mem0PreferenceManager:
                         if len(_cluster) <= 1:
                             continue
                         # Find the newest doc in this cluster
-                        def _oid_ts(r):
+                        # Primary: metadata timestamp (set at write time, reliable for all doc types)
+                        # Fallback: ObjectId generation time (only works for raw ObjectId _id fields)
+                        def _ts_for_result(r):
+                            _meta_ts = r.get("metadata", {}).get("timestamp", "")
+                            if _meta_ts:
+                                try:
+                                    from datetime import datetime as _dt
+                                    return _dt.fromisoformat(_meta_ts).timestamp()
+                                except Exception:
+                                    pass
                             return _oid_ts_map.get(r.get("memory", "").strip().lower(), 0.0)
-                        _newest = max(_cluster, key=_oid_ts)
+                        _newest = max(_cluster, key=_ts_for_result)
                         _newest_text = _newest.get("memory", "")
                         for r in combined_results:
                             if (

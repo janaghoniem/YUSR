@@ -1778,21 +1778,42 @@ async def start_language_agent(broker):
                                     if _key in _mem_text and _key in _pi_lower:
                                         # Extract value tokens after the keyword
                                         import re as _re_tc59
-                                        _stored_val = _re_tc59.findall(
-                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _mem_text
-                                        )
-                                        _new_val = _re_tc59.findall(
-                                            rf"{_key}[^a-z0-9]*([a-z0-9@._-]+)", _pi_lower
-                                        )
+
+                                        _FILLERS_TC59 = {
+                                            "is", "are", "was", "a", "an", "the",
+                                            "my", "your", "their", "our", "has",
+                                            "have", "had", "and", "or", "not", "be",
+                                        }
+
+                                        def _smart_extract_tc59(text: str, key: str) -> str:
+                                            # "name is X", "name: X", "name=X"
+                                            m = _re_tc59.search(
+                                                rf"\b{_re_tc59.escape(key)}\b[^a-z0-9]*"
+                                                rf"([a-z][a-z0-9_\-@.]*(?:\s+[a-z0-9_\-@.]+)*)",
+                                                text, _re_tc59.IGNORECASE
+                                            )
+                                            if not m:
+                                                return ""
+                                            tokens = m.group(1).split()
+                                            for tok in tokens:
+                                                if tok.lower() not in _FILLERS_TC59 and len(tok) >= 2:
+                                                    return tok.lower()
+                                            return ""
+
+                                        _stored_val = _smart_extract_tc59(_mem_text, _key)
+                                        _new_val = _smart_extract_tc59(_pi_lower, _key)
                                         if (
                                             _stored_val and _new_val
-                                            and _stored_val[0] != _new_val[0]
+                                            and _stored_val != _new_val
+                                            and _stored_val not in _FILLERS_TC59
+                                            and _new_val not in _FILLERS_TC59
                                         ):
                                             _conflict_detected = True
                                             logger.warning(
                                                 f"🚫 TC59: Conflicting identity claim blocked. "
-                                                f"Stored: '{_mem_text[:60]}' | "
-                                                f"New claim: '{str(personal_info)[:60]}'"
+                                                f"Stored '{_key}'='{_stored_val}' | "
+                                                f"New claim '{_key}'='{_new_val}' | "
+                                                f"Stored text: '{_mem_text[:60]}'"
                                             )
                                             break
                                 if _conflict_detected:

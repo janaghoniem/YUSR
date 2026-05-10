@@ -43,6 +43,7 @@ from agents.utils.device_protocol import (
     SemanticUITree,
 )
 from agents.execution_agent.core.exec_agent_models import ExecutionResult
+from agents.execution_agent.strategies.cache_adapter import CacheAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ APP_PACKAGES: Dict[str, str] = {
     "maps":            "com.google.android.apps.maps",
     "google docs":     "com.google.android.apps.docs",
     "google sheets":   "com.google.android.apps.spreadsheets",
-    "google slides":   "com.google.android.apps.presentations",
+    "google slides":   "com.google.android.apps.presentations", 
     "google drive":    "com.google.android.apps.docs",
     "google photos":   "com.google.android.apps.photos",
     "google meet":     "com.google.android.apps.meetings",
@@ -549,6 +550,21 @@ class ParameterExtractor:
             except (json.JSONDecodeError, TypeError):
                 pass  # input_content is plain text, not JSON — ignore
 
+        # Also try extracting email fields from higher-level context such as
+        # the overall goal or other coordinator-provided extras when the
+        # task text itself lacks them. Useful when decomposer/coordinator
+        # placed the subject/body in `overall_goal`.
+        for ctx_key in ("overall_goal", "goal"):
+            ctx_val = extra.get(ctx_key)
+            if isinstance(ctx_val, str) and ctx_val:
+                ParameterExtractor._extract_email(ctx_val, params)
+        
+        # Additional fallback: if alarm params are still missing but text
+        # contains time patterns, try extraction from task text one more time
+        # with a looser heuristic (some coordinators phrase times differently).
+        if not params.has("alarm_hour") and any(w in (text or "").lower() for w in ("alarm", "set time", "timer")):
+            ParameterExtractor._extract_time(text, params)
+
         logger.debug(f"[PARAMS] Extracted: {params}")
         return params
 
@@ -572,6 +588,8 @@ class ParameterExtractor:
         params.set("alarm_minute", f"{minute:02d}")
         params.set("alarm_period", period)
         params.set("alarm_time",   f"{hour}:{minute:02d} {period}")
+        # Also store single-digit hour variant for template matching flexibility
+        params.set("alarm_hour_no_pad", str(hour))
 
     @staticmethod
     def _extract_email(text: str, params: TaskParameters) -> None:
@@ -1292,7 +1310,7 @@ class MobileCodeGenStrategy:
         self.total_llm_calls:     int            = 0
         self.tier_stats:          Dict[str, int] = {"execution_attempts": 0, "tier3_retries": 0}
 
-        self.cache           = TemplateCache(cache_file or CACHE_FILE)
+        self.cache           = CacheAdapter()
         self.param_extractor = ParameterExtractor()
         self.placeholderizer = PlaceholderExtractor()
         self._executor:      Optional[CodeExecutor] = None
@@ -1643,40 +1661,14 @@ class MobileCodeGenStrategy:
         package:   str,
         params:    TaskParameters,
     ) -> None:
-        template_code, schema = self.placeholderizer.extract(code, params, task_text)
-
-        # Guard: if the task text implies a parameterised value (has field names)
-        # but the stored template has no placeholders, it hardcodes the value.
-        # A hardcoded template is useless for different values — don't cache it.
-        field_implies_param = any(
-            kw in task_text.lower()
-            for kw in ("subject field", "body field", "to field", "in the subject",
-                       "in the body", "in the to", "email body", "enter ")
+        self.cache.store_successful(
+            code=code,
+            task_text=task_text,
+            app=app,
+            package=package,
+            params=params.raw,
+            task_type=self.cache._inner._infer_task_type(task_text),
         )
-        has_placeholders = "{" in template_code
-        if field_implies_param and not has_placeholders and params.raw:
-            logger.info(
-                f"[CACHE] Skipping storage — template has no placeholders but task "
-                f"implies parameterised value: {task_text[:60]!r}"
-            )
-            return
-
-        task_pattern = self._normalise_task_pattern(task_text, params)
-        tid          = self._template_id(task_text, app)
-        existing = self.cache._store.get(tid)
-        if existing:
-            existing.success_count   += 1
-            existing.code_template    = template_code
-            existing.parameter_schema.update(schema)
-            existing.last_used        = datetime.utcnow().isoformat()
-            self.cache._save()
-            logger.info(f"[CACHE] Updated template {tid[:8]} (success_count={existing.success_count})")
-            return
-        template = CodeTemplate(
-            template_id=tid, task_pattern=task_pattern, app=app, package=package,
-            code_template=template_code, parameter_schema=schema, success_count=1,
-        )
-        self.cache.add(template)
 
     async def execute_task(self, task: MobileTaskRequest) -> MobileTaskResult:
         self.current_task = task
@@ -1725,7 +1717,20 @@ class MobileCodeGenStrategy:
         cache_hit = self.cache.lookup(task.ai_prompt, app)
         if cache_hit:
             template, score = cache_hit
-            missing = params.missing_keys(template.code_template)
+            missing = self.cache._placeholderizer.missing_keys(
+                template.code_template, params.raw
+            )
+            # Also respect stored parameter_schema: some templates may reference
+            # params as variables (email_subject) rather than {placeholders}.
+            # Ensure required schema keys are present at runtime.
+            schema_keys = set()
+            try:
+                schema_keys = set(getattr(template, "parameter_schema", {}) or {})
+            except Exception:
+                schema_keys = set()
+            schema_missing = sorted(schema_keys - set(params.raw.keys())) if schema_keys else []
+            if schema_missing:
+                missing = sorted(set(missing) | set(schema_missing))
             if not missing:
                 logger.info(f"[T1] Cache hit (sim={score:.2f}) — injecting {len(params.raw)} params → executing")
                 injected = params.inject(template.code_template)

@@ -813,13 +813,22 @@ class Mem0PreferenceManager:
             try:
                 direct_results = self._direct_mongo_search(query, limit=limit)
                 if direct_results:
-                    # Merge: add any direct result whose text isn't already in combined
+                    # Merge: add any direct result whose text isn't already in combined.
+                    # IMPORTANT: skip conversation_history entries — they accumulate
+                    # per task and flood the LLM prompt on long sessions.
+                    # Also stop appending once we reach the caller's limit so we don't
+                    # silently exceed it before the [:limit] cap at the end.
                     existing_texts = {
                         r.get("memory", "").strip().lower()
                         for r in combined_results
                     }
                     added = 0
                     for dr in direct_results:
+                        if len(combined_results) >= limit:
+                            break
+                        dr_category = dr.get("metadata", {}).get("category", "")
+                        if dr_category == "conversation_history":
+                            continue
                         dr_text = dr.get("memory", "").strip().lower()
                         if dr_text and dr_text not in existing_texts:
                             combined_results.append(dr)

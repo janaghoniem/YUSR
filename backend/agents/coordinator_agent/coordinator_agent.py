@@ -2638,9 +2638,11 @@ def create_coordinator_graph():
                 str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
             )
 
-            # ── Memory Fix 3: Strip credentials from coordinator context ──────────
+            # ── Memory Fix 3: Strip credentials and conversation_history from coordinator context ──
             # T-M3/T-M4: Coordinator was embedding stored passwords into task
             # decomposition prompt, potentially passing them to execution agents.
+            # Also strip conversation_history entries — these accumulate per-task and
+            # flood the decomposition prompt, causing hallucination on long sessions.
             _CRED_MARKERS_COORD = [
                 "password", "passwd", "pwd", "secret",
                 "api key", "apikey", "api_key", "token",
@@ -2651,11 +2653,12 @@ def create_coordinator_graph():
                 preferences_context = [
                     p for p in preferences_context
                     if not any(m in str(p).lower() for m in _CRED_MARKERS_COORD)
+                    and p.get("metadata", {}).get("category") != "conversation_history"
                 ]
                 _blocked = _orig_count - len(preferences_context)
                 if _blocked > 0:
                     logger.warning(
-                        f"🚫 Memory Fix 3: Removed {_blocked} credential memory "
+                        f"🚫 Memory Fix 3: Removed {_blocked} credential/history memory "
                         f"item(s) from coordinator context"
                     )
                 # Convert list of dicts to a readable numbered string for the LLM
@@ -4064,16 +4067,23 @@ def create_coordinator_graph():
                     "open ", "launch ", "start ", "close ", "run ",
                     "click ", "type ", "press ", "navigate to ", "go to ",
                     "scroll ", "copy ", "paste ", "select all",
+                    "search for ", "search ", "play ", "watch ",
+                    "set alarm", "set an alarm", "find ",
                 )
                 _original_req_lower = str(
                     state["input"].get("original_input",
                     state["input"].get("confirmation",
                     state["input"].get("action", "")))
                 ).lower().strip()
+                # A request has a personal signal if it mentions the user specifically.
+                # Without a personal signal, there is nothing worth storing as a preference.
+                _has_personal_signal = any(
+                    marker in _original_req_lower
+                    for marker in ["my ", " i ", "i'm ", "i am ", " me ", "@", "prefer", "always", "usually"]
+                )
                 _is_task_only = (
                     any(_original_req_lower.startswith(p) for p in _TASK_ONLY_PREFIXES)
-                    and len(_original_req_lower.split()) <= 5
-                    and "@" not in _original_req_lower
+                    and not _has_personal_signal
                 )
                 if _is_task_only:
                     logger.info(
@@ -4213,24 +4223,11 @@ Extract now:"""
                 # except Exception as ctx_err:
                 #     logger.debug(f"⚠️ Could not store conversation context (regular method): {ctx_err}")
                 
-                # Single write via Mem0's dedup-aware path only
-                try:
-                    pref_mgr.add_preference(
-                        conversation_context,
-                        metadata={
-                            "category": "conversation_history",
-                            "session_id": session_id,
-                            "timestamp": datetime.now().isoformat(),
-                            "apps_used": apps_used,
-                            "steps": success_count,
-                            "original_request": task_summary["original_request"]
-                        }
-                    )
-                    logger.info(f"💾 Stored conversation context")
-                except Exception as ctx_err:
-                    logger.debug(f"⚠️ Could not store conversation context: {ctx_err}")
-                except Exception as e:
-                    logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
+                # conversation_history is NOT stored in Mem0 — it accumulates unboundedly
+                # and floods the coordinator decomposition prompt on long sessions,
+                # causing hallucination. It is persisted via LangGraph checkpoint instead
+                # (state["conversation_history"] → checkpoint at end of send_feedback).
+                logger.debug(f"⏭️ Skipping Mem0 conversation_history write — handled by checkpoint")
             except Exception as e:
                 logger.debug(f"⚠️ Preference storage operation encountered issue: {e}")
         # ── Pattern Learning: detect behavioral patterns from history ─────────

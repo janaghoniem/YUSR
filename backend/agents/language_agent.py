@@ -1699,10 +1699,12 @@ async def start_language_agent(broker):
                 context_parts.append("# USER PREFERENCES")
                 for i, pref in enumerate(preferences[:3], 1):
                     context_parts.append(f"{i}. {pref}")
-            if conversation_history:
-                context_parts.append("\n# RECENT CONVERSATIONS")
-                for i, conv in enumerate(conversation_history[:2], 1):
-                    context_parts.append(f"{i}. {conv}")
+            # conversation_history entries from Mem0 contain coordinator-internal
+            # execution summaries ("User completed task: X. Apps used: Y.") that
+            # are not useful for the Language Agent's clarification decisions and
+            # add noise to the prompt. Skip them entirely here.
+            # The LangGraph checkpoint state["conversation_history"] is used by
+            # the coordinator for app-open context — that is the right place for it.
 
             memory_context = "\n".join(context_parts) if context_parts else "No previous context."
             print(f"🧠 Retrieved Memory Context:\n{memory_context}\n")

@@ -44,6 +44,7 @@ from agents.utils.device_protocol import (
 )
 from agents.execution_agent.core.exec_agent_models import ExecutionResult
 from agents.execution_agent.strategies.cache_adapter import CacheAdapter
+from agents.execution_agent.strategies.mobile_template_cache import infer_app
 
 logger = logging.getLogger(__name__)
 
@@ -1492,41 +1493,6 @@ class MobileCodeGenStrategy:
 
         logger.warning(f"[LAUNCH] ⚠️ {package} may not be fully loaded after 12s — proceeding")
 
-    # FIX #12: Broadened _infer_app — "email" keyword now maps to gmail
-    @staticmethod
-    def _infer_app(text: str) -> Tuple[str, str]:
-        t = text.lower()
-        checks: List[Tuple[Tuple[str, ...], str]] = [
-            # NOTE: Order matters — first match wins.
-            # Chrome MUST be before maps so "Navigate to search bar in Chrome" matches chrome,
-            # not maps (which previously matched "navigate to").
-            (("chrome", "browser", "search the web", "google.com", "url"),    "chrome"),
-            (("gmail", "email", "mail", "compose email", "send email",
-              "recipient", "subject", "inbox"),                               "gmail"),
-            (("alarm", "clock", "stopwatch", "timer"),                        "clock"),
-            (("contacts", "contact", "call log"),                             "contacts"),
-            (("play store", "install app", "google play", "download app",
-              "app store", "download the", "install the", "get the app",
-              "download app", "install app"),                                  "play_store"),
-            (("youtube", "watch video", "play video", "play a video"),        "youtube"),
-            # Maps: removed "navigate to" — it was matching Chrome/generic navigate tasks.
-            # Require explicit location-search intent words.
-            (("google maps", "maps app", "directions to", "find on map",
-              "get directions", "open maps"),                                  "maps"),
-            (("google docs", " docs ", "document"),                           "google docs"),
-            (("google sheets", "spreadsheet"),                                "google sheets"),
-            (("google slides", "presentation"),                               "google slides"),
-            (("google calendar", "calendar", "schedule", "event"),            "google calendar"),
-            (("google keep", "keep", "note"),                                 "google keep"),
-            (("settings",),                                                   "settings"),
-            (("whatsapp",),                                                   "whatsapp"),
-            (("spotify", "music", "playlist"),                                "spotify"),
-        ]
-        for keywords, app in checks:
-            if any(k in t for k in keywords):
-                return app, APP_PACKAGES.get(app, "")
-        return "unknown", ""
-
     def _build_user_prompt(
         self,
         task_text:    str,
@@ -1661,14 +1627,17 @@ class MobileCodeGenStrategy:
         package:   str,
         params:    TaskParameters,
     ) -> None:
-        self.cache.store_successful(
-            code=code,
-            task_text=task_text,
-            app=app,
-            package=package,
-            params=params.raw,
-            task_type=self.cache._inner._infer_task_type(task_text),
-        )
+        try:
+            self.cache.store_successful(
+                code=code,
+                task_text=task_text,
+                app=app,
+                package=package,
+                params=params.raw,
+                task_type=self.cache._inner._infer_task_type(task_text),
+            )
+        except Exception as e:
+            logger.warning(f"[CACHE] store_successful failed (non-fatal): {e}")
 
     async def execute_task(self, task: MobileTaskRequest) -> MobileTaskResult:
         self.current_task = task
@@ -1693,22 +1662,10 @@ class MobileCodeGenStrategy:
         params = ParameterExtractor.extract(task.ai_prompt, task.extra_params)
         logger.info(f"[PARAMS] {params}")
 
-        # Respect explicit app_name from coordinator FIRST — it's more reliable
-        # than text-based inference which can misfire on content like "vets in New Cairo".
-        explicit_app = (task.extra_params or {}).get("app_name", "").lower().strip()
-        if explicit_app and explicit_app not in ("email",):  # "email" still needs mapping
-            _explicit_pkg = APP_PACKAGES.get(explicit_app, "")
-            app, package = (explicit_app, _explicit_pkg) if _explicit_pkg else self._infer_app(
-                f"{explicit_app} {task.ai_prompt}"
-            )
-        else:
-            # Use only ai_prompt for app inference — overall_goal bleeds in
-            # location/content text that confuses app detection
-            app, package = self._infer_app(f"{explicit_app} {task.ai_prompt}")
-        explicit_app = (task.extra_params.get("app_name") or "").strip().lower()
-        if explicit_app and explicit_app in APP_PACKAGES:
-            app     = explicit_app
-            package = APP_PACKAGES[app]
+        # Respect explicit app_name from coordinator first, then fall back to
+        # shared inference that knows about messages/whatsapp and other apps.
+        explicit_app = (task.extra_params or {}).get("app_name", "").strip()
+        app, package = infer_app(task.ai_prompt, explicit_app)
         logger.info(f"[APP] app={app!r} | package={package!r}")
 
         executor = self._get_executor()
@@ -2013,6 +1970,7 @@ class MobileCodeGenStrategy:
             snap_low = snap.lower()
             task_low = task_text.lower()
             elem_count = snap.count("\n")
+            pkg_name = APP_PACKAGES.get(app, "")
 
             # ── Hard failure: crash dialog ────────────────────────────────
             if any(s in snap_low for s in ("unfortunately", "has stopped")):
@@ -2195,14 +2153,38 @@ class MobileCodeGenStrategy:
                     return True, f"Gmail active ({elem_count} elements)"
                 return True, "Gmail screen changed"
 
-            task_words = re.findall(r"[a-z]{4,}", task_low)
-            exclude    = {"open", "launch", "start", "type", "click", "find", "show", "make",
-                          "with", "from", "into", "this", "that", "your", "have", "been", "will",
-                          "also", "some", "then"}
-            task_words = [w for w in task_words if w not in exclude][:5]
-            matched    = [w for w in task_words if w in snap_low]
-            if matched:
-                return True, f"Task keywords found on screen: {matched[:3]}"
+            # ── MESSAGES ─────────────────────────────────────────────────
+            if app == "messages" or any(k in task_low for k in (
+                "messages app", "message thread", "sms", "send a message",
+                "in the messages",
+            )):
+                pkg = "com.google.android.apps.messaging"
+                if pkg not in snap_low and "messaging" not in snap_low:
+                    return False, "Messages app not in UI hierarchy — app may not have opened"
+                if "start_chat_fab" in snap_low or "start chat" in snap_low:
+                    return True, "Messages conversation list visible"
+                if "compose_message_text" in snap_low or "message_text" in snap_low:
+                    return True, "Messages compose field visible — inside chat"
+                if "messaging" in snap_low and elem_count >= 8:
+                    return True, f"Messages app active ({elem_count} elements)"
+                return False, "Messages: UI not confirmed — package not in hierarchy"
+
+            # ── WHATSAPP ─────────────────────────────────────────────────
+            if app == "whatsapp" or "whatsapp" in task_low:
+                if "com.whatsapp" not in snap_low and "whatsapp" not in snap_low:
+                    return False, "WhatsApp not in UI hierarchy"
+                return True, f"WhatsApp active ({elem_count} elements)"
+
+            # ── GENERIC FALLBACK ─────────────────────────────────────────
+            if pkg_name and pkg_name in snap_low:
+                return True, f"Package {pkg_name} confirmed in hierarchy"
+
+            if elem_count >= 20:
+                return True, f"Substantial UI ({elem_count} elements) — trusting TASK_COMPLETE"
+
+            if any(k in task_low for k in ("open", "launch", "start")):
+                return False, f"Could not confirm app opened (only {elem_count} elements, package not in hierarchy)"
+
             return True, "No contradicting signals — trusting TASK_COMPLETE"
 
         except Exception as e:
@@ -2345,7 +2327,6 @@ async def execute_mobile_task(
 #          Added correct YouTube search and "click first result" patterns
 #          with working resourceId fallback chain.
 #
-#  FIX #12 _infer_app: "email" keyword added to gmail
-#          "email" was listed in comments but missing from the actual keyword
-#          tuple, so tasks like "Navigate to email app" never triggered Gmail.
-#          Added: "email", "mail", "compose email", "send email", "inbox"
+#  FIX #12 shared infer_app: messages/whatsapp and explicit app handling
+#          App inference now comes from mobile_template_cache.infer_app(),
+#          which correctly handles explicit app_name plus messages/whatsapp.

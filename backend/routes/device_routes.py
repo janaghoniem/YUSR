@@ -271,20 +271,41 @@ async def register_device_get(
     # FIX V-6: Also register in MongoDB user_devices (async, non-blocking)
     if user_id and session_id:
         try:
-            mgr = get_cross_platform_manager()
-            if mgr:
-                import asyncio
-                asyncio.create_task(
-                    mgr._registry.register_device(
-                        user_id=user_id,
-                        device_id=device_id,
-                        platform=platform,
-                        session_id=session_id,
-                        label=name or f"Device {device_id}",
-                    )
-                )
+            from core.mongo import get_database
+            from core.dependencies import ws_manager as shared_ws_manager
+            db = get_database("aura_db")
+
+            # Try to use the manager if available; otherwise use DeviceRegistry directly
+            mgr = get_cross_platform_manager(db=db, ws_manager=shared_ws_manager) if db is not None else None
+
+            async def _do_register():
+                try:
+                    if mgr:
+                        await mgr._registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=name or f"Device {device_id}",
+                        )
+                    else:
+                        # Fallback: instantiate registry directly if manager not initialized
+                        from routes.cross_platform_manager import DeviceRegistry
+                        registry = DeviceRegistry(db)
+                        await registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=name or f"Device {device_id}",
+                        )
+                except Exception as _inner_err:
+                    logger.warning(f"⚠️ MongoDB device registration failed for {device_id}: {_inner_err}")
+
+            import asyncio
+            asyncio.create_task(_do_register())
         except Exception as _reg_err:
-            logger.debug(f"⚠️ MongoDB device registration skipped: {_reg_err}")
+            logger.debug(f"⚠️ MongoDB device registration scheduling skipped: {_reg_err}")
 
     return {"status": "ok", "message": f"Device {device_id} registered", "device_info": device}
 
@@ -320,20 +341,41 @@ async def register_device_post(
     session_id = (device_data or {}).get("session_id", "")
     if user_id and session_id:
         try:
-            mgr = get_cross_platform_manager()
-            if mgr:
-                import asyncio
-                asyncio.create_task(
-                    mgr._registry.register_device(
-                        user_id=user_id,
-                        device_id=device_id,
-                        platform=device_data.get("platform", "mobile"),
-                        session_id=session_id,
-                        label=device_data.get("name", f"Device {device_id}"),
-                    )
-                )
+            from core.mongo import get_database
+            from core.dependencies import ws_manager as shared_ws_manager
+            db = get_database("aura_db")
+
+            mgr = get_cross_platform_manager(db=db, ws_manager=shared_ws_manager) if db is not None else None
+
+            async def _do_register_post():
+                try:
+                    platform = device_data.get("platform", "mobile")
+                    label = device_data.get("name", f"Device {device_id}")
+                    if mgr:
+                        await mgr._registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=label,
+                        )
+                    else:
+                        from routes.cross_platform_manager import DeviceRegistry
+                        registry = DeviceRegistry(db)
+                        await registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=label,
+                        )
+                except Exception as _inner_err:
+                    logger.warning(f"⚠️ MongoDB device registration failed for {device_id}: {_inner_err}")
+
+            import asyncio
+            asyncio.create_task(_do_register_post())
         except Exception as _reg_err:
-            logger.debug(f"⚠️ MongoDB device registration skipped: {_reg_err}")
+            logger.debug(f"⚠️ MongoDB device registration scheduling skipped: {_reg_err}")
 
     logger.info(f"✅ Device {device_id} is now ONLINE")
     return {

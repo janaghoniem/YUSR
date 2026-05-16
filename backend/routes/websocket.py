@@ -17,6 +17,11 @@ from utils.text_utils import classify_confirmation_intent, detect_interrupt, det
 
 router = APIRouter()
 
+# Session -> device context cache (kept in-memory for quick updates on disconnect)
+_WS_DEVICE_CONTEXT: dict[str, dict] = {}
+
+from urllib.parse import parse_qs
+
 
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
@@ -38,6 +43,45 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
       { type: "context_saved", snapshot_id: "..." }
     """
     await ws_manager.connect(session_id, websocket)
+
+    # Immediately register device in MongoDB if query params provide identity.
+    try:
+        query_string = websocket.scope.get("query_string", b"").decode()
+        qs = parse_qs(query_string)
+        qs_user = qs.get("user_id") or qs.get("uid") or []
+        qs_device = qs.get("device_id") or qs.get("did") or []
+        qs_platform = qs.get("platform") or qs.get("device_type") or []
+
+        user_id = qs_user[0] if qs_user else None
+        device_id = qs_device[0] if qs_device else session_id
+        platform = (qs_platform[0] if qs_platform else None) or "desktop"
+
+        if user_id:
+            _WS_DEVICE_CONTEXT[session_id] = {
+                "user_id": user_id,
+                "device_id": device_id,
+                "platform": "mobile" if str(platform).lower() == "mobile" else "desktop",
+            }
+            from routes.cross_platform_manager import get_cross_platform_manager
+            mgr = get_cross_platform_manager()
+            if mgr:
+                # schedule background registration so connect path isn't blocked
+                async def _reg():
+                    try:
+                        await mgr._registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=_WS_DEVICE_CONTEXT[session_id]["platform"],
+                            session_id=session_id,
+                            label=f"{_WS_DEVICE_CONTEXT[session_id]['platform'].capitalize()} {device_id}",
+                        )
+                        logger.info(f"✅ WebSocket auto-registered device {device_id} for user {user_id}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ WebSocket auto-registration failed for {device_id}: {e}")
+
+                asyncio.create_task(_reg())
+    except Exception as e:
+        logger.debug(f"⚠️ Failed to auto-register WebSocket device: {e}")
 
     async def ws_broadcast_handler(message):
         if isinstance(message, dict):
@@ -133,7 +177,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 
                 # Cache session -> device linkage so we can update device online status on disconnect.
-                _WS_DEVICE_CONTEXT: dict[str, dict] = {}
                 interrupt_action = detect_interrupt(user_text)
                 if interrupt_action:
                     logger.info(f"🛑 Voice/text interrupt detected: '{user_text}' → {interrupt_action}")

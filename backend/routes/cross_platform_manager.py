@@ -239,7 +239,7 @@ class CrossPlatformTaskManager:
         target_device_id: str,
         target_session_id: str,
         task: Any,  # ActionTask — imported lazily to avoid circular import
-        source_server_url: Optional[str] = None,
+        source_server_url: Optional[str] = "",
     ) -> str:
         """
         Store a remote subtask document in MongoDB and return its task_id.

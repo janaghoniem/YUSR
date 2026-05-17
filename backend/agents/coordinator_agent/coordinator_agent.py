@@ -5189,7 +5189,7 @@ async def route_single_task(
             target_device_id=target_device_id,
             target_session_id=target_session_id,
             task=task,
-            source_server_url=None,
+            source_server_url="",
         )
 
         # Determine reasonable timeout based on agent type

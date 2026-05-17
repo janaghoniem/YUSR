@@ -17,6 +17,7 @@ Fixes applied:
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import Dict, Any, Optional, List
 import logging
+from datetime import datetime, timezone
 
 from routes.cross_platform_manager import get_cross_platform_manager
 from agents.language_agent import active_agents
@@ -79,6 +80,92 @@ def _normalize_action(action_data: Dict[str, Any]) -> Dict[str, Any]:
     return action_data
 
 
+async def _refresh_device_context(device_id: str, device_data: Optional[Dict[str, Any]] = None) -> None:
+    """Keep the in-memory registry and MongoDB heartbeat in sync for polling devices."""
+    device = DEVICE_REGISTRY.setdefault(
+        device_id,
+        {
+            "device_id": device_id,
+            "name": f"Device {device_id}",
+            "status": "online",
+            "last_seen": None,
+            "screen_width": 1080,
+            "screen_height": 2340,
+        },
+    )
+    device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
+
+    if device_data:
+        device.update({
+            "user_id": device_data.get("user_id", device.get("user_id")),
+            "session_id": device_data.get("session_id", device.get("session_id")),
+            "platform": device_data.get("platform", device.get("platform")),
+            "name": device_data.get("name", device.get("name")),
+            "android_version": device_data.get("android_version", device.get("android_version")),
+            "screen_width": device_data.get("screen_width", device.get("screen_width", 1080)),
+            "screen_height": device_data.get("screen_height", device.get("screen_height", 2340)),
+        })
+
+    mgr = get_cross_platform_manager()
+    if not mgr:
+        return
+
+    user_id = device.get("user_id")
+    session_id = device.get("session_id")
+    if user_id and session_id:
+        try:
+            await mgr._registry.set_device_online(user_id, device_id, session_id, True)
+        except Exception as _heartbeat_err:
+            logger.debug(f"⚠️ Could not refresh device heartbeat for {device_id}: {_heartbeat_err}")
+
+
+async def _claim_cross_platform_actions(device_id: str) -> List[Dict[str, Any]]:
+    """Claim pending MongoDB tasks for the device and expose them through polling."""
+    mgr = get_cross_platform_manager()
+    if not mgr:
+        return []
+
+    device = DEVICE_REGISTRY.get(device_id, {})
+    user_id = device.get("user_id")
+    session_id = device.get("session_id")
+
+    if not user_id:
+        try:
+            context = await mgr._registry.find_device_context(device_id)
+        except Exception:
+            context = None
+        if context:
+            user_id = context.get("user_id")
+            device = context.get("device", device) or device
+            session_id = session_id or device.get("session_id")
+
+    if not user_id:
+        return []
+
+    try:
+        await mgr._registry.set_device_online(user_id, device_id, session_id or device.get("session_id", ""), True)
+    except Exception as _heartbeat_err:
+        logger.debug(f"⚠️ Could not mark {device_id} online before polling: {_heartbeat_err}")
+
+    tasks = await mgr.claim_pending_tasks(user_id=user_id, device_id=device_id, session_id=session_id)
+    if not tasks:
+        return []
+
+    actions: List[Dict[str, Any]] = []
+    for task in tasks:
+        payload = dict(task.get("task_payload") or {})
+        payload.setdefault("task_id", task.get("task_id"))
+        payload.setdefault("source_platform", task.get("source_platform", "coordinator"))
+        payload.setdefault("target_device_id", task.get("target_device_id"))
+        payload.setdefault("target_session_id", task.get("target_session_id"))
+        payload.setdefault("task_kind", "cross_platform_task")
+        payload.setdefault("cross_platform_task", task)
+        actions.append(payload)
+
+    return actions
+
+
 # ---------------------------------------------------------------------------
 # UI Tree endpoints
 # ---------------------------------------------------------------------------
@@ -123,6 +210,8 @@ async def update_ui_tree(device_id: str = Path(...), tree_data: Dict[str, Any] =
             "name": f"Device {device_id}",
             "status": "online",
             "last_seen": None,
+            "user_id": (tree_data or {}).get("user_id"),
+            "session_id": (tree_data or {}).get("session_id"),
             "screen_width": (tree_data or {}).get("screen_width", 1080),
             "screen_height": (tree_data or {}).get("screen_height", 2340),
             "ui_tree": tree_data,
@@ -131,8 +220,11 @@ async def update_ui_tree(device_id: str = Path(...), tree_data: Dict[str, Any] =
     else:
         device = DEVICE_REGISTRY[device_id]
         device["status"] = "online"
+        device["last_seen"] = datetime.now(timezone.utc)
         device["ui_tree"] = tree_data
         if tree_data:
+            device["user_id"] = tree_data.get("user_id", device.get("user_id"))
+            device["session_id"] = tree_data.get("session_id", device.get("session_id"))
             device["screen_width"] = tree_data.get("screen_width", 1080)
             device["screen_height"] = tree_data.get("screen_height", 2340)
     
@@ -152,15 +244,20 @@ async def update_device_status(device_id: str = Path(...), status_data: Dict[str
             "name": f"Device {device_id}",
             "status": "online",
             "last_seen": None,
+            "user_id": (status_data or {}).get("user_id"),
+            "session_id": (status_data or {}).get("session_id"),
             "screen_width": 1080,
             "screen_height": 2340,
         }
     
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
     
     if status_data:
         device.update({
+            "user_id": status_data.get("user_id", device.get("user_id")),
+            "session_id": status_data.get("session_id", device.get("session_id")),
             "android_version": status_data.get("android_version"),
             "app_name": status_data.get("app_name"),
             "screen_width": status_data.get("screen_width", 1080),
@@ -177,7 +274,17 @@ async def update_device_status(device_id: str = Path(...), status_data: Dict[str
 async def get_pending_actions(device_id: str = Path(...)):
     """Get pending actions for device (polling endpoint)."""
     PENDING_ACTIONS.setdefault(device_id, [])
-    actions = PENDING_ACTIONS[device_id]
+    actions = list(PENDING_ACTIONS[device_id])
+
+    try:
+        device_context = DEVICE_REGISTRY.get(device_id)
+        await _refresh_device_context(device_id, device_context)
+        cross_platform_actions = await _claim_cross_platform_actions(device_id)
+        if cross_platform_actions:
+            actions.extend(cross_platform_actions)
+    except Exception as _poll_err:
+        logger.debug(f"⚠️ Polling bridge failed for {device_id}: {_poll_err}")
+
     if actions:
         logger.debug(f"📤 Returning {len(actions)} pending actions for {device_id}")
     response = {"actions": actions, "count": len(actions)}
@@ -225,6 +332,7 @@ async def execute_action_on_device(
             "error": "Device is offline",
             "execution_time_ms": 0,
         }
+    device["last_seen"] = datetime.now(timezone.utc)
     action_data = _normalize_action(action_data)
     PENDING_ACTIONS.setdefault(device_id, [])
     PENDING_ACTIONS[device_id].append(action_data)
@@ -257,12 +365,19 @@ async def register_device_get(
         "name": name or f"Device {device_id}",
         "status": "online",
         "last_seen": None,
+        "user_id": user_id,
+        "session_id": session_id,
         "android_version": android_version,
         "screen_width": 1080,
         "screen_height": 2340,
     })
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
+    if user_id:
+        device["user_id"] = user_id
+    if session_id:
+        device["session_id"] = session_id
     if name:
         device["name"] = name
     if android_version:
@@ -322,14 +437,19 @@ async def register_device_post(
         "name": (device_data or {}).get("name", f"Device {device_id}"),
         "status": "online",
         "last_seen": None,
+        "user_id": (device_data or {}).get("user_id", ""),
+        "session_id": (device_data or {}).get("session_id", ""),
         "screen_width": 1080,
         "screen_height": 2340,
     })
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
     if device_data:
         device.update({
             "name": device_data.get("name", device["name"]),
+            "user_id": device_data.get("user_id", device.get("user_id")),
+            "session_id": device_data.get("session_id", device.get("session_id")),
             "android_version": device_data.get("android_version"),
             "device_model": device_data.get("device_model"),
             "screen_width": device_data.get("screen_width", 1080),

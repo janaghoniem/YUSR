@@ -177,6 +177,20 @@ class DeviceRegistry:
             return []
         return doc.get("devices", [])
 
+    async def find_device_context(self, device_id: str) -> Optional[Dict[str, Any]]:
+        doc = await asyncio.to_thread(self._col.find_one, {"devices.device_id": device_id})
+        if not doc:
+            return None
+
+        for device in doc.get("devices", []):
+            if device.get("device_id") == device_id:
+                return {
+                    "user_id": doc.get("user_id"),
+                    "device": device,
+                }
+
+        return None
+
     async def get_target_device(
         self,
         user_id: str,

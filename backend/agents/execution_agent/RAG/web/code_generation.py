@@ -537,6 +537,14 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 ✅ CORRECT: await page.locator('a').first.scroll_into_view_if_needed()
 ✅ CORRECT: await page.keyboard.press('Enter')
 
+⚠️ SELECTOR DISAMBIGUATION RULE (MANDATORY):
+If the page inspector lists inputs or fields with an index hint like [nth=N], you MUST target that exact element using `.nth(N)` on the locator to avoid ambiguous unnamed inputs. Example:
+
+✅ Correct: await page.locator('input[type="text"]').nth(2).fill('value')
+❌ Incorrect: await page.locator('input[type="text"]').first.fill('value')
+
+When a visible label is present in the inspector (label='...'), prefer selectors that match label/aria-label first; if none exist, use the provided [nth=N] index.
+
 📄 PDF VIEWER RULE:
 - Browser PDF toolbars are NOT in the DOM.
 - If document.contentType includes "pdf", do NOT search for "Download" buttons.

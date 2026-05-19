@@ -1,15 +1,7 @@
 # ============================================================================
 # WEB CODE EXECUTION - ULTIMATE INTEGRATED VERSION
 # ============================================================================
-# ✅ GENERIC MULTI-PLATFORM (YouTube, Amazon, Netflix, Google, ANY SITE)
-# ✅ Advanced bot detection bypass
-# ✅ Persistent page context (separate from mem0)
-# ✅ Page State Layer before actions
-# ✅ Platform-specific keyboard shortcuts
-# ✅ Post-action verification
-# ✅ Smart intent handling when elements not listed
-# ✅ State-dependent command handling
-# ✅ FIX: Media validation only fires for explicit media action_types
+
 
 import asyncio
 import logging
@@ -164,6 +156,10 @@ class SiteDetector:
                     const hasCart = !!document.querySelector('[data-testid*="cart" i], [aria-label*="cart" i], .cart, #cart, [id*="cart" i]');
                     const hasPrices = !!document.querySelector('[data-price], .price, [class*="price" i], [aria-label*="price" i]');
                     const hasProducts = !!document.querySelector('[data-product], [class*="product" i], [data-testid*="product" i]');
+                    const purchaseIntentRegex = /(add to cart|buy now|checkout|add to bag|add to basket|purchase)/i;
+                    const hasPurchaseIntent = Array.from(
+                        document.querySelectorAll('button, a, input[type="submit"], [role="button"]')
+                    ).some(el => purchaseIntentRegex.test((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')));
                     const isPdf = contentType.toLowerCase().includes('pdf') || window.location.pathname.toLowerCase().endsWith('.pdf') || window.location.pathname.toLowerCase().includes('/pdf/');
                     
                     return {
@@ -173,6 +169,7 @@ class SiteDetector:
                         hasCart,
                         hasPrices,
                         hasProducts,
+                        hasPurchaseIntent,
                         isPdf
                     };
                 }
@@ -184,7 +181,8 @@ class SiteDetector:
                 'hasSearch': False,
                 'hasCart': False,
                 'hasPrices': False,
-                'hasProducts': False
+                'hasProducts': False,
+                'hasPurchaseIntent': False
             }
         
         # Determine site type
@@ -201,8 +199,8 @@ class SiteDetector:
             
             if site_info['hasSearch']:
                 capabilities.append('search')
-            
-            if site_info['hasCart'] or site_info['hasPrices'] or site_info['hasProducts']:
+
+            if site_info['hasCart'] or site_info['hasProducts'] or (site_info['hasPrices'] and site_info.get('hasPurchaseIntent')):
                 if site_type == 'generic':
                     site_type = 'ecommerce'
                 capabilities.append('shopping')
@@ -771,6 +769,15 @@ Capabilities: {', '.join(capabilities) if capabilities else 'none detected'}
 
 # USER TASK
 {ai_prompt}
+
+================================================================
+FIELD MATCHING GUIDELINES (IMPORTANT):
+================================================================
+- Inspect the "INPUT FIELDS (visible — USE THESE)" section above for lines like:
+    - text (unnamed) [nth=0] placeholder='...' aria-label='...' label='Question text'
+- If the user requested filling a logical field (email, name, message), try to match by visible label or aria-label first.
+- If no label or aria-label matches, use the exact [nth=N] index shown. ALWAYS use `.nth(N)` when using an ambiguous locator.
+- Example hint to use in code: "TARGET FIELD: email => use .nth(0) if inspector shows [nth=0] for the email input"
 
 ================================================================
 ENHANCED RULES WITH SMART INTENT HANDLING:
@@ -3558,6 +3565,17 @@ class WebExecutionPipeline:
             if result.get('success'):
                 self.stats["dom_success"] += 1
             else:
+                if action_type == 'extract':
+                    logger.info("🔧 RAG extract failed — trying DOM paragraph fallback")
+                    fallback_text = await self._fallback_extract_first_paragraph(page)
+                    if fallback_text:
+                        result = {
+                            'success': True,
+                            'output': f"{fallback_text}\nEXECUTION_SUCCESS",
+                            'extracted_data': fallback_text
+                        }
+                        logger.info("✅ DOM paragraph fallback succeeded")
+
                 # ✅ FIX: Try DOM-based fallback link click BEFORE OmniParser visual fallback.
                 # The page inspector already extracted all link texts from the DOM — use that
                 # instead of OmniParser image captioning which can't read text.
@@ -4046,14 +4064,15 @@ class WebExecutionPipeline:
         
         # Extract link name from prompt
         # "Open the link named Ringer: web automation" → "Ringer: web automation"
+        quoted_match = re.search(r'["\']([^"\']+)["\']', ai_prompt)
         link_name_match = re.search(r'(?:named|called|titled)\s+["\']?([^"\']+)["\']?(?:\.|$)', ai_prompt, re.IGNORECASE)
-        link_name = link_name_match.group(1) if link_name_match else ai_prompt
+        link_name = quoted_match.group(1) if quoted_match else (link_name_match.group(1) if link_name_match else ai_prompt)
         
         # Clean it up
         link_name = re.sub(r'\s*(and|or)\s*.*$', '', link_name).strip()
         
         # Escape quotes in link_name for safe embedding
-        link_name_escaped = link_name.replace("'", "\\'")
+        link_name_escaped = link_name.replace("\\", "\\\\").replace("'", "\\'")
         
         code = f"""
 # ✅ FALLBACK: Find and click link by text (with scrolling)
@@ -4185,6 +4204,36 @@ async def main():
 await main()
 """
         return code.strip()
+
+    async def _fallback_extract_first_paragraph(self, page) -> Optional[str]:
+        try:
+            text = await page.evaluate("""
+                () => {
+                    const roots = [
+                        'main',
+                        'article',
+                        '#content',
+                        '#mw-content-text',
+                        '.mw-parser-output',
+                        'body'
+                    ];
+                    const minLen = 40;
+                    for (const sel of roots) {
+                        const root = document.querySelector(sel);
+                        if (!root) continue;
+                        const paras = root.querySelectorAll('p');
+                        for (const p of paras) {
+                            const t = (p.innerText || p.textContent || '').trim();
+                            if (t && t.length >= minLen) return t;
+                        }
+                    }
+                    return '';
+                }
+            """)
+            return text.strip() if isinstance(text, str) and text.strip() else None
+        except Exception as e:
+            logger.warning(f"⚠️ DOM extract fallback failed: {e}")
+            return None
     
     async def _execute_generated_code(
         self,
@@ -4232,6 +4281,35 @@ await main()
                 code,
                 flags=re.MULTILINE
             )
+
+            # Fix missing await for common Locator actions generated by the LLM
+            async_methods = (
+                'click',
+                'fill',
+                'scroll_into_view_if_needed',
+                'wait_for',
+                'type',
+                'press',
+                'check',
+                'uncheck',
+                'select_option'
+            )
+            pattern = re.compile(
+                r'^(?P<indent>\s*)(?P<prefix>[^#\n]*?)(?P<call>\b[\w\.\]\)\(]+)\.(?P<method>'
+                + '|'.join(async_methods) + r')(?P<space>\s*)\(',
+                re.MULTILINE
+            )
+
+            def _add_missing_await(match: re.Match) -> str:
+                before = match.group('prefix')
+                if re.search(r'\bawait\b', before):
+                    return match.group(0)
+                return (
+                    f"{match.group('indent')}{before}await {match.group('call')}."
+                    f"{match.group('method')}{match.group('space')}("
+                )
+
+            code = pattern.sub(_add_missing_await, code)
             
             # Wrap in async function
             def _indent(text, spaces=4):
@@ -4322,7 +4400,14 @@ async def __rag_step__(page):
             
             # Parse stdout for success/failure
             success, message = self._parse_execution_output(stdout_content)
-            
+
+            # FIX: if code returned a value via `return`, treat as success
+            # regardless of whether stdout contains EXECUTION_SUCCESS
+            if not success and result_data is not None:
+                success = True
+                message = "Extraction succeeded (return value captured)"
+                logger.info("✅ Success via return value — stdout had no marker but result_data was captured")
+
             if not success:
                 logger.error(f"❌ Code reported failure: {message}")
                 return {

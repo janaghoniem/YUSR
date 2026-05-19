@@ -125,6 +125,52 @@ async def get_page_semantics_fallback(page) -> str:
                             borderColor: s.borderColor || '',
                         };
                         
+                        // Helper: find nearby visible label or question text
+                        function findNearbyLabel(el) {
+                            try {
+                                // 1) label[for=id]
+                                const id = el.id || '';
+                                if (id) {
+                                    const lab = document.querySelector('label[for="' + id + '"]');
+                                    if (lab && (lab.innerText || '').trim()) return (lab.innerText || '').trim();
+                                }
+                                // 2) aria-labelledby
+                                const labelled = el.getAttribute('aria-labelledby');
+                                if (labelled) {
+                                    const node = document.getElementById(labelled);
+                                    if (node && (node.innerText || '').trim()) return (node.innerText || '').trim();
+                                }
+                                // 3) aria-label
+                                const aria = el.getAttribute('aria-label');
+                                if (aria) return aria;
+                                // 4) previous siblings with text
+                                let prev = el.previousElementSibling;
+                                let attempts = 0;
+                                while (prev && attempts < 6) {
+                                    const t = (prev.innerText || '').trim();
+                                    if (t && t.length < 300) return t;
+                                    prev = prev.previousElementSibling;
+                                    attempts++;
+                                }
+                                // 5) look up ancestors and their previous siblings
+                                let p = el.parentElement;
+                                attempts = 0;
+                                while (p && attempts < 4) {
+                                    let sib = p.previousElementSibling;
+                                    while (sib) {
+                                        const t = (sib.innerText || '').trim();
+                                        if (t && t.length < 300) return t;
+                                        sib = sib.previousElementSibling;
+                                    }
+                                    p = p.parentElement;
+                                    attempts++;
+                                }
+                            } catch (e) { /* ignore */ }
+                            return '';
+                        }
+
+                        const nearbyLabel = findNearbyLabel(el) || '';
+
                         // Special handling for contenteditable elements (Gmail recipients)
                         if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
                             return {
@@ -136,6 +182,7 @@ async def get_page_semantics_fallback(page) -> str:
                                 ariaLabel: el.getAttribute('aria-label') || '',
                                 visible: visible,
                                 isContentEditable: true,
+                                label: nearbyLabel,
                                 ...baseAttrs,
                             };
                         }
@@ -148,6 +195,7 @@ async def get_page_semantics_fallback(page) -> str:
                             disabled: el.disabled || el.hasAttribute('disabled'),
                             ariaLabel: el.getAttribute('aria-label') || '',
                             visible: visible,
+                            label: nearbyLabel,
                             ...baseAttrs,
                         };
                     }),
@@ -206,12 +254,14 @@ async def get_page_semantics_fallback(page) -> str:
             hidden_inputs  = [i for i in elements_info['inputs'] if not i.get('visible', True)]
             if visible_inputs:
                 descriptions.append("\nINPUT FIELDS (visible — USE THESE):")
-                for inp in visible_inputs:
+                for idx, inp in enumerate(visible_inputs):
                     status = " (disabled)" if inp['disabled'] else ""
                     value_info = f" [current: '{inp['value']}']" if inp['value'] else ""
                     placeholder_info = f" placeholder='{inp['placeholder']}'" if inp['placeholder'] else ""
                     aria_info = f" aria-label='{inp['ariaLabel']}'" if inp['ariaLabel'] else ""
-                    descriptions.append(f"  - {inp['type']} ({inp['name']}){placeholder_info}{aria_info}{value_info}{status}")
+                    label_info = f" label='{inp.get('label')}'" if inp.get('label') else ""
+                    index_hint = f" [nth={idx}]"
+                    descriptions.append(f"  - {inp['type']} ({inp['name']}){index_hint}{placeholder_info}{aria_info}{label_info}{value_info}{status}")
             if hidden_inputs:
                 descriptions.append("\nINPUT FIELDS (hidden — DO NOT TARGET — not yet visible on page):")
                 for inp in hidden_inputs:

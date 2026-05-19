@@ -565,7 +565,7 @@ Google/API routing guidance.
 HARD ROUTING RULES:
 1. Every task MUST use device: "desktop".
 2. Use context: "web" for browser automation and "local" for native OS/app tasks.
-3. The email agent is desktop-only and available here.
+3. The api agent is desktop-only and available here.
 4. Desktop browser automation uses context: "web".
 5. Desktop native app and OS tasks use context: "local".
 
@@ -573,7 +573,7 @@ TARGET AGENTS (desktop):
 - action: UI automation (click, type, navigate, fill forms, extract text)
 - reasoning: Logic tasks (summarize, analyze, write, translate, generate content)
 - language: Confirmation/read-aloud tasks (read generated content to user, ask for confirmation)
-- email: Google API operations (YouTube search, Calendar, Drive, Gmail send). ALWAYS use this for API calls.
+- api: Google API operations (YouTube search, Calendar, Drive, Gmail send). ALWAYS use this for API calls.
 
 WHEN TO USE target_agent: "reasoning" vs "action"
 
@@ -778,6 +778,20 @@ CRITICAL DISTINCTIONS:
 - "open the link named X" / "click on X" / "open the X result" WHEN A PAGE IS ALREADY OPEN -> CLICK on the current page, do NOT guess a URL
 - Only construct navigation URLs for well-known site homepages or when the user provides an explicit URL
 
+SEARCH DESTINATION AWARENESS (IMPORTANT):
+Some sites navigate directly to the content page after a search (no results list).
+Examples: Wikipedia, dictionary sites, documentation sites, encyclopedias.
+Other sites show a results list first that requires a click (Google, YouTube, Amazon, Bing).
+
+RULE: After any search, check what URL the browser is now on.
+- If the URL already contains the article/content (e.g., /wiki/Topic, /word/Topic, /docs/Topic) -> the browser is already on content. Do NOT generate a "click first result" task. Go directly to extraction.
+- If the URL is a search results page (e.g., /search?q=, /results?, /find?) -> generate a click task to open the first result, THEN extract.
+
+HOW TO DETERMINE WHICH CASE APPLIES AT DECOMPOSITION TIME:
+- If the user says "search [site] for X and read/extract/get..." and the site is known to go direct (Wikipedia, MDN, dictionaries) -> 3-task plan: navigate -> search -> extract
+- If the user says "search [site] for X and read/extract/get..." and the site shows results first (Google, YouTube, Amazon) -> 4-task plan: navigate -> search -> click result -> extract
+- If unsure -> default to the 4-task pattern (safer, the click will be a no-op if already on content)
+
 For navigation tasks WITH a known URL (explicit URL or homepage URL only):
 {
     "action": "navigate",
@@ -874,6 +888,117 @@ User: "open google and search for web automation"
 
 EXPLANATION: Do NOT hardcode search URLs. Open the homepage first, then perform the search via the search box.
 
+## Example 0-DIRECT: Search on a site that navigates directly to content (no results page)
+
+User: "search Wikipedia for artificial intelligence and read the first paragraph"
+(Same pattern applies to: dictionary lookups, documentation sites, encyclopedia searches)
+
+- task_id: task_1
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Navigate to https://www.wikipedia.org
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.wikipedia.org"
+    web_params:
+        action: navigate
+        url: "https://www.wikipedia.org"
+    success_message: "Site loaded successfully"
+    failure_message: "Could not reach the site"
+    depends_on: null
+
+- task_id: task_2
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Type "artificial intelligence" in the search box and press Enter to submit
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "artificial intelligence"
+    success_message: "Search submitted, content page loaded"
+    failure_message: "Search failed"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Extract the full text of the first paragraph from the article page. Return only the raw paragraph text without formatting or metadata.
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: extract
+    success_message: "First paragraph extracted successfully"
+    failure_message: "Could not extract paragraph text"
+    depends_on: ["task_2"]
+
+EXPLANATION: This site's search navigates directly to the content page (no intermediate results list).
+After task_2 the browser is already on the article, so task_3 extracts immediately.
+NEVER generate a "click first result" task when the search already landed on content.
+Key signal: URL contains a content path (/wiki/Topic, /docs/Topic, /word/Topic) rather than a query string (/search?q=Topic).
+
+## Example 0-RESULTS: Search on a site that shows a results list first
+
+User: "search Google for artificial intelligence and read the first result"
+
+- task_id: task_1
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Navigate to https://www.google.com
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.google.com"
+    web_params:
+        action: navigate
+        url: "https://www.google.com"
+    success_message: "Google loaded"
+    failure_message: "Could not reach Google"
+    depends_on: null
+
+- task_id: task_2
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Type "artificial intelligence" in the Google search box and press Enter
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "artificial intelligence"
+    success_message: "Search results loaded"
+    failure_message: "Search failed"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Click on the first organic search result link to open the page
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: click
+    success_message: "Opened first result"
+    failure_message: "Could not click first result"
+    depends_on: ["task_2"]
+
+- task_id: task_4
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Extract the main content or first paragraph from the opened page. Return only the raw text.
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: extract
+    success_message: "Content extracted successfully"
+    failure_message: "Could not extract content"
+    depends_on: ["task_3"]
+
+EXPLANATION: Google shows a results list, so a click task is required before extraction.
+Signal: URL after search is a query string (/search?q=Topic) rather than a content path.
+
 ## Example 0b: Browser Navigation — Play/Watch Video
 
 User: "play relaxing music"
@@ -909,40 +1034,7 @@ User: "play relaxing music"
 
 EXPLANATION: "play" implies video/music, but searches must be multi-step (open site, then search).
 
-## Example 0e: Browser Navigation — Amazon Search (Multi-step)
 
-User: "search for wireless mouse on Amazon"
-
-- task_id: task_1
-    goal: search for wireless mouse on Amazon
-    ai_prompt: Navigate to https://www.amazon.com
-    device: desktop
-    context: web
-    target_agent: action
-    extra_params:
-        action: navigate
-        url: "https://www.amazon.com"
-    web_params:
-        action: navigate
-        url: "https://www.amazon.com"
-    success_message: "Amazon homepage loaded successfully"
-    failure_message: "Failed to open Amazon. Please check your internet connection"
-    depends_on: null
-
-- task_id: task_2
-    goal: search for wireless mouse on Amazon
-    ai_prompt: Type "wireless mouse" in the Amazon search box and submit the search (press Enter or click Search)
-    device: desktop
-    context: web
-    target_agent: action
-    web_params:
-        action: fill
-        text: "wireless mouse"
-    success_message: "Amazon search submitted"
-    failure_message: "Failed to submit the Amazon search"
-    depends_on: ["task_1"]
-
-EXPLANATION: Do NOT hardcode search URLs. Always open the site first, then search via the UI.
 
 ## Example 0c: YouTube API Search (get structured results)
 
@@ -3312,8 +3404,15 @@ def create_coordinator_graph():
             # ✅ CAPTURE RICHEST AVAILABLE OUTPUT FOR CROSS-AGENT DATA SHARING
             # Prefer extracted_data (structured) over plain content when available
             output_to_store = None
+            web_action = (getattr(current_task, 'web_params', None) or {}).get('action')
+            extracted_payload = getattr(result, 'extracted_data', None)
+            if isinstance(extracted_payload, str):
+                extracted_payload = extracted_payload.strip() or None
             
-            if hasattr(result, 'extracted_data') and result.extracted_data:
+            if web_action == "extract" and extracted_payload:
+                output_to_store = json.dumps(extracted_payload) if isinstance(extracted_payload, dict) else str(extracted_payload)
+                logger.info(f"📊 Storing extracted_data from {current_task.task_id} (extract)")
+            elif hasattr(result, 'extracted_data') and result.extracted_data:
                 # Web extraction result - prefer rich structured data
                 output_to_store = json.dumps(result.extracted_data) if isinstance(result.extracted_data, dict) else str(result.extracted_data)
                 logger.info(f"📊 Storing extracted_data from {current_task.task_id} (structured)")
@@ -3326,9 +3425,23 @@ def create_coordinator_graph():
                 # task_outputs[current_task.task_id] = result.content
                             # Only store if there's actual content
                 cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
-                if cleaned_content:
+                if cleaned_content and cleaned_content.strip() != "(fallback_extract)":
                     output_to_store = cleaned_content
                     logger.info(f"💾 Storing cleaned content from {current_task.task_id}")
+                elif current_task.context == "web" and current_task.target_agent == "action":
+                    url_fallback = None
+                    url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
+                    if url_match:
+                        url_fallback = url_match.group(1).strip()
+                    if not url_fallback:
+                        nav_match = re.search(r'Navigated to (https?://[^\s\n]+)', result.content or "")
+                        if nav_match:
+                            url_fallback = nav_match.group(1).strip()
+                    if not url_fallback and session_id:
+                        url_fallback = _session_browser_state.get(session_id, {}).get("current_page_url")
+                    if url_fallback:
+                        output_to_store = f"PAGE_URL:{url_fallback}"
+                        logger.info(f"💾 Storing page URL from {current_task.task_id}")
             
             if output_to_store:
                 task_outputs[current_task.task_id] = output_to_store

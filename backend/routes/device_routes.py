@@ -542,7 +542,11 @@ async def submit_remote_task_result(
     user_id = result_data.get("user_id", "")
     device_id = result_data.get("device_id", "")
     result = result_data.get("result", {})
-    status = result.get("status", "completed")
+    status = str(result.get("status", "completed") or "completed").strip().lower()
+    if status in {"success", "done", "ok"}:
+        status = "completed"
+    elif status not in {"pending", "running", "completed", "failed", "expired"}:
+        status = "failed"
 
     if not task_id or not user_id or not device_id:
         raise HTTPException(status_code=400, detail="task_id, user_id, and device_id are required")

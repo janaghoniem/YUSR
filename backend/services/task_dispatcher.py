@@ -15,7 +15,7 @@ Flow
    with status = "pending" and expires_at > now.
 2. For each document, check whether `target_session_id` has an active
    WebSocket connection in `ws_manager.active_connections`.
-3. If connected → push the task payload and mark the document "delivered".
+3. If connected → push the task payload and mark the document "running".
 4. If not connected → leave as "pending"; retry on the next tick.
 
 This decouples delivery from the moment the coordinator creates the task,
@@ -200,11 +200,11 @@ class TaskDispatcher:
             try:
                 await ws_manager.send_to_session(target_session_id, push_payload)
 
-                # Mark as delivered so we don't re-push on the next tick
+                # Mark as running so we don't re-push on the next tick
                 await asyncio.to_thread(
                     collection.update_one,
                     {"_id": task_doc["_id"]},
-                    {"$set": {"status": "delivered", "delivered_at": datetime.now(timezone.utc)}},
+                    {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
                 )
                 logger.info(
                     f"📤 TaskDispatcher pushed task {task_id} to session {target_session_id}"

@@ -43,6 +43,15 @@ from core.mongo import get_database
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_task_status(status: str) -> str:
+    status = str(status or "").strip().lower()
+    if status in {"pending", "running", "completed", "failed", "expired"}:
+        return status
+    if status in {"success", "done", "ok"}:
+        return "completed"
+    return "failed"
+
 # ---------------------------------------------------------------------------
 # Cross-platform intent patterns
 # ---------------------------------------------------------------------------
@@ -311,8 +320,9 @@ class CrossPlatformTaskManager:
         Returns:
             True if the document was found and updated.
         """
+        normalized_status = _normalize_task_status(status)
         update = {
-            "status": status,
+            "status": normalized_status,
             "completed_at": datetime.now(timezone.utc),
             "result": result,
         }
@@ -323,7 +333,7 @@ class CrossPlatformTaskManager:
         )
         success = res.modified_count > 0
         if success:
-            logger.info(f"✅ Remote task {task_id} marked {status} by device {device_id}")
+            logger.info(f"✅ Remote task {task_id} marked {normalized_status} by device {device_id}")
         else:
             logger.warning(
                 f"⚠️ complete_remote_task: no document found for "
@@ -392,11 +402,11 @@ class CrossPlatformTaskManager:
                         "task_payload": task_payload,
                     }
                     await self._ws_manager.send_to_session(target_session_id, push_payload)
-                    task_doc["status"] = "delivered"
-                    task_doc["delivered_at"] = datetime.now(timezone.utc)
+                    task_doc["status"] = "running"
+                    task_doc["started_at"] = datetime.now(timezone.utc)
                     await self._save_task(task_doc)
                     logger.info(f"✅ Cross-platform task {task_id} pushed via WebSocket to {target_device_id}")
-                    return {"status": "delivered", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
+                    return {"status": "running", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
                 except Exception as e:
                     logger.warning(f"⚠️ WebSocket push failed for {target_device_id}: {e} — falling back to queue")
 
@@ -460,9 +470,9 @@ class CrossPlatformTaskManager:
                 await asyncio.to_thread(
                     self._col.update_one,
                     {"task_id": task_id, "user_id": user_id, "target_device_id": target_device_id},
-                    {"$set": {"status": "delivered", "delivered_at": datetime.now(timezone.utc)}},
+                    {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
                 )
-                return {"status": "delivered", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
+                return {"status": "running", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
             except Exception as e:
                 logger.warning(f"⚠️ Single-task WebSocket push failed for {target_device_id}: {e} — falling back to queue")
 
@@ -482,7 +492,7 @@ class CrossPlatformTaskManager:
         device_id: str,
         session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return all pending tasks for a device and mark them delivered."""
+        """Return all pending tasks for a device and mark them running."""
         if not await self._registry.validate_device_belongs_to_user(user_id, device_id):
             logger.warning(f"🚫 Device {device_id} does not belong to user {user_id} — rejecting task claim")
             return []
@@ -505,11 +515,11 @@ class CrossPlatformTaskManager:
         await asyncio.to_thread(
             self._col.update_many,
             {"task_id": {"$in": task_ids}},
-            {"$set": {"status": "delivered", "delivered_at": now}},
+            {"$set": {"status": "running", "started_at": now}},
         )
         for t in tasks:
             t.pop("_id", None)
-        logger.info(f"📨 Delivered {len(tasks)} pending tasks to {device_id} (session: {session_id or 'any'})")
+        logger.info(f"📨 Claimed {len(tasks)} pending tasks for {device_id} (session: {session_id or 'any'})")
         return tasks
 
     async def update_task_result(
@@ -525,10 +535,11 @@ class CrossPlatformTaskManager:
             logger.warning(f"🚫 Device {device_id} tried to update task {task_id} owned by another user")
             return False
 
+        normalized_status = _normalize_task_status(status)
         res = await asyncio.to_thread(
             self._col.update_one,
             {"task_id": task_id, "user_id": user_id, "target_device_id": device_id},
-            {"$set": {"status": status, "result": result, "completed_at": datetime.now(timezone.utc)}},
+            {"$set": {"status": normalized_status, "result": result, "completed_at": datetime.now(timezone.utc)}},
         )
         return res.modified_count > 0
 

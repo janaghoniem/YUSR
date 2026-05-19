@@ -20,6 +20,32 @@ import {
 } from "./utils/semanticIntent";
 import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucide-react";
 
+// --- Device ID helpers ---
+const getOS = () => {
+  if (typeof navigator === "undefined") return "desktop";
+  const platform = navigator.platform.toLowerCase();
+  if (platform.includes("win")) return "windows";
+  if (platform.includes("mac")) return "mac";
+  if (platform.includes("linux")) return "linux";
+  return "desktop";
+};
+
+const getOrCreateDeviceId = () => {
+  if (typeof localStorage === "undefined") {
+    return `desktop-${Math.random().toString(36).substring(2, 8)}`;
+  }
+
+  const stored = localStorage.getItem("desktopDeviceId");
+  if (stored && stored !== "desktop") return stored;
+
+  const os = getOS();
+  const suffix = Math.random().toString(36).substring(2, 8);
+  const newDeviceId = `${os}-${suffix}`;
+  localStorage.setItem("desktopDeviceId", newDeviceId);
+  console.log("[Device] Created new device ID:", newDeviceId);
+  return newDeviceId;
+};
+
 function App() {
   /* ---------- STATE ---------- */
   const [orbState, setOrbState] = useState("idle");
@@ -66,6 +92,7 @@ function App() {
       console.log("[Session] Created new session:", newSessionId);
       return newSessionId;
   });
+  const [deviceId, setDeviceId] = useState(() => getOrCreateDeviceId());
   const [clarificationResponseToId, setClarificationResponseToId] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [chatMode, setChatMode] = useState(false);
@@ -265,7 +292,7 @@ function App() {
     const fetchSessionTasks = async () => {
       try {
         const response = await fetch(
-          `http://localhost:8000/device/cross-platform-tasks?user_id=${encodeURIComponent(userId)}&device_id=desktop&session_id=${encodeURIComponent(sessionId)}`,
+          `http://localhost:8000/device/cross-platform-tasks?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`,
           {
             method: "GET",
             headers: { "Content-Type": "application/json" },
@@ -295,7 +322,7 @@ function App() {
     const pollInterval = setInterval(fetchSessionTasks, 5000); // Poll every 5 seconds
 
     return () => clearInterval(pollInterval);
-  }, [sessionId, userId, authState]);
+  }, [sessionId, userId, authState, deviceId]);
 
   const normalizeThinkingStep = useCallback((step) => {
     return (step || "").toLowerCase().replace(/[\u{1F300}-\u{1FAFF}]/gu, " ").replace(/[.]{3,}/g, "").replace(/[!؟?]+$/g, "").replace(/\s+/g, " ").trim();
@@ -410,7 +437,7 @@ function App() {
       type: "clarification_response",
       user_id: userId,
       device_type: deviceType,
-      device_id: sessionId,
+      device_id: deviceId,
       clarification_id: clarificationId,
       answer: answerText,
       user_language: userLanguageRef.current || "en",
@@ -433,11 +460,11 @@ function App() {
         is_clarification: true,
         clarification_id: clarificationId,
         device_type: deviceType,
-        device_id: sessionId,
+        device_id: deviceId,
         user_language: userLanguageRef.current || "en",
       }),
     });
-  }, [clarificationResponseToId, deviceType, sessionId, userId]);
+  }, [clarificationResponseToId, deviceId, deviceType, sessionId, userId]);
 
   const buildDraftPages = useCallback((payload) => {
     const fallbackContent = extractReadableText(payload?.full_content || payload?.draft_content || payload?.question || "");
@@ -1770,7 +1797,7 @@ function App() {
         }),
       }).catch((err) => console.warn("[Interrupt] HTTP fallback failed:", err));
     }
-  }, [sessionId, userId, deviceType, stopThinkingSpeech, userLanguage, clearDraftDecisionTimer]);
+  }, [deviceId, sessionId, userId, deviceType, stopThinkingSpeech, userLanguage, clearDraftDecisionTimer]);
 
 
   /* ---------- READ ALOUD FULL CONTENT ---------- */
@@ -1965,7 +1992,7 @@ function App() {
           type: msgType,
           user_id: userId,
           device_type: deviceType,
-          device_id: sessionId,
+          device_id: deviceId,
           user_language: currentUserLanguage,
         };
         if (clarificationResponseToId) {
@@ -1992,7 +2019,7 @@ function App() {
             is_clarification: !!clarificationResponseToId,
             clarification_id: clarificationResponseToId || null,
             device_type: deviceType,
-            device_id: sessionId,
+            device_id: deviceId,
             user_language: currentUserLanguage,
           }),
         });
@@ -2693,9 +2720,14 @@ function App() {
             if (profileData.username) { localStorage.setItem("userName", profileData.username); setUserName(profileData.username); }
             if (profileData.voice) { localStorage.setItem("ttsVoice", profileData.voice); setTtsVoice(profileData.voice); }
             if (profileData.language) { const nextLanguage = profileData.language === "ar" ? "ar" : "en"; localStorage.setItem("preferredLanguage", nextLanguage); localStorage.setItem("appLanguage", nextLanguage); preferredLanguageRef.current = nextLanguage; setPreferredLanguage(nextLanguage); }
+          }} onDeviceIdChange={(newId) => {
+            const trimmed = (newId || "").trim();
+            if (!trimmed) return;
+            localStorage.setItem("desktopDeviceId", trimmed);
+            setDeviceId(trimmed);
           }} onLogout={() => {
             localStorage.removeItem("onboardingComplete"); localStorage.removeItem("currentSessionId"); localStorage.removeItem("userName"); localStorage.removeItem("ttsVoice"); localStorage.removeItem("authMethod"); localStorage.removeItem("userId"); const newUserId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`; setUserId(newUserId); setUserName("User"); setAuthState("login");
-          }} initialName={userName} initialVoice={ttsVoice} initialLanguage={preferredLanguage} />)}
+          }} initialName={userName} initialVoice={ttsVoice} initialLanguage={preferredLanguage} initialDeviceId={deviceId} />)}
 
           {viewingChat && (<ChatHistory messages={viewingChat.messages} chatTitle={viewingChat.title} onClose={() => setViewingChat(null)} />)}
           {loadingHistory && (<div style={{ position: "fixed", inset: 0, zIndex: 2999, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)" }}><div style={{ color: "white", fontSize: "14px", opacity: 0.7 }}>Loading chat...</div></div>)}

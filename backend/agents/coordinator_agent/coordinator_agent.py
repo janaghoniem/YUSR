@@ -3703,7 +3703,7 @@ def create_coordinator_graph():
             target_id = routing_result.get("target_device_id")
             delivery_method = routing_result.get("delivery_method")
 
-            if status == "delivered":
+            if status == "running":
                 response_text = (
                     "تم إرسال المهمة للجهاز الآخر الآن."
                     if is_arabic
@@ -5217,7 +5217,7 @@ async def route_single_task(
             doc = await asyncio.to_thread(col.find_one, {"task_id": task.task_id, "user_id": user_id})
             if doc:
                 status = doc.get("status")
-                if status in ("completed", "failed", "delivered"):
+                if status in ("completed", "failed"):
                     result_data = doc.get("result", {}) or {}
                     payload_status = "success" if status == "completed" else "failed"
                     content = result_data.get("content") or result_data.get("details")

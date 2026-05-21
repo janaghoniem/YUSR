@@ -258,14 +258,36 @@ class CoordinatorRAGBridge:
 
         # 🔥 PRE-LOAD FILE INDEX to avoid timeout on first find_file() call
         # This is critical - builds cache on first agent run (~5-15s), instant on subsequent runs
-        # try:
-        #     logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
-        #     from agents.execution_agent.RAG.file_agent import preload_index
-        #     preload_index()
-        #     logger.info("✅ [INIT] File index ready")
-        # except Exception as e:
-        #     logger.warning(f"⚠️ [INIT] Could not pre-load file index: {e}")
-        #     logger.info("   (Index will be loaded on first find_file() call)")
+        try:
+            logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
+            from agents.execution_agent.RAG.file_agent import preload_index, start_periodic_refresh
+            preload_index()
+            logger.info("✅ [INIT] File index ready")
+
+            # 🔥 START PERIODIC REFRESH - Detects new files every 5 minutes
+            logger.info("🔄 [INIT] Starting periodic file refresh (5 min interval)...")
+            start_periodic_refresh(
+                interval_seconds=300,  # 5 minutes
+                on_refresh=lambda: logger.debug("[FileAgent] Index refreshed")
+            )
+            logger.info("✅ [INIT] Periodic refresh started")
+
+            # 🔥 START DESKTOP WATCHER - Real-time detection of new files
+            logger.info("👁️  [INIT] Starting Desktop file watcher (real-time detection)...")
+            try:
+                from agents.execution_agent.RAG.watch_desktop_files import start_desktop_watcher
+                start_desktop_watcher()
+                logger.info("✅ [INIT] Desktop watcher started (files detected within 1-2 seconds)")
+            except ImportError:
+                logger.warning("⚠️  [INIT] watchdog not installed. Install with: pip install watchdog")
+                logger.info("   (Using periodic refresh as fallback)")
+            except Exception as e:
+                logger.warning(f"⚠️  [INIT] Could not start desktop watcher: {e}")
+                logger.info("   (Using periodic refresh as fallback)")
+
+        except Exception as e:
+            logger.warning(f"⚠️ [INIT] Could not initialize file detection: {e}")
+            logger.info("   (Index will be loaded on first find_file() call)")
 
 
     #added by shahd for omniparser

@@ -47,6 +47,9 @@ async def handle_language_output(message):
             "status": "clarification_needed",
             "question": message.payload.get("question", "Please confirm."),
             "response_id": message.message_id,
+            "full_content": message.payload.get("full_content", ""),
+            "offer_read_aloud": bool(message.payload.get("offer_read_aloud", False)),
+            "content_pages": message.payload.get("content_pages", []),
         }
 
         log.info(f"❓ Confirmation needed: {response_content['question']}")

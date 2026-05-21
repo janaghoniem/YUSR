@@ -38,15 +38,61 @@ void main() {
   runApp(const MyApp());
 }
 
-class MyApp extends StatelessWidget {
+/// Helper function to check if a language is RTL (Right-to-Left)
+bool isRTLLanguage(String languageCode) {
+  const rtlLanguages = {'ar', 'he', 'fa', 'ur', 'yi', 'iw'};
+  return rtlLanguages.contains(languageCode.toLowerCase());
+}
+
+/// Get text direction for a language
+TextDirection getTextDirection(String languageCode) {
+  return isRTLLanguage(languageCode) ? TextDirection.rtl : TextDirection.ltr;
+}
+
+class MyApp extends StatefulWidget {
   const MyApp({super.key});
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  String _languageCode = 'en';
+  late Future<void> _initLanguage;
+
+  @override
+  void initState() {
+    super.initState();
+    _initLanguage = _loadLanguagePreference();
+  }
+
+  Future<void> _loadLanguagePreference() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getString('preferredLanguage') ?? 'en';
+      setState(() {
+        _languageCode = stored;
+      });
+    } catch (e) {
+      print('[RTL] Failed to load language preference: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'AURA',
       theme: AuraTheme.darkTheme,
-      home: const StartupScreen(),
+      // ✅ Set locale and text direction based on language preference
+      locale: Locale(_languageCode),
+      builder: (context, child) {
+        return Directionality(
+          textDirection: getTextDirection(_languageCode),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },      
+    home: const StartupScreen(),
     );
   }
 }
@@ -59,12 +105,19 @@ class DeviceManager {
     'com.example.automation/service',
   );
 
-  static Future<bool> registerDevice() async {
+  static Future<bool> registerDevice({
+    required String userId,
+    required String sessionId,
+    String platform = 'mobile',
+  }) async {
     try {
       final response = await http.post(
         Uri.parse('$backendUrl/device/$deviceId/register'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
+          'user_id': userId,
+          'session_id': sessionId,
+          'platform': platform,
           'name': 'Flutter Device',
           'android_version': '14',
           'device_model': 'Emulator',
@@ -711,7 +764,11 @@ class _AutomationDemoState extends State<AutomationDemo>
   }
 
   Future<void> _registerWithBackend() async {
-    if (await DeviceManager.registerDevice()) {
+    if (await DeviceManager.registerDevice(
+      userId: _activeUserId,
+      sessionId: _activeSessionId,
+      platform: 'mobile',
+    )) {
       final t = await DeviceManager.getAccessibilityTree();
       if (t.isNotEmpty) await DeviceManager.sendUITree(t);
       Future.doWhile(() async {

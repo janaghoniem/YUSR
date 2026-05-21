@@ -7,10 +7,12 @@ const API_BASE_URL = "";
 const SettingsModal = ({
   onClose,
   onSave,
+  onDeviceIdChange,
   onLogout,
   initialName = "User",
   initialVoice = "Gacrux",
   initialLanguage = "en",
+  initialDeviceId = "",
 }) => {
   const [activeSection, setActiveSection] = useState("profile");
   const [profileData, setProfileData] = useState({
@@ -20,6 +22,7 @@ const SettingsModal = ({
     language: initialLanguage,
     voice: initialVoice,
   });
+  const [deviceId, setDeviceId] = useState(initialDeviceId);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileStatus, setProfileStatus] = useState("");
   
@@ -59,6 +62,10 @@ const SettingsModal = ({
       voice: initialVoice,
     }));
   }, [initialName, initialLanguage, initialVoice]);
+
+  useEffect(() => {
+    setDeviceId(initialDeviceId);
+  }, [initialDeviceId]);
 
   // Load real profile data on mount
   useEffect(() => {
@@ -166,6 +173,9 @@ const SettingsModal = ({
       if (profileData.username) {
         localStorage.setItem("userName", profileData.username);
         console.log("[SettingsModal] Saved username to localStorage:", profileData.username);
+      }
+      if (onDeviceIdChange && deviceId.trim()) {
+        onDeviceIdChange(deviceId.trim());
       }
       setProfileStatus("✅ Profile saved successfully");
       
@@ -306,6 +316,21 @@ const SettingsModal = ({
                         <option value="orpheus-english">Orpheus English</option>
                         <option value="orpheus-arabic">Orpheus Arabic</option>
                       </select>
+                    </label>
+
+                    <label className="settings-label" htmlFor="settings-device-id">
+                      <span className="settings-field-label">Device ID</span>
+                      <input
+                        id="settings-device-id"
+                        type="text"
+                        className="settings-input"
+                        value={deviceId}
+                        onChange={(e) => setDeviceId(e.target.value)}
+                        placeholder="e.g., windows-work-laptop"
+                      />
+                      <small style={{ color: "var(--text-muted)", lineHeight: 1.5 }}>
+                        Used for cross-platform task sync. Change only if you know what you’re doing.
+                      </small>
                     </label>
                   </div>
                 </div>

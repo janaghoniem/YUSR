@@ -3,7 +3,7 @@
 
 /* eslint-env node */
 // Add Menu and screen here
-import { app, BrowserWindow, ipcMain, Menu, screen } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, screen, shell } from "electron";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import path from "path";
@@ -182,8 +182,8 @@ function stopAuraProcess() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width:     900,
-    height:    700,
+    width:     1100,
+    height:    800,
     minWidth:  480,
     minHeight: 400,
     frame:     false,
@@ -228,6 +228,18 @@ ipcMain.handle("window:minimize", () => mainWindow?.minimize());
 ipcMain.handle("window:maximize", () => {
   if (!mainWindow) return;
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
+});
+
+ipcMain.handle("shell:openExternal", async (_event, url) => {
+  if (!url || typeof url !== "string") {
+    return { ok: false, error: "Missing URL" };
+  }
+  try {
+    await shell.openExternal(url, { activate: true });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -355,7 +355,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     })
                     continue
 
-                _is_short_confirmation = classify_confirmation_intent(answer) in {"affirmative", "negative"}
+                _CONFIRM_WORDS = {
+                    "yes", "y", "ok", "okay", "sure", "proceed", "do it", "done",
+                    "no", "cancel", "stop", "نعم", "موافق", "لا", "آه", "إلغاء",
+                }
+                # Words that, when they appear as the FIRST word, always mean a confirmation
+                # regardless of what follows. e.g. "yes send", "yes do it", "no cancel that"
+                _CONFIRM_STARTERS = {
+                    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "alright",
+                    "no", "nope", "nah",
+                    "نعم", "آه", "موافق", "لا", "لأ",
+                }
+                _answer_lower = answer.lower().strip()
+                _first_word = _answer_lower.split()[0] if _answer_lower.split() else ""
+                _is_short_confirmation = (
+                    _answer_lower in _CONFIRM_WORDS
+                    or _first_word in _CONFIRM_STARTERS
+                    or (len(answer.split()) <= 4 and not any(
+                        kw in _answer_lower for kw in ["delete", "open", "create", "list", "send", "copy", "move", "show"]
+                    ))
+                )
 
                 _msg_type = MessageType.CONFIRMATION_RESPONSE if _is_short_confirmation else MessageType.TASK_REQUEST
 

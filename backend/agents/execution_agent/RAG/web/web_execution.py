@@ -1,15 +1,7 @@
 # ============================================================================
 # WEB CODE EXECUTION - ULTIMATE INTEGRATED VERSION
 # ============================================================================
-# ✅ GENERIC MULTI-PLATFORM (YouTube, Amazon, Netflix, Google, ANY SITE)
-# ✅ Advanced bot detection bypass
-# ✅ Persistent page context (separate from mem0)
-# ✅ Page State Layer before actions
-# ✅ Platform-specific keyboard shortcuts
-# ✅ Post-action verification
-# ✅ Smart intent handling when elements not listed
-# ✅ State-dependent command handling
-# ✅ FIX: Media validation only fires for explicit media action_types
+
 
 import asyncio
 import logging
@@ -32,10 +24,10 @@ from .verification import ScreenshotVerifier
 
 # ✅ Phase 4: OAuth integration for cookie injection
 try:
-    from agents.email_agent import EmailAgent
-    _EMAIL_AGENT_AVAILABLE = True
+    from agents.api_agent import ApiAgent
+    _API_AGENT_AVAILABLE = True
 except ImportError:
-    _EMAIL_AGENT_AVAILABLE = False
+    _API_AGENT_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +132,8 @@ class SiteDetector:
             platform = 'ebay'
         elif 'google.com' in url or 'google.' in url:
             platform = 'google'
+        elif 'arxiv.org' in url:
+            platform = 'arxiv'
         elif 'facebook.com' in url or 'fb.com' in url:
             platform = 'facebook'
         elif 'twitter.com' in url or 'x.com' in url:
@@ -155,12 +149,18 @@ class SiteDetector:
         try:
             site_info = await page.evaluate("""
                 () => {
+                    const contentType = document.contentType || '';
                     const hasVideo = !!document.querySelector('video');
                     const hasAudio = !!document.querySelector('audio');
                     const hasSearch = !!document.querySelector('[type="search"], [role="search"], input[placeholder*="search" i]');
                     const hasCart = !!document.querySelector('[data-testid*="cart" i], [aria-label*="cart" i], .cart, #cart, [id*="cart" i]');
                     const hasPrices = !!document.querySelector('[data-price], .price, [class*="price" i], [aria-label*="price" i]');
                     const hasProducts = !!document.querySelector('[data-product], [class*="product" i], [data-testid*="product" i]');
+                    const purchaseIntentRegex = /(add to cart|buy now|checkout|add to bag|add to basket|purchase)/i;
+                    const hasPurchaseIntent = Array.from(
+                        document.querySelectorAll('button, a, input[type="submit"], [role="button"]')
+                    ).some(el => purchaseIntentRegex.test((el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')));
+                    const isPdf = contentType.toLowerCase().includes('pdf') || window.location.pathname.toLowerCase().endsWith('.pdf') || window.location.pathname.toLowerCase().includes('/pdf/');
                     
                     return {
                         hasVideo,
@@ -168,7 +168,9 @@ class SiteDetector:
                         hasSearch,
                         hasCart,
                         hasPrices,
-                        hasProducts
+                        hasProducts,
+                        hasPurchaseIntent,
+                        isPdf
                     };
                 }
             """)
@@ -179,30 +181,36 @@ class SiteDetector:
                 'hasSearch': False,
                 'hasCart': False,
                 'hasPrices': False,
-                'hasProducts': False
+                'hasProducts': False,
+                'hasPurchaseIntent': False
             }
         
         # Determine site type
         site_type = 'generic'
         capabilities = []
-        
-        if site_info['hasVideo'] or site_info['hasAudio']:
-            site_type = 'video'
-            capabilities.append('media_player')
-        
-        if site_info['hasSearch']:
-            capabilities.append('search')
-        
-        if site_info['hasCart'] or site_info['hasPrices'] or site_info['hasProducts']:
-            if site_type == 'generic':
-                site_type = 'ecommerce'
-            capabilities.append('shopping')
+
+        if site_info.get('isPdf') or url.endswith('.pdf') or '/pdf/' in url:
+            site_type = 'pdf'
+            capabilities.append('pdf_viewer')
+        else:
+            if site_info['hasVideo'] or site_info['hasAudio']:
+                site_type = 'video'
+                capabilities.append('media_player')
+            
+            if site_info['hasSearch']:
+                capabilities.append('search')
+
+            if site_info['hasCart'] or site_info['hasProducts'] or (site_info['hasPrices'] and site_info.get('hasPurchaseIntent')):
+                if site_type == 'generic':
+                    site_type = 'ecommerce'
+                capabilities.append('shopping')
         
         return {
             'site_type': site_type,
             'platform': platform,
             'capabilities': capabilities,
-            'url': page.url
+            'url': page.url,
+            'isPdf': site_info.get('isPdf', False)
         }
 
 # ============================================================================
@@ -355,6 +363,18 @@ async def observe_page_state(page) -> Dict[str, Any]:
         # Get comprehensive state
         state = await page.evaluate("""
             () => {
+                const isVisible = (el) => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                };
+
+                const modalCandidates = Array.from(document.querySelectorAll(
+                    '[role="dialog"], [aria-modal="true"], .modal, [class*="modal"], [class*="overlay"], [class*="popup"], [class*="pop-up"], [class*="lightbox"], [class*="backdrop"]'
+                ));
+                const visibleModals = modalCandidates.filter(isVisible);
+
                 const state = {
                     url: window.location.href,
                     title: document.title,
@@ -375,7 +395,9 @@ async def observe_page_state(page) -> Dict[str, Any]:
                         hasButtons: document.querySelectorAll('button, [role="button"]').length > 0,
                         hasInputs: document.querySelectorAll('input, textarea, select').length > 0,
                         hasLinks: document.querySelectorAll('a[href]').length > 0,
-                        hasModals: document.querySelectorAll('[role="dialog"], .modal, [class*="modal"]').length > 0,
+                        hasModals: visibleModals.length > 0,
+                        modalCount: modalCandidates.length,
+                        visibleModalCount: visibleModals.length,
                     },
                     
                     // Shopping features (ecommerce sites)
@@ -450,6 +472,7 @@ async def observe_page_state(page) -> Dict[str, Any]:
         state['platform'] = site_info.get('platform', 'unknown')
         state['siteType'] = site_info.get('site_type', 'generic')
         state['capabilities'] = site_info.get('capabilities', [])
+        state['isPdf'] = bool(site_info.get('isPdf')) or 'pdf_viewer' in state.get('capabilities', [])
         
         # Platform-specific detection (for backward compatibility)
         state['isYouTube'] = state.get('platform') == 'youtube'
@@ -566,6 +589,7 @@ async def compare_states(before: Dict, after: Dict) -> Dict[str, Any]:
         'media_state_changed': False,
         'focus_changed': before.get('activeElement') != after.get('activeElement'),
         'scroll_changed': before.get('scrollPosition') != after.get('scrollPosition'),
+        'modal_changed': False,
     }
     
     # Check video state changes
@@ -595,11 +619,32 @@ async def compare_states(before: Dict, after: Dict) -> Dict[str, Any]:
                 audio_before.get('paused') != audio_after.get('paused') or
                 audio_before.get('muted') != audio_after.get('muted')
             )
+
+    interactive_before = before.get('interactive') or {}
+    interactive_after = after.get('interactive') or {}
+    modal_before = interactive_before.get('visibleModalCount')
+    modal_after = interactive_after.get('visibleModalCount')
+    if modal_before is not None and modal_after is not None:
+        changes['modal_changed'] = modal_before != modal_after
+        changes['modal_details'] = {
+            'before': modal_before,
+            'after': modal_after,
+        }
+    elif isinstance(interactive_before, dict) and isinstance(interactive_after, dict):
+        has_modals_before = interactive_before.get('hasModals')
+        has_modals_after = interactive_after.get('hasModals')
+        if has_modals_before is not None and has_modals_after is not None:
+            changes['modal_changed'] = has_modals_before != has_modals_after
+            changes['modal_details'] = {
+                'before': has_modals_before,
+                'after': has_modals_after,
+            }
     
     changes['any_change'] = any([
         changes['url_changed'],
         changes['media_state_changed'],
         changes['focus_changed'],
+        changes['modal_changed'],
     ])
     
     return changes
@@ -726,8 +771,24 @@ Capabilities: {', '.join(capabilities) if capabilities else 'none detected'}
 {ai_prompt}
 
 ================================================================
+FIELD MATCHING GUIDELINES (IMPORTANT):
+================================================================
+- Inspect the "INPUT FIELDS (visible — USE THESE)" section above for lines like:
+    - text (unnamed) [nth=0] placeholder='...' aria-label='...' label='Question text'
+- If the user requested filling a logical field (email, name, message), try to match by visible label or aria-label first.
+- If no label or aria-label matches, use the exact [nth=N] index shown. ALWAYS use `.nth(N)` when using an ambiguous locator.
+- Example hint to use in code: "TARGET FIELD: email => use .nth(0) if inspector shows [nth=0] for the email input"
+
+================================================================
 ENHANCED RULES WITH SMART INTENT HANDLING:
 ================================================================
+
+0. **CRITICAL — IN-PAGE NAVIGATION**:
+   The browser is ALREADY on URL: {page_context.get('url', 'unknown')}
+   If the task's target site matches the current domain, do NOT call page.goto().
+   Instead, interact with the page: type in search boxes, click links, press Enter.
+   For back-navigation, use: await page.go_back()
+   After any click that triggers navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)
 
 1. **Primary Approach**: Use ONLY elements that exist in the list above
 
@@ -1183,6 +1244,8 @@ class WebExecutionPipeline:
             except Exception as e:
                 logger.warning(f"⚠️ OmniParser fallback unavailable: {e}")
                 self.omniparser_detector = None
+        else:
+            logger.info("ℹ️ OmniParser visual fallback disabled by config")
         
         Path(self.config.screenshot_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1345,16 +1408,16 @@ class WebExecutionPipeline:
 
     async def _get_google_cookies_for_user(self, user_id: Optional[str]) -> Optional[List[Dict[str, Any]]]:
         """
-        ✅ Phase 4a: Get Google session cookies from OAuth token via EmailAgent.
+        ✅ Phase 4a: Get Google session cookies from OAuth token via ApiAgent.
         
         Returns Playwright-compatible cookie list if OAuth tokens available, else None.
         This enables seamless browser automation on Google without requiring login prompts.
         """
-        if not user_id or not _EMAIL_AGENT_AVAILABLE:
+        if not user_id or not _API_AGENT_AVAILABLE:
             return None
         
         try:
-            agent = EmailAgent()
+            agent = ApiAgent()
             result = await agent.get_browser_cookies(user_id)
             
             if result.get('status') == 'success' and result.get('cookies'):
@@ -2285,6 +2348,54 @@ class WebExecutionPipeline:
         except Exception as e:
             logger.warning(f"⚠️ Visual fallback failed: {e}")
             return None
+
+    def _is_dismiss_popup_prompt(self, prompt_text: str) -> bool:
+        text = (prompt_text or "").lower()
+        return any(k in text for k in ["dismiss", "close", "popup", "pop up", "modal", "overlay", "banner", "no thanks", "not now"])
+
+    async def _dom_has_close_control(self, page) -> bool:
+        if not page:
+            return False
+        try:
+            return await page.evaluate("""
+                () => {
+                    const keywords = ['close', 'dismiss', 'no thanks', 'not now', 'cancel'];
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                    };
+                    const nodes = Array.from(document.querySelectorAll('button, [role="button"], [aria-label], [title], [data-action], [data-testid]'));
+                    for (const el of nodes) {
+                        if (!isVisible(el)) continue;
+                        const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().toLowerCase();
+                        if (!text) continue;
+                        if (keywords.some(k => text.includes(k)) || text === 'x') {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+        except Exception:
+            return False
+
+    async def _try_visual_fallback_popup_dismiss(self, page, task: Dict[str, Any], task_id: str) -> Optional[Dict[str, Any]]:
+        if not self.config.enable_visual_fallback or self.omniparser_detector is None:
+            return None
+
+        candidates = ["dismiss", "close", "no thanks", "not now", "x"]
+        for candidate in candidates:
+            task_override = dict(task)
+            task_override["web_params"] = dict(task.get("web_params", {}) or {})
+            task_override["web_params"]["text"] = candidate
+            logger.info(f"🔍 Visual fallback popup dismiss using target '{candidate}'")
+            result = await self._try_visual_fallback_action(page, task_override, task_id)
+            if result is not None:
+                return result
+
+        return None
     
     def _initialize_proxy_rotator(self) -> Optional[ProxyRotator]:
         """Initialize proxy rotator if proxies are configured"""
@@ -2322,10 +2433,18 @@ class WebExecutionPipeline:
 
     async def _ensure_browser(self):
         """Lazy-launch the browser on first use."""
-        if self._initialized:
+        if self._initialized and self.context is not None:
             return
-        self._initialized = True
-        await self._do_initialize()
+        self._initialized = False
+        try:
+            await self._do_initialize()
+            self._initialized = True
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize Playwright: {e}")
+            self._initialized = False
+            self.context = None
+            self.browser = None
+            raise
 
     async def _do_initialize(self):
         """Initialize Playwright — launch real Chrome via CDP or fall back."""
@@ -2463,7 +2582,10 @@ class WebExecutionPipeline:
                                         logger.warning(f"⚠️ Download file still 0 bytes after wait: {fp}")
                                         return
                                     try:
-                                        subprocess.Popen(f'start "" "{fp}"', shell=True)
+                                        subprocess.run(
+                                            ['cmd', '/c', 'start', '', os.path.normpath(fp)],
+                                            shell=False, check=False,
+                                        )
                                         logger.info(f"📂 Opened downloaded file: {fp}")
                                     except Exception as _open_err:
                                         logger.warning(f"⚠️ Could not open downloaded file: {_open_err}")
@@ -2730,6 +2852,19 @@ class WebExecutionPipeline:
 
         existing = self.sessions.get(session_id)
         page_truly_closed = await self._is_page_truly_closed(existing)
+
+        # ── FIX (Bug 1): When the stored page is dead but a CDP context
+        # already has open pages, reuse the *last* (foreground) page instead
+        # of opening a brand-new about:blank tab — this preserves session
+        # cookies, history, and avoids bot-detection.
+        if page_truly_closed and self.context and self.context.pages:
+            # Pick the last page (most recently focused tab)
+            candidate = self.context.pages[-1]
+            if not await self._is_page_truly_closed(candidate):
+                logger.info(f"♻️ Reusing existing foreground tab for session {session_id}: {candidate.url}")
+                self.sessions[session_id] = candidate
+                return candidate
+
         if page_truly_closed:
             try:
                 page = await self.context.new_page()
@@ -2783,10 +2918,19 @@ class WebExecutionPipeline:
                     
                     logger.info(f"✅ Downloaded successfully: {filepath}")
                     
-                    # Verify file exists
+                    # Verify file exists and is non-empty (save_as may return before OS flush)
+                    _dl_deadline = _time_module.time() + 5
+                    while _time_module.time() < _dl_deadline:
+                        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                            break
+                        await asyncio.sleep(0.5)
+
                     if os.path.exists(filepath):
                         filesize = os.path.getsize(filepath)
-                        logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
+                        if filesize == 0:
+                            logger.warning(f"⚠️ File is 0 bytes after wait: {filepath}")
+                        else:
+                            logger.info(f"✅ File verified: {filepath} ({filesize} bytes)")
                         
                         # Track download for this session
                         if session_id not in self.session_downloads:
@@ -2794,11 +2938,15 @@ class WebExecutionPipeline:
                         self.session_downloads[session_id].append(filepath)
 
                         # Open the file with the default system application
-                        try:
-                            subprocess.Popen(f'start "" "{filepath}"', shell=True)
-                            logger.info(f"📂 Opened downloaded file: {filepath}")
-                        except Exception as _open_err:
-                            logger.warning(f"⚠️ Could not auto-open downloaded file: {_open_err}")
+                        if filesize > 0:
+                            try:
+                                subprocess.run(
+                                    ['cmd', '/c', 'start', '', os.path.normpath(os.path.abspath(filepath))],
+                                    shell=False, check=False,
+                                )
+                                logger.info(f"📂 Opened downloaded file: {filepath}")
+                            except Exception as _open_err:
+                                logger.warning(f"⚠️ Could not auto-open downloaded file: {_open_err}")
                     else:
                         logger.warning(f"⚠️ File not found after save: {filepath}")
                         
@@ -3178,24 +3326,77 @@ class WebExecutionPipeline:
             page_state_before = None
             if self.config.enable_page_state_layer:
                 page_state_before = await observe_page_state(page)
-                
-                # ✅ FIXED: action_type comes from web_params, never from ai_prompt
-                action_type = task.get('web_params', {}).get('action', 'unknown')
-                can_proceed, reason = validate_action_context(
-                    page_state_before, action_type, clean_prompt
+
+            downloads_before = set(self.session_downloads.get(session_id, []))
+
+            # ✅ FIXED: action_type comes from web_params, never from ai_prompt
+            # ✅ FIXED: Extract action_type with fallback to ai_prompt inference
+            web_params = task.get('web_params') or {}
+            action_type = web_params.get('action', 'unknown')
+            
+            # Safety net: infer action_type from ai_prompt if missing
+            if action_type == 'unknown':
+                prompt_lower = task.get('ai_prompt', '').lower()
+                if any(w in prompt_lower for w in ['navigate', 'go to', 'open', 'visit']):
+                    action_type = 'navigate'
+                elif any(w in prompt_lower for w in ['fill', 'type', 'enter', 'search']):
+                    action_type = 'fill'
+                elif any(w in prompt_lower for w in ['click', 'press', 'submit', 'tap']):
+                    action_type = 'click'
+                elif any(w in prompt_lower for w in ['extract', 'get', 'read', 'scrape']):
+                    action_type = 'extract'
+                if action_type != 'unknown':
+                    logger.info(f"📝 Inferred action_type='{action_type}' from ai_prompt (web_params missing)")
+            
+            can_proceed, reason = validate_action_context(
+                page_state_before, action_type, clean_prompt
+            )
+            
+            if not can_proceed:
+                logger.warning(f"⚠️ Context validation failed: {reason}")
+                return WebExecutionResult(
+                    validation_passed=False,
+                    security_passed=True,
+                    error=f"Context validation failed: {reason}",
+                    page_state_before=page_state_before,
+                    execution_time=(datetime.now() - start_time).total_seconds()
                 )
-                
-                if not can_proceed:
-                    logger.warning(f"⚠️ Context validation failed: {reason}")
+
+            # ✅ PDF VIEWER DOWNLOAD SHORT-CIRCUIT
+            download_intent = self._is_download_intent(clean_prompt, action_type, web_params)
+            is_pdf_viewer = False
+            if page_state_before:
+                is_pdf_viewer = (
+                    page_state_before.get('isPdf')
+                    or page_state_before.get('siteType') == 'pdf'
+                    or 'pdf_viewer' in page_state_before.get('capabilities', [])
+                )
+            if download_intent and (is_pdf_viewer or self._looks_like_pdf_url(page.url)):
+                logger.info("📄 PDF viewer detected with download intent - using direct download")
+                pdf_result = await self._handle_pdf_viewer_download(page, session_id)
+                if pdf_result.get('success'):
+                    filepath = pdf_result.get('filepath')
+                    output_msg = f"Downloaded PDF to {filepath}" if filepath else "PDF download completed"
                     return WebExecutionResult(
-                        validation_passed=False,
+                        validation_passed=True,
                         security_passed=True,
-                        error=f"Context validation failed: {reason}",
+                        output=output_msg,
+                        page_url=page.url,
+                        page_title=await page.title(),
                         page_state_before=page_state_before,
                         execution_time=(datetime.now() - start_time).total_seconds()
                     )
+
+                return WebExecutionResult(
+                    validation_passed=False,
+                    security_passed=True,
+                    error=pdf_result.get('error') or 'PDF download failed',
+                    page_state_before=page_state_before,
+                    execution_time=(datetime.now() - start_time).total_seconds()
+                )
             
-            action_type = task.get('web_params', {}).get('action', 'unknown')
+            # Already extracted above, no need to re-extract
+            # action_type = task.get('web_params', {}).get('action', 'unknown')
             
             # Check if navigation (invalidate cache)
             if action_type == 'navigate':
@@ -3213,22 +3414,41 @@ class WebExecutionPipeline:
                         target_url = url_match.group(0)
                 
                 if target_url:
-                    logger.info(f"🌐 Direct navigation to: {target_url}")
-                    try:
-                        # Navigate directly without LLM generation
-                        await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
-                        await page.wait_for_timeout(500)  # Let page settle
-                        
-                        logger.info(f"✅ Successfully navigated to {target_url}")
-                        
-                        return WebExecutionResult(
-                            validation_passed=True,
-                            security_passed=True,
-                            error=None,
-                            execution_time=(datetime.now() - start_time).total_seconds()
-                        )
-                    except Exception as nav_error:
-                        logger.warning(f"⚠️ Navigation failed: {nav_error}")
+                    # ── FIX (Bug 3): If we're already on the target domain,
+                    # skip page.goto() and fall through to in-page interaction
+                    # so the LLM generates type-in-searchbox / click code instead.
+                    from urllib.parse import urlparse
+                    _target_domain = urlparse(target_url).netloc.replace('www.', '')
+                    _current_domain = urlparse(page.url or '').netloc.replace('www.', '')
+                    _already_on_domain = (
+                        _target_domain and _current_domain
+                        and _target_domain == _current_domain
+                    )
+                    # Still navigate if it's a specific deep URL (has path/query),
+                    # but skip if it's just the bare homepage and we're already there.
+                    _target_path = urlparse(target_url).path.strip('/')
+                    _target_query = urlparse(target_url).query
+                    _is_deep_url = bool(_target_path) or bool(_target_query)
+
+                    if _already_on_domain and not _is_deep_url:
+                        logger.info(f"♻️ Already on {_current_domain} — skipping page.goto(), will interact in-page")
+                    else:
+                        logger.info(f"🌐 Direct navigation to: {target_url}")
+                        try:
+                            # Navigate directly without LLM generation
+                            await page.goto(target_url, wait_until='domcontentloaded', timeout=15000)
+                            await page.wait_for_timeout(500)  # Let page settle
+                            
+                            logger.info(f"✅ Successfully navigated to {target_url}")
+                            
+                            return WebExecutionResult(
+                                validation_passed=True,
+                                security_passed=True,
+                                error=None,
+                                execution_time=(datetime.now() - start_time).total_seconds()
+                            )
+                        except Exception as nav_error:
+                            logger.warning(f"⚠️ Navigation failed: {nav_error}")
                         # Fall through to LLM-generated code as fallback
             
             # ✅ STEP 2: TRY PLATFORM-SPECIFIC KEYBOARD SHORTCUTS (GENERIC)
@@ -3345,13 +3565,56 @@ class WebExecutionPipeline:
             if result.get('success'):
                 self.stats["dom_success"] += 1
             else:
-                visual_result = await self._try_visual_fallback_action(page, task, task_id)
-                if visual_result is not None:
-                    result = visual_result
-                    if result.get('success'):
-                        logger.info("✅ Visual fallback succeeded after DOM failure")
+                if action_type == 'extract':
+                    logger.info("🔧 RAG extract failed — trying DOM paragraph fallback")
+                    fallback_text = await self._fallback_extract_first_paragraph(page)
+                    if fallback_text:
+                        result = {
+                            'success': True,
+                            'output': f"{fallback_text}\nEXECUTION_SUCCESS",
+                            'extracted_data': fallback_text
+                        }
+                        logger.info("✅ DOM paragraph fallback succeeded")
+
+                # ✅ FIX: Try DOM-based fallback link click BEFORE OmniParser visual fallback.
+                # The page inspector already extracted all link texts from the DOM — use that
+                # instead of OmniParser image captioning which can't read text.
+                dom_fallback_tried = False
+                popup_visual_tried = False
+                dismiss_intent = self._is_dismiss_popup_prompt(clean_prompt)
+                if action_type == 'click' and dismiss_intent:
+                    dom_has_close = await self._dom_has_close_control(page)
+                    popup_visual_tried = True
+                    if dom_has_close:
+                        logger.info("🔧 Close control detected in DOM; trying visual fallback for popup dismiss anyway")
                     else:
-                        logger.warning(f"⚠️ Visual fallback returned failure: {result.get('error')}")
+                        logger.info("🔧 No close control found in DOM; trying visual fallback for popup dismiss")
+                    visual_result = await self._try_visual_fallback_popup_dismiss(page, task, task_id)
+                    if visual_result is not None:
+                        result = visual_result
+                        if result.get('success'):
+                            logger.info("✅ Visual fallback dismiss succeeded")
+
+                if not result.get('success') and action_type == 'click' and not dismiss_intent and any(kw in clean_prompt.lower() for kw in ('link', 'click', 'open', 'result')):
+                    logger.info(f"🔧 RAG code failed — trying DOM-based fallback link click")
+                    try:
+                        fallback_code = self._generate_fallback_link_click(clean_prompt)
+                        result = await self._execute_generated_code(page, fallback_code, task_id)
+                        dom_fallback_tried = True
+                        if result.get('success'):
+                            logger.info("✅ DOM fallback link click succeeded")
+                    except Exception as fb_err:
+                        logger.warning(f"⚠️ DOM fallback link click failed: {fb_err}")
+
+                # Only try OmniParser if DOM fallback didn't work
+                if not result.get('success') and not dom_fallback_tried and not popup_visual_tried:
+                    visual_result = await self._try_visual_fallback_action(page, task, task_id)
+                    if visual_result is not None:
+                        result = visual_result
+                        if result.get('success'):
+                            logger.info("✅ Visual fallback succeeded after DOM failure")
+                        else:
+                            logger.warning(f"⚠️ Visual fallback returned failure: {result.get('error')}")
 
             # ✅ NEW TAB DETECTION: if a click opened a new tab, switch the session to it
             if action_type in ('click', 'navigate') and result.get('success'):
@@ -3385,6 +3648,8 @@ class WebExecutionPipeline:
             verification_message = None
             
             if self.config.enable_verification and result.get('success'):
+                downloads_after = set(self.session_downloads.get(session_id, []))
+                new_downloads = downloads_after - downloads_before
                 # Compare states
                 if page_state_before and page_state_after:
                     changes = await compare_states(page_state_before, page_state_after)
@@ -3395,29 +3660,60 @@ class WebExecutionPipeline:
                     else:
                         # ℹ️ For click actions: no URL change could mean download, modal, or off-page action
                         if action_type == 'click':
-                            # Check if this was a navigation intent (link/open/go to)
-                            _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
-                            _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
-                            if _is_nav_intent:
-                                # Wait briefly and re-check URL — gives navigation time to happen
-                                await page.wait_for_timeout(1500)
-                                _url_after_wait = page.url
-                                _pages_after_wait = len(self.context.pages) if self.context else 1
-                                if _url_after_wait != _url_before_exec:
-                                    verification_message = f"✅ Navigation confirmed: {_url_after_wait}"
-                                    logger.info(f"✅ Verification: URL changed after wait → {_url_after_wait}")
-                                elif _pages_after_wait > _pages_before_exec:
-                                    verification_message = "✅ New tab opened after click"
-                                    logger.info(f"✅ Verification: New tab opened")
+                            dismiss_intent = self._is_dismiss_popup_prompt(clean_prompt)
+                            if dismiss_intent:
+                                before_interactive = (page_state_before or {}).get('interactive', {})
+                                after_interactive = (page_state_after or {}).get('interactive', {})
+                                before_visible = before_interactive.get('visibleModalCount')
+                                after_visible = after_interactive.get('visibleModalCount')
+
+                                if before_visible is not None and after_visible is not None:
+                                    if after_visible < before_visible:
+                                        verification_message = f"✅ Popup dismissed (visible modals {before_visible}→{after_visible})"
+                                        logger.info("✅ Verification: Popup dismissed (visible modals reduced)")
+                                    elif before_interactive.get('hasModals') and not after_interactive.get('hasModals'):
+                                        verification_message = "✅ Popup dismissed (no visible modals)"
+                                        logger.info("✅ Verification: Popup dismissed (no visible modals)")
+                                    else:
+                                        verification_message = "⚠️ Popup dismiss not verified (no modal reduction)"
+                                        logger.warning("⚠️ Verification: Popup dismiss not verified")
+                                elif before_interactive.get('hasModals') and not after_interactive.get('hasModals'):
+                                    verification_message = "✅ Popup dismissed (no visible modals)"
+                                    logger.info("✅ Verification: Popup dismissed (no visible modals)")
                                 else:
-                                    # No navigation happened — the click was a no-op, mark as failure
-                                    result['success'] = False
-                                    result['error'] = 'Click executed but page did not navigate — element may not have been found or was the wrong element'
-                                    verification_message = "❌ Click did not cause navigation"
-                                    logger.warning(f"❌ Verification: Click reported success but URL unchanged after wait")
+                                    verification_message = "⚠️ Popup dismiss not verified (no modal signal)"
+                                    logger.warning("⚠️ Verification: Popup dismiss not verified (no modal signal)")
                             else:
-                                verification_message = "✅ Click executed (no navigation expected)"
-                                logger.info(f"✅ Verification: Click action executed (non-navigation click)")
+                                if new_downloads:
+                                    verification_message = f"✅ Download detected ({len(new_downloads)} file(s))"
+                                    logger.info("✅ Verification: Download detected after click")
+                                elif download_intent:
+                                    verification_message = "⚠️ Download intent but no download detected"
+                                    logger.warning("⚠️ Verification: Download intent but no download detected")
+                                else:
+                                # Check if this was a navigation intent (link/open/go to)
+                                 _nav_keywords = ('link', 'open', 'click', 'go to', 'visit', 'navigate')
+                                 _is_nav_intent = any(kw in clean_prompt.lower() for kw in _nav_keywords)
+                                if _is_nav_intent:
+                                    # Wait briefly and re-check URL — gives navigation time to happen
+                                    await page.wait_for_timeout(1500)
+                                    _url_after_wait = page.url
+                                    _pages_after_wait = len(self.context.pages) if self.context else 1
+                                    if _url_after_wait != _url_before_exec:
+                                        verification_message = f"✅ Navigation confirmed: {_url_after_wait}"
+                                        logger.info(f"✅ Verification: URL changed after wait → {_url_after_wait}")
+                                    elif _pages_after_wait > _pages_before_exec:
+                                        verification_message = "✅ New tab opened after click"
+                                        logger.info(f"✅ Verification: New tab opened")
+                                    else:
+                                        # No navigation happened — the click was a no-op, mark as failure
+                                        result['success'] = False
+                                        result['error'] = 'Click executed but page did not navigate — element may not have been found or was the wrong element'
+                                        verification_message = "❌ Click did not cause navigation"
+                                        logger.warning(f"❌ Verification: Click reported success but URL unchanged after wait")
+                                else:
+                                    verification_message = "✅ Click executed (no navigation expected)"
+                                    logger.info(f"✅ Verification: Click action executed (non-navigation click)")
                         else:
                             verification_message = "⚠️ No page state change detected"
                             logger.warning(f"⚠️ Verification: No state change")
@@ -3554,6 +3850,7 @@ class WebExecutionPipeline:
             )
             
             generated_code = rag_result.get('code', '')
+            generated_code = self._auto_await_async_calls(generated_code)
             
             if not generated_code:
                 raise ValueError("RAG system returned empty code")
@@ -3565,6 +3862,199 @@ class WebExecutionPipeline:
         except Exception as e:
             logger.error(f"❌ RAG code generation failed: {e}")
             raise
+
+    def _auto_await_async_calls(self, code: str) -> str:
+        """
+        Ensure common async Playwright actions are awaited.
+        This guards against generated sync-style calls that do nothing at runtime.
+        """
+        if not code:
+            return code
+
+        async_methods = [
+            "click",
+            "dblclick",
+            "hover",
+            "fill",
+            "type",
+            "press",
+            "scroll_into_view_if_needed",
+            "check",
+            "uncheck",
+            "select_option",
+            "set_input_files",
+            "tap",
+            "drag_to",
+            "wait_for_selector",
+            "wait_for_load_state",
+            "wait_for_timeout",
+            "wait_for",
+            "goto",
+            "evaluate",
+            "evaluate_handle",
+            "text_content",
+            "inner_text",
+            "input_value",
+            "get_attribute",
+            "count",
+            "is_visible",
+            "is_hidden",
+            "is_enabled",
+            "is_disabled",
+            "is_checked",
+        ]
+
+        method_group = "|".join(re.escape(m) for m in async_methods)
+        call_pattern = re.compile(
+            rf"^(?P<expr>(?:[A-Za-z_][\w]*)(?:\.[A-Za-z_][\w]*)*\.(?:{method_group})\s*\(.*\))(?P<comment>\s*#.*)?$"
+        )
+
+        fixed_lines = []
+        for line in code.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                fixed_lines.append(line)
+                continue
+            if "await " in line:
+                fixed_lines.append(line)
+                continue
+
+            if stripped.startswith("return "):
+                remainder = stripped[len("return "):].strip()
+                match = call_pattern.match(remainder)
+                if match:
+                    indent = line[:len(line) - len(line.lstrip())]
+                    expr = match.group("expr")
+                    comment = match.group("comment") or ""
+                    fixed_lines.append(f"{indent}return await {expr}{comment}")
+                    continue
+
+            match = call_pattern.match(stripped)
+            if match:
+                indent = line[:len(line) - len(line.lstrip())]
+                expr = match.group("expr")
+                comment = match.group("comment") or ""
+                fixed_lines.append(f"{indent}await {expr}{comment}")
+                continue
+
+            fixed_lines.append(line)
+
+        return "\n".join(fixed_lines)
+
+    def _is_download_intent(self, prompt: str, action_type: str, web_params: Dict[str, Any]) -> bool:
+        if action_type in {'download', 'save', 'export'}:
+            return True
+        if isinstance(web_params, dict) and web_params.get('download'):
+            return True
+        prompt_lower = (prompt or '').lower()
+        download_keywords = ['download', 'save pdf', 'save file', 'export', 'get pdf', 'pdf']
+        return any(k in prompt_lower for k in download_keywords)
+
+    def _looks_like_pdf_url(self, url: str) -> bool:
+        if not url:
+            return False
+        url_lower = url.lower()
+        return url_lower.endswith('.pdf') or '/pdf/' in url_lower or 'format=pdf' in url_lower
+
+    def _guess_pdf_filename(self, headers: Dict[str, str], url: str) -> str:
+        from urllib.parse import urlparse, unquote
+
+        content_disposition = (headers or {}).get('content-disposition', '')
+        filename = None
+
+        if content_disposition:
+            match = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition, re.IGNORECASE)
+            if match:
+                filename = unquote(match.group(1))
+            else:
+                match = re.search(r"filename=\"?([^\";]+)\"?", content_disposition, re.IGNORECASE)
+                if match:
+                    filename = match.group(1)
+
+        if not filename:
+            parsed = urlparse(url)
+            filename = os.path.basename(parsed.path)
+
+        filename = os.path.basename(filename) if filename else ''
+        if not filename:
+            filename = f"download_{int(datetime.now().timestamp())}.pdf"
+        if not filename.lower().endswith('.pdf'):
+            filename = f"{filename}.pdf"
+
+        return filename
+
+    async def _download_pdf_via_request(self, page, pdf_url: str, session_id: str) -> Dict[str, Any]:
+        try:
+            response = await page.context.request.get(pdf_url)
+            status = response.status
+            if status < 200 or status >= 300:
+                return {'success': False, 'error': f"HTTP {status} for {pdf_url}"}
+
+            body = await response.body()
+            if not body:
+                return {'success': False, 'error': "Empty response body"}
+
+            headers = response.headers
+            filename = self._guess_pdf_filename(headers, pdf_url)
+            downloads_dir = str(Path.home() / 'Downloads')
+            os.makedirs(downloads_dir, exist_ok=True)
+            filepath = os.path.join(downloads_dir, filename)
+
+            with open(filepath, 'wb') as f:
+                f.write(body)
+
+            if session_id not in self.session_downloads:
+                self.session_downloads[session_id] = []
+            self.session_downloads[session_id].append(filepath)
+
+            logger.info(f"✅ Saved PDF via request: {filepath}")
+            return {'success': True, 'filepath': filepath}
+
+        except Exception as e:
+            logger.warning(f"⚠️ Request-based PDF download failed: {e}")
+            return {'success': False, 'error': str(e)}
+
+    async def _wait_for_new_download(self, session_id: str, before: set, timeout_ms: int = 8000) -> Optional[str]:
+        start_time = _time_module.time()
+        while (_time_module.time() - start_time) * 1000 < timeout_ms:
+            downloads = self.session_downloads.get(session_id, [])
+            for path in downloads:
+                if path not in before and os.path.exists(path):
+                    return path
+            await asyncio.sleep(0.25)
+        return None
+
+    async def _handle_pdf_viewer_download(self, page, session_id: str) -> Dict[str, Any]:
+        pdf_url = page.url
+        if not self._looks_like_pdf_url(pdf_url):
+            pdf_url = page.url
+
+        logger.info(f"📄 PDF viewer download path: {pdf_url}")
+
+        # Prefer direct request download to avoid non-DOM PDF toolbar issues
+        request_result = await self._download_pdf_via_request(page, pdf_url, session_id)
+        if request_result.get('success'):
+            return request_result
+
+        # Fallback: attempt browser save shortcut (may or may not trigger a download)
+        before = set(self.session_downloads.get(session_id, []))
+        try:
+            await page.keyboard.press('Control+S')
+        except Exception:
+            pass
+        try:
+            await page.keyboard.press('Meta+S')
+        except Exception:
+            pass
+
+        new_download = await self._wait_for_new_download(session_id, before)
+        if new_download:
+            return {'success': True, 'filepath': new_download}
+
+        return {
+            'success': False,
+            'error': 'PDF viewer download failed: no toolbar DOM and no direct download response'
+        }
     
     def _generate_fallback_link_click(self, ai_prompt: str) -> str:
         """
@@ -3574,14 +4064,15 @@ class WebExecutionPipeline:
         
         # Extract link name from prompt
         # "Open the link named Ringer: web automation" → "Ringer: web automation"
+        quoted_match = re.search(r'["\']([^"\']+)["\']', ai_prompt)
         link_name_match = re.search(r'(?:named|called|titled)\s+["\']?([^"\']+)["\']?(?:\.|$)', ai_prompt, re.IGNORECASE)
-        link_name = link_name_match.group(1) if link_name_match else ai_prompt
+        link_name = quoted_match.group(1) if quoted_match else (link_name_match.group(1) if link_name_match else ai_prompt)
         
         # Clean it up
         link_name = re.sub(r'\s*(and|or)\s*.*$', '', link_name).strip()
         
         # Escape quotes in link_name for safe embedding
-        link_name_escaped = link_name.replace("'", "\\'")
+        link_name_escaped = link_name.replace("\\", "\\\\").replace("'", "\\'")
         
         code = f"""
 # ✅ FALLBACK: Find and click link by text (with scrolling)
@@ -3713,6 +4204,36 @@ async def main():
 await main()
 """
         return code.strip()
+
+    async def _fallback_extract_first_paragraph(self, page) -> Optional[str]:
+        try:
+            text = await page.evaluate("""
+                () => {
+                    const roots = [
+                        'main',
+                        'article',
+                        '#content',
+                        '#mw-content-text',
+                        '.mw-parser-output',
+                        'body'
+                    ];
+                    const minLen = 40;
+                    for (const sel of roots) {
+                        const root = document.querySelector(sel);
+                        if (!root) continue;
+                        const paras = root.querySelectorAll('p');
+                        for (const p of paras) {
+                            const t = (p.innerText || p.textContent || '').trim();
+                            if (t && t.length >= minLen) return t;
+                        }
+                    }
+                    return '';
+                }
+            """)
+            return text.strip() if isinstance(text, str) and text.strip() else None
+        except Exception as e:
+            logger.warning(f"⚠️ DOM extract fallback failed: {e}")
+            return None
     
     async def _execute_generated_code(
         self,
@@ -3742,6 +4263,53 @@ await main()
             # ✅ FIX 3: .first/.last are Locator properties, not coroutines
             code = re.sub(r'await\s+([\w.()\[\]]+)\.first\b', r'\1.first', code)
             code = re.sub(r'await\s+([\w.()\[\]]+)\.last\b', r'\1.last', code)
+            
+            # ✅ FIX: Sanitize 'await page.locator(...)' without chained action
+            # LLMs sometimes generate 'await page.locator(selector)' which is wrong —
+            # page.locator() is synchronous, only the action (.click(), .fill(), etc.) is async.
+            # Match 'await page.locator(...)' NOT followed by .click/.fill/.count/.text_content/etc.
+            code = re.sub(
+                r'await\s+(page\.locator\([^)]*\))\s*$',
+                r'\1',
+                code,
+                flags=re.MULTILINE
+            )
+            # Also fix 'await page.get_by_...(...)' bare calls
+            code = re.sub(
+                r'await\s+(page\.get_by_\w+\([^)]*\))\s*$',
+                r'\1',
+                code,
+                flags=re.MULTILINE
+            )
+
+            # Fix missing await for common Locator actions generated by the LLM
+            async_methods = (
+                'click',
+                'fill',
+                'scroll_into_view_if_needed',
+                'wait_for',
+                'type',
+                'press',
+                'check',
+                'uncheck',
+                'select_option'
+            )
+            pattern = re.compile(
+                r'^(?P<indent>\s*)(?P<prefix>[^#\n]*?)(?P<call>\b[\w\.\]\)\(]+)\.(?P<method>'
+                + '|'.join(async_methods) + r')(?P<space>\s*)\(',
+                re.MULTILINE
+            )
+
+            def _add_missing_await(match: re.Match) -> str:
+                before = match.group('prefix')
+                if re.search(r'\bawait\b', before):
+                    return match.group(0)
+                return (
+                    f"{match.group('indent')}{before}await {match.group('call')}."
+                    f"{match.group('method')}{match.group('space')}("
+                )
+
+            code = pattern.sub(_add_missing_await, code)
             
             # Wrap in async function
             def _indent(text, spaces=4):
@@ -3832,7 +4400,14 @@ async def __rag_step__(page):
             
             # Parse stdout for success/failure
             success, message = self._parse_execution_output(stdout_content)
-            
+
+            # FIX: if code returned a value via `return`, treat as success
+            # regardless of whether stdout contains EXECUTION_SUCCESS
+            if not success and result_data is not None:
+                success = True
+                message = "Extraction succeeded (return value captured)"
+                logger.info("✅ Success via return value — stdout had no marker but result_data was captured")
+
             if not success:
                 logger.error(f"❌ Code reported failure: {message}")
                 return {
@@ -4169,7 +4744,7 @@ class CoordinatorWebBridge:
             return TaskResult(
                 task_id=task.task_id,
                 status="failed",
-                error="Not an action task - should be handled by reasoning agent"
+                error="Not a web action task — 'api' target tasks must be routed to API Agent via COORDINATOR_TO_API channel, not web automation"
             )
         
         attempt = 0

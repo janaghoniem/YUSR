@@ -48,6 +48,7 @@ llm = ChatGroq(
     model=LLM_MODEL,
     temperature=0.05,
     max_tokens=2048,
+    # max_retries=0,          # fail fast → Mistral fallback handles retries
     groq_api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
@@ -310,6 +311,1120 @@ def _get_user_request_text(user_request: Dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return str(user_request)
+
+
+def _normalize_device_type(device_type: Optional[str]) -> Literal["desktop", "mobile", "mixed"]:
+    """Normalize incoming device hints to the coordinator's supported values."""
+    raw = str(device_type or "desktop").strip().lower()
+    if raw in {"mixed", "hybrid", "cross_platform", "cross-platform", "desktop_mobile", "desktop+mobile"}:
+        return "mixed"
+    if raw in {"mobile", "android", "ios", "phone", "tablet"}:
+        return "mobile"
+    return "desktop"
+
+
+def _get_mobile_decomposition_prompt_sop() -> str:
+        return """
+You are decomposing high-level user requests into low-level sub-tasks for MOBILE UI execution.
+
+HARD ROUTING RULES:
+1. Every task MUST use device: "mobile".
+2. Every task MUST use context: "local".
+3. NEVER use target_agent: "api" on mobile.
+4. Mobile handles email, browsing, and app operations via local automation tasks.
+5. Even when the user says "open Chrome and search for X", you MUST use context: "local".
+6. Mobile browser opening, navigation, and typing are handled by the local automation layer.
+
+TARGET AGENTS:
+- action: UI automation (tap, type, navigate, fill forms, extract text)
+- reasoning: Logic tasks (summarize, analyze, write, translate, generate content)
+- language: Confirmation/read-aloud tasks (read generated content to user, ask for confirmation)
+
+WHEN TO USE target_agent: "reasoning" vs "action"
+
+- Extracting text from UI, files, or webpages (e.g., “read the price”, “get the error message”, “copy the visible text”) -> ALWAYS target_agent: "action".
+- Reasoning is for content generation, summarisation, translation, or analysis AFTER text has been extracted by an action task.
+- If the user asks to understand or interpret extracted content, use two tasks:
+        1. Action task to extract the raw text.
+        2. Reasoning task that depends on the action task and receives the text via extra_params["input_content"].
+- "action": Tasks that interact with the OS, apps, files, or browser (open file, read file, click, type, navigate, fill, screenshot, etc.). A reasoning component CANNOT open files or applications.
+- "reasoning": Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element or file system, it is reasoning.
+
+Examples of REASONING tasks on mobile:
+- "Write a scary story" -> reasoning
+- "Summarize this article" -> reasoning
+- "Solve these math problems" -> reasoning
+- "Translate this to Arabic" -> reasoning
+- "Draft an email to my boss" -> reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
+- "Explain quantum computing" -> reasoning
+- "Generate a Python script" -> reasoning
+
+EMAIL ON MOBILE:
+- Do NOT use API/email agent routing.
+- Build local app steps (open mail app, compose, fill fields, send).
+- If subject/body are not explicitly provided, add one reasoning task first to generate SUBJECT and BODY.
+- Add language confirmation before send for generated content ONLY.
+
+GENERAL RULES:
+1. One action per task - never combine multiple actions, except for search submission where typing the query and submitting (Enter/click) may be combined in a single fill task
+2. Explicit dependencies - if task B needs task A's output, set "depends_on"
+3. Descriptive prompts - ai_prompt should be detailed enough for RAG to understand
+4. Correct context - all mobile tasks use context: "local"
+5. Minimal extra_params - ONLY include action type and text (for fill), nothing else
+6. Include URLs for known sites only when mobile browser navigation is explicit
+7. NO selectors - NEVER hardcode CSS selectors, let RAG find them from ai_prompt
+8. Empty web_params - For local tasks, set web_params: {}
+9. Include confirmation steps - For configuration tasks (emails, forms, settings), always add a final task to confirm/save changes
+10. Content generation = reasoning - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
+11. Shared goal - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
+12. Research communication - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results extracted and returned by an "action" agent content extraction task and formats them into a natural, helpful conversational response.
+13. Confirmation for sensitive actions – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action. NOTE: this applies to generated content ONLY. If the user explicitly provides the content (e.g., "Set the alarm for 7 am"), you do NOT need a confirmation task for the time value. But if the user asks you to "Draft an email to my boss about missing tomorrow's meeting" and you generate the email content, you MUST add a confirmation task to read back the generated email and ask for approval before sending. For mobile, this confirmation task should use target_agent: "language" with ai_prompt that reads out the generated content and asks for user confirmation or critique before proceeding to any action tasks that interact with the UI or send information.
+  - The confirmation task must have:
+    - target_agent: "language"
+    - ai_prompt: "(e.g., Read out the generated content. Ask the user to confirm or critique this task. Wait for their response.)"
+    - extra_params: Must contain {{"input_from": "<generation_task_id>"}} so the language agent actually receives the text to read out.
+    - depends_on: the generation task
+  - The send task must depend on the confirmation task.
+  - If a user replies with a **critique** or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending. 
+  - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+
+# DEVICE & CONTEXT
+
+- **device**: "mobile"
+- **context**:
+    - "local" -> for all mobile tasks, including web browsing on mobile.
+
+Mobile examples below are the only examples in this SOP.
+
+============================
+EXAMPLES (MOBILE)
+============================
+
+## Example 3: Email Composition Task
+
+User: "Compose an email to rescheduling tomorrow's meeting with Sara@gmail.com"
+(Note: user does NOT provide subject or body, so reasoning task is needed to generate them. Assume user preferences indicate Gmail as email app.)
+
+- task_id: task_1
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: 
+        Compose a complete email for this request:
+        "Reschedule tomorrow's meeting with Sara".
+        Return a JSON object with keys SUBJECT and BODY.
+    device: mobile
+    context: local
+    target_agent: reasoning
+    extra_params: {}
+    web_params: {}
+    depends_on: null
+
+- task_id: task_2
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Read out the generated email SUBJECT and BODY to the user and ask for confirmation/critique before opening any app or sending it. Wait for their response.
+    device: mobile
+    context: local
+    target_agent: language
+    extra_params:
+        input_from: "task_1"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Navigate to Gmail
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params:
+        app_name: gmail
+    depends_on: ["task_2"]
+
+- task_id: task_4
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Compose new email to sara@gmail.com
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params:
+        recipient: sara@gmail.com
+    depends_on: ["task_3"]
+
+- task_id: task_5
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Fill the Subject field with the SUBJECT value from the composed email
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params: {}
+    depends_on: ["task_1", "task_4"]
+
+- task_id: task_6
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Fill the email body with the BODY value from the composed email
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params: {}
+    depends_on: ["task_1", "task_5"]
+
+- task_id: task_7
+    goal: Compose and send a meeting reschedule email to Sara
+    ai_prompt: Click the Send button to send the email
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params: {}
+    depends_on: ["task_6"]
+
+EXPLANATION: task_1 (reasoning) returns {"SUBJECT": "...", "BODY": "..."}.
+task_2 explicitly takes input_from: "task_1" so the language agent reads the generated content to the user for confirmation BEFORE any action tasks start.
+task_3 navigates Gmail and depends on task_2. task_4 fills the To field directly (known from the user request). tasks 5-6 receive the JSON as input_content from task_1 so the action layer can parse SUBJECT and BODY individually. They also depend sequentially on task_4/5.
+
+## Example 4: Mobile Configuration Task
+
+User: "Set the alarm for 7 am"
+
+- task_id: task_1
+    goal: Set an alarm for 7:00 AM
+    ai_prompt: Open the Clock app on mobile device
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params:
+        app_name: clock
+    success_message: "Clock app opened"
+    failure_message: "Failed to open Clock app"
+    depends_on: null
+
+- task_id: task_2
+    goal: Set an alarm for 7:00 AM
+    ai_prompt: Set the alarm time to 7:00 AM
+    device: mobile
+    context: local
+    target_agent: action
+    extra_params:
+        time: "7:00"
+    success_message: "Alarm time set to 7:00 AM"
+    failure_message: "Failed to set alarm time"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Set an alarm for 7:00 AM
+    ai_prompt: Press OK or Save to confirm the alarm setting
+    device: mobile
+    context: local
+    target_agent: action
+    success_message: "Alarm set successfully for 7:00 AM"
+    failure_message: "Failed to confirm alarm setting"
+    depends_on: ["task_2"]
+
+# SUCCESS/FAILURE MESSAGE RULES
+
+- Every task MUST have both success_message and failure_message
+- Messages should be brief (1-2 sentences), user-friendly, and action-oriented
+- Success messages should convey what was accomplished (e.g., "Email sent to Sara")
+- Failure messages should suggest next steps (e.g., "Check your connection and retry")
+- These messages will be vocalized to the user via thinking steps as tasks execute
+- Use the user's language only if confirmed in conversation history
+
+============================
+OUTPUT RULES
+============================
+
+Return ONLY a valid JSON array of tasks (no markdown, no explanations, no extra text before or after).  
+Follow this exact schema for each task object:
+
+[
+  {{
+    "task_id": <string, unique>,
+    "goal": <string, identical for all tasks in this decomposition>,
+    "ai_prompt": <string>,
+    "device": "mobile",
+    "context": "local",
+    "target_agent": "action" | "reasoning" | "language",
+    "extra_params": <object>,
+    "web_params": <object>,
+    "depends_on": <array of strings | null>,
+    "success_message": <string, required>,
+    "failure_message": <string, required>
+  }},
+  ...
+]
+
+IMPORTANT:  
+- Every task MUST include both `success_message` and `failure_message` (short, user‑friendly sentences).  
+- Do NOT output any text outside the JSON array.  
+- Do NOT wrap the JSON in ````json```` fences – return raw JSON.
+
+Generate the task decomposition now:"""
+
+
+def _get_desktop_decomposition_prompt_sop() -> str:
+        return """
+============================
+DESKTOP COORDINATOR SOP
+============================
+
+You are decomposing tasks for DESKTOP execution.
+
+This SOP contains the desktop/web/email subset of the original coordinator
+prompt. Keep every desktop, web, and email example, and preserve the full
+Google/API routing guidance.
+
+HARD ROUTING RULES:
+1. Every task MUST use device: "desktop".
+2. Use context: "web" for browser automation and "local" for native OS/app tasks.
+3. The api agent is desktop-only and available here.
+4. Desktop browser automation uses context: "web".
+5. Desktop native app and OS tasks use context: "local".
+
+TARGET AGENTS (desktop):
+- action: UI automation (click, type, navigate, fill forms, extract text)
+- reasoning: Logic tasks (summarize, analyze, write, translate, generate content)
+- language: Confirmation/read-aloud tasks (read generated content to user, ask for confirmation)
+- api: Google API operations (YouTube search, Calendar, Drive, Gmail send). ALWAYS use this for API calls.
+
+WHEN TO USE target_agent: "reasoning" vs "action"
+
+- Extracting text from UI, files, or webpages (e.g., “read the price”, “get the error message”, “copy the visible text”) -> ALWAYS target_agent: "action".
+- Reasoning is for content generation, summarisation, translation, or analysis AFTER text has been extracted by an action task.
+- If the user asks to understand or interpret extracted content, use two tasks:
+        1. Action task to extract the raw text.
+        2. Reasoning task that depends on the action task and receives the text via extra_params["input_content"].
+- "action": Tasks that interact with the OS, apps, files, or browser (open file, read file, click, type, navigate, fill, screenshot, etc.). A reasoning component CANNOT open files or applications.
+- "reasoning": Tasks that generate, summarize, analyze, research, write, translate, or answer questions. Content creation (stories, essays, code, emails, poems) is ALWAYS reasoning. If a task does NOT require interacting with a UI element or file system, it is reasoning.
+
+Examples of REASONING tasks:
+- "Write a scary story" -> reasoning
+- "Summarize this article" -> reasoning
+- "Solve these math problems" -> reasoning
+- "Translate this to Arabic" -> reasoning
+- "Draft an email to my boss" -> reasoning (IMPORTANT: ai_prompt must request SUBJECT and BODY together)
+- "Explain quantum computing" -> reasoning
+- "Generate a Python script" -> reasoning
+
+EMAIL/API RULES:
+- For direct send-email operations on desktop, you may route to target_agent: "api".
+- For Google API tasks (YouTube search/info, Calendar, Drive), prefer target_agent: "api".
+- For browser watch/play/navigation requests, use target_agent: "action" with context "web".
+
+EMAIL TASK RULES (CRITICAL)
+When the user asks to compose, send, or draft an email:
+
+a) ALWAYS generate a reasoning task FIRST that produces the email content fields IF user doesnt give email subject and content, only a description.
+     e.g. user request: "Reschedule tomorrow's meeting with Sara" -- this implies an email but doesn't give subject or body. role of reasoning task: "Compose a complete email for this request: 'Reschedule tomorrow's meeting with Sara'. Return a JSON object with keys SUBJECT and BODY."
+     user request: "Send an email to Sara about rescheduling tomorrow's meeting. Subject should be 'Meeting Rescheduled' and body should say 'Hi Sara, ...'" -- reasoning task is NOT needed here because subject and body are explicitly provided by user.
+     The reasoning task ai_prompt must say:
+     "Compose a complete email for this request: <user intent>.
+        Return a JSON object with keys SUBJECT and BODY."
+     The reasoning task output will be a JSON object injected as input_content, e.g.:
+     {"SUBJECT": "Meeting Rescheduled", "BODY": "Hi Sara, ..."}
+
+b) The action tasks that fill Subject and Body MUST depend on the reasoning task, if present, and
+     will receive the generated JSON in extra_params["input_content"].
+
+⚠️ EMAIL ROUTING FALLBACK (Critical for typos):
+If the user request contains any variation of "email", "send", "compose", "draft", or related keywords,
+ALWAYS route to target_agent: "api" with operation: "send" REGARDLESS of what mail app is mentioned.
+DO NOT generate desktop UI automation tasks like pyautogui or keyboard control for email send operations.
+Email sending ALWAYS uses the Gmail API endpoint which is atomic and reliable.
+
+REASON: Desktop UI automation for email is fragile (login screens, multi-step forms, permissions).
+The email API is 100% reliable and handles all Gmail/OAuth edge cases.
+
+TYPO HANDLING: Input like "sedn email", "sned mail", "compose mesage" should STILL route to api agent.
+
+✅ GOOGLE API ROUTING (Gmail, YouTube, Calendar, Drive, Cookies):
+If the user request contains keywords for Google API operations, route to target_agent: "api" with the appropriate operation:
+
+GMAIL / EMAIL OPERATIONS:
+- Keywords: "send email", "send mail", "compose email", "write email", "draft email", "email to",
+  "mail to", "shoot an email", "send a message to", "forward email", "reply to email",
+  "sedn email", "sned mail" (typos), "بعت ايميل", "ارسل رسالة", "اكتب ايميل"
+    -> operation: "send" with to/subject/body in extra_params
+- Keywords: "read my emails", "check my inbox", "show unread emails", "inbox", "new emails",
+  "latest emails", "my messages", "what emails do I have", "اقرأ ايميلاتي", "شوف الإيميلات"
+    -> operation: "list_emails" with max_results/label_ids in extra_params
+- Keywords: "read email", "open email", "show email", "email content", "what does the email say",
+  "اقرأ الإيميل ده", "افتح الرسالة"
+    -> operation: "read_email" with message_id in extra_params
+- Keywords: "search emails", "find email", "email from", "look for email", "دور على إيميل"
+    -> operation: "search_emails" with query in extra_params
+- Keywords: "delete email", "trash email", "remove email", "امسح الإيميل"
+    -> operation: "delete_email" with message_id in extra_params
+- Keywords: "mark as read", "mark read", "اعمله مقروء"
+    -> operation: "mark_read" with message_id in extra_params
+- Keywords: "reply", "reply to", "respond to email", "رد على الإيميل"
+    -> operation: "reply_email" with message_id/body in extra_params
+
+YOUTUBE OPERATIONS:
+- Keywords: "youtube search", "search on youtube", "find videos", "youtube video", "video on youtube",
+  "search youtube", "look up on youtube", "find on youtube", "ابحث على يوتيوب", "دور على فيديو",
+  "what videos are there", "find a video about", "youtube for"
+    -> operation: "youtube_search" with query in extra_params
+- Keywords: "youtube info", "video info", "how many views", "video details", "video statistics",
+  "likes on video", "who made this video", "channel info", "video duration", "video description",
+  "كم مشاهدة", "معلومات الفيديو"
+    -> operation: "youtube_video_info" with video_url in extra_params
+- Keywords: "my youtube subscriptions", "channels I follow", "subscribed channels"
+    -> operation: "youtube_subscriptions" with max_results in extra_params
+- Keywords: "youtube trending", "trending videos", "what's trending", "popular videos"
+    -> operation: "youtube_search" with query: "trending" in extra_params
+- Keywords: "youtube comments", "video comments", "comments on the video"
+    -> operation: "youtube_video_info" with video_url in extra_params (comments are included in info)
+
+GOOGLE CALENDAR OPERATIONS:
+- Keywords: "create event", "add event", "schedule", "calendar", "meeting", "appointment",
+  "set a reminder", "add to calendar", "book a slot", "put it in my calendar", "remind me",
+  "schedule a call", "اعمل موعد", "ضيف حاجة في التقويم", "حدد موعد"
+    -> operation: "calendar_create" with title/start_time/end_time/description in extra_params
+- Keywords: "list events", "show calendar", "upcoming events", "my calendar", "upcoming meetings",
+  "what's on my calendar", "do I have anything", "what are my plans", "show my schedule",
+  "what meetings do I have", "إيه اللي عندي", "شوف تقويمي", "مواعيدي"
+    -> operation: "calendar_list" with max_results in extra_params
+- Keywords: "delete event", "cancel meeting", "remove appointment", "امسح الموعد", "الغ الاجتماع"
+    -> operation: "calendar_delete" with event_id in extra_params
+- Keywords: "update event", "reschedule", "change meeting time", "edit appointment",
+  "move the meeting", "غير موعد", "عدل الحدث"
+    -> operation: "calendar_update" with event_id/updated fields in extra_params
+- Keywords: "get event", "event details", "what time is the meeting", "تفاصيل الحدث"
+    -> operation: "calendar_get" with event_id in extra_params
+
+GOOGLE DRIVE OPERATIONS:
+- Keywords: "upload file", "upload to drive", "save to drive", "drive upload", "put file on drive",
+  "store on drive", "ارفع ملف", "احفظ على درايف"
+    -> operation: "drive_upload" with file_path/parent_folder_id in extra_params
+- Keywords: "list files", "my drive files", "files on drive", "drive list", "show my files",
+  "what files do I have", "my documents", "show drive", "browse drive", "ملفاتي", "شوف درايف"
+    -> operation: "drive_list" with max_results in extra_params
+- Keywords: "search files", "find file", "find document", "look for file", "search my drive",
+  "search in drive", "do I have a file", "دور على ملف", "ابحث في درايف", "find in my files",
+  "search in my files", "look in drive", "is there a file"
+    -> operation: "drive_search" with query in extra_params
+- Keywords: "download file", "get file from drive", "fetch from drive", "حمل الملف", "جيب الملف"
+    -> operation: "drive_download" with file_id/destination_path in extra_params
+- Keywords: "delete file from drive", "remove from drive", "امسح من درايف"
+    -> operation: "drive_delete" with file_id in extra_params
+- Keywords: "share file", "share on drive", "give access to file", "شارك الملف"
+    -> operation: "drive_share" with file_id/email/role in extra_params
+- Keywords: "create folder", "make folder on drive", "new folder in drive", "اعمل فولدر"
+    -> operation: "drive_create_folder" with name/parent_folder_id in extra_params
+- Keywords: "rename file", "rename on drive", "change file name", "غير اسم الملف"
+    -> operation: "drive_rename" with file_id/new_name in extra_params
+- Keywords: "move file", "move to folder", "نقل الملف"
+    -> operation: "drive_move" with file_id/new_parent_id in extra_params
+
+BROWSER COOKIE INJECTION (for Google web automation):
+- Keywords: "access google", "login to google", "google credentials", "browser login",
+  "use my google account", "authenticate google", "sign in to google"
+    -> operation: "get_browser_cookies" (enables seamless Google property access without UI login)
+
+ROUTING RULES:
+1. ALWAYS prefer API operations (Gmail, YouTube, Calendar, Drive) over browser automation
+2. API operations are ATOMIC, RELIABLE, and FASTER than UI automation
+3. Only use browser automation if user explicitly asks to "watch" a video, "see" calendar UI, etc.
+4. For API operations, set: target_agent: "api", context: "web", web_params: {}
+5. Example: User says "Search YouTube for cat videos" ->
+     {
+         "target_agent": "api",
+         "operation": "youtube_search",
+         "ai_prompt": "Search YouTube for cat videos and return results",
+         "extra_params": {"operation": "youtube_search", "query": "cat videos"},
+         "web_params": {}
+     }
+6. Example: User says "Find the file report.pdf on my Drive" ->
+     {
+         "target_agent": "api",
+         "operation": "drive_search",
+         "ai_prompt": "Search Google Drive for a file named report.pdf",
+         "extra_params": {"operation": "drive_search", "query": "report.pdf"},
+         "web_params": {}
+     }
+
+HYBRID WORKFLOWS:
+- Search YouTube (API) -> Extract results (reasoning) -> Watch in browser (action) is a valid 3-task flow
+- But never duplicate: don't search YouTube both via API AND browser automation in same task plan
+
+Examples of ACTION tasks:
+- "Open the file worksheet.txt" -> action
+- "Read text from the file" -> action
+- "Open Notepad" -> action
+- "Click the submit button" -> action
+- "Navigate to google.com" -> action
+- "Type 'hello' in the search box" -> action
+
+# TASK STRUCTURE
+
+Each task must have:
+- ai_prompt: Natural language instruction (CRITICAL: this is used by RAG to determine URLs and selectors)
+- goal: The SAME high-level goal string for the entire task plan (must be identical in all tasks)
+- device: "desktop" or "mobile"
+- context: "local" or "web"
+- target_agent: "action" or "reasoning" or "language" or "api"
+- extra_params: Additional data (app_name, file_path, operation, url, etc.)
+- web_params: Web-specific parameters
+- depends_on: task_id of prerequisite task
+- success_message: (REQUIRED) User-friendly message to vocalize/display if task succeeds
+- failure_message: (REQUIRED) User-friendly message to vocalize/display if task fails
+
+# WEB_PARAMS STRUCTURE (for context: "web")
+
+Do NOT hardcode CSS selectors or wait strategies. The execution layer uses RAG to determine selectors and interaction strategies from ai_prompt.
+You MAY construct homepage URLs for well-known sites (Google, YouTube, Gmail, Amazon, etc.).
+Do NOT construct search URLs for any site. For searches, navigate to the site homepage first and then use interaction tasks to enter the query and submit.
+For unknown sites, put enough detail in ai_prompt and let RAG resolve navigation.
+
+SEARCH WORKFLOW RULES:
+- "open google and search for X" -> task 1: navigate to https://www.google.com, task 2: type X in the search box and submit (press Enter or click Search).
+- "search for X on Amazon" -> task 1: navigate to https://www.amazon.com, task 2: type X in the search box and submit.
+- If a browser tab is already open on the target site, skip the navigation step and only perform the search input + submit.
+
+CRITICAL DISTINCTIONS:
+- "open google and search for X" -> Google search (multi-step), NOT YouTube
+- "play X" / "watch X" -> YouTube search (multi-step), NOT Google
+- "search for X" without mentioning a specific site -> default to Google search (multi-step)
+- "search youtube for X" -> YouTube search (multi-step)
+- "open the link named X" / "click on X" / "open the X result" WHEN A PAGE IS ALREADY OPEN -> CLICK on the current page, do NOT guess a URL
+- Only construct navigation URLs for well-known site homepages or when the user provides an explicit URL
+
+SEARCH DESTINATION AWARENESS (IMPORTANT):
+Some sites navigate directly to the content page after a search (no results list).
+Examples: Wikipedia, dictionary sites, documentation sites, encyclopedias.
+Other sites show a results list first that requires a click (Google, YouTube, Amazon, Bing).
+
+RULE: After any search, check what URL the browser is now on.
+- If the URL already contains the article/content (e.g., /wiki/Topic, /word/Topic, /docs/Topic) -> the browser is already on content. Do NOT generate a "click first result" task. Go directly to extraction.
+- If the URL is a search results page (e.g., /search?q=, /results?, /find?) -> generate a click task to open the first result, THEN extract.
+
+HOW TO DETERMINE WHICH CASE APPLIES AT DECOMPOSITION TIME:
+- If the user says "search [site] for X and read/extract/get..." and the site is known to go direct (Wikipedia, MDN, dictionaries) -> 3-task plan: navigate -> search -> extract
+- If the user says "search [site] for X and read/extract/get..." and the site shows results first (Google, YouTube, Amazon) -> 4-task plan: navigate -> search -> click result -> extract
+- If unsure -> default to the 4-task pattern (safer, the click will be a no-op if already on content)
+
+For navigation tasks WITH a known URL (explicit URL or homepage URL only):
+{
+    "action": "navigate",
+    "url": "<explicit URL or homepage URL>"
+}
+extra_params must ALSO include: {"action": "navigate", "url": "<same URL>"}
+
+Never encode a search query into the URL for search tasks.
+
+For navigation tasks WITHOUT a known URL (unknown/unfamiliar sites):
+{
+    "action": "navigate"
+}
+Put the site name or description in ai_prompt — RAG will resolve the URL.
+
+For interaction tasks (click, fill):
+{
+    "action": "fill",
+    "text": "search query"
+}
+
+For extraction tasks:
+{
+    "action": "extract"
+}
+
+Summary:
+- DO construct homepage URLs for well-known sites (Google, YouTube, Gmail, Amazon, etc.)
+- DO use homepage navigation + search box interaction for any search
+- DO put descriptive text in ai_prompt for RAG to use
+- Do not hardcode CSS selectors — RAG finds them from the live page
+- Do not hardcode wait strategies — the execution layer handles timing
+- Do not guess URLs for unknown sites — let RAG resolve from ai_prompt
+
+# CRITICAL RULES
+
+1. One action per task - never combine multiple actions
+2. Explicit dependencies - if task B needs task A's output, set "depends_on"
+3. Descriptive prompts - ai_prompt should be detailed enough for RAG to understand
+4. Correct context - web tasks get context: "web", desktop tasks get "local"
+5. Minimal extra_params - ONLY include action type and text (for fill), nothing else
+6. Include URLs for well-known site homepages or explicit URLs only - Do NOT construct search URLs. Use a multi-step flow (open site -> search input -> submit).
+7. NO selectors - NEVER hardcode CSS selectors, let RAG find them from ai_prompt
+8. Empty web_params - For local tasks, set web_params: {}
+9. Include confirmation steps - For configuration tasks (alarms, forms, settings), always add a final task to confirm/save changes
+10. Content generation = reasoning - Writing, summarizing, translating, or any creative/analytical task MUST use target_agent: "reasoning"
+11. Shared goal - Every task in the output must include a non-empty "goal" and it must be exactly the same across all tasks in that decomposition
+12. Research communication - For informational or research queries (e.g., 'check the weather', 'latest news', 'nearest pharmacy'), ensuring the result is communicated back to the disabled user is critical. You MUST include a final task with target_agent: "reasoning" that depends on the search results extracted and returned by an "action" agent content extraction task and formats them into a natural, helpful conversational response.
+13. Confirmation for sensitive actions – When a task generates content that will be sent or committed (e.g., composing an email then sending it, sending a message, submitting a form), you MUST insert a confirmation task AFTER generation but BEFORE the final send action. NOTE: This ONLY applies to reasoning tasks that generate content to be sent/committed. It does NOT apply to pure action tasks (e.g., "set an alarm for 7 am" does NOT require confirmation because it's a direct action with no generated content).
+        - target_agent: "language"
+        - ai_prompt: "(e.g., Read out the generated content. Ask the user to confirm or critique this task. Wait for their response.)"
+        - extra_params: Must contain {"input_from": "<generation_task_id>"} so the language agent actually receives the text to read out.
+        - depends_on: the generation task
+    - The send task must depend on the confirmation task.
+    - If a user replies with a critique or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending.
+    - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+
+============================
+EXAMPLES (DESKTOP/WEB/EMAIL)
+============================
+
+## Example 0: Browser Navigation — Google Search (Multi-step)
+
+User: "open google and search for web automation"
+
+- task_id: task_1
+    goal: open google and search for web automation
+    ai_prompt: Navigate to https://www.google.com
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.google.com"
+    web_params:
+        action: navigate
+        url: "https://www.google.com"
+    success_message: "Google homepage loaded successfully"
+    failure_message: "Failed to open Google. Please check your internet connection"
+    depends_on: null
+
+- task_id: task_2
+    goal: open google and search for web automation
+    ai_prompt: Type "web automation" in the Google search box and submit the search (press Enter or click Search)
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "web automation"
+    success_message: "Search submitted successfully"
+    failure_message: "Failed to submit the search. Please try again"
+    depends_on: ["task_1"]
+
+EXPLANATION: Do NOT hardcode search URLs. Open the homepage first, then perform the search via the search box.
+
+## Example 0-DIRECT: Search on a site that navigates directly to content (no results page)
+
+User: "search Wikipedia for artificial intelligence and read the first paragraph"
+(Same pattern applies to: dictionary lookups, documentation sites, encyclopedia searches)
+
+- task_id: task_1
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Navigate to https://www.wikipedia.org
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.wikipedia.org"
+    web_params:
+        action: navigate
+        url: "https://www.wikipedia.org"
+    success_message: "Site loaded successfully"
+    failure_message: "Could not reach the site"
+    depends_on: null
+
+- task_id: task_2
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Type "artificial intelligence" in the search box and press Enter to submit
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "artificial intelligence"
+    success_message: "Search submitted, content page loaded"
+    failure_message: "Search failed"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Search for artificial intelligence and read the first paragraph
+    ai_prompt: Extract the full text of the first paragraph from the article page. Return only the raw paragraph text without formatting or metadata.
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: extract
+    success_message: "First paragraph extracted successfully"
+    failure_message: "Could not extract paragraph text"
+    depends_on: ["task_2"]
+
+EXPLANATION: This site's search navigates directly to the content page (no intermediate results list).
+After task_2 the browser is already on the article, so task_3 extracts immediately.
+NEVER generate a "click first result" task when the search already landed on content.
+Key signal: URL contains a content path (/wiki/Topic, /docs/Topic, /word/Topic) rather than a query string (/search?q=Topic).
+
+## Example 0-RESULTS: Search on a site that shows a results list first
+
+User: "search Google for artificial intelligence and read the first result"
+
+- task_id: task_1
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Navigate to https://www.google.com
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.google.com"
+    web_params:
+        action: navigate
+        url: "https://www.google.com"
+    success_message: "Google loaded"
+    failure_message: "Could not reach Google"
+    depends_on: null
+
+- task_id: task_2
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Type "artificial intelligence" in the Google search box and press Enter
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "artificial intelligence"
+    success_message: "Search results loaded"
+    failure_message: "Search failed"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Click on the first organic search result link to open the page
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: click
+    success_message: "Opened first result"
+    failure_message: "Could not click first result"
+    depends_on: ["task_2"]
+
+- task_id: task_4
+    goal: Search Google for artificial intelligence and read the first result
+    ai_prompt: Extract the main content or first paragraph from the opened page. Return only the raw text.
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: extract
+    success_message: "Content extracted successfully"
+    failure_message: "Could not extract content"
+    depends_on: ["task_3"]
+
+EXPLANATION: Google shows a results list, so a click task is required before extraction.
+Signal: URL after search is a query string (/search?q=Topic) rather than a content path.
+
+## Example 0b: Browser Navigation — Play/Watch Video
+
+User: "play relaxing music"
+
+- task_id: task_1
+    goal: play relaxing music
+    ai_prompt: Navigate to https://www.youtube.com
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params:
+        action: navigate
+        url: "https://www.youtube.com"
+    web_params:
+        action: navigate
+        url: "https://www.youtube.com"
+    success_message: "YouTube opened successfully"
+    failure_message: "Could not reach YouTube. Check your connection and try again"
+    depends_on: null
+
+- task_id: task_2
+    goal: play relaxing music
+    ai_prompt: Type "relaxing music" in the YouTube search box and submit the search (press Enter or click Search)
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: "relaxing music"
+    success_message: "YouTube search submitted"
+    failure_message: "Failed to submit the YouTube search"
+    depends_on: ["task_1"]
+
+EXPLANATION: "play" implies video/music, but searches must be multi-step (open site, then search).
+
+
+
+## Example 0c: YouTube API Search (get structured results)
+
+User: "search youtube for cat videos and give me the top 5 results"
+
+- task_id: task_1
+    goal: search youtube for cat videos and give me the top 5 results
+    ai_prompt: Search YouTube for cat videos and return top 5 results
+    device: desktop
+    context: web
+    target_agent: api
+    extra_params:
+        operation: youtube_search
+        query: "cat videos"
+        max_results: 5
+    web_params: {}
+    success_message: "Found top 5 cat videos. Here are the results:"
+    failure_message: "YouTube search failed. Please check your internet connection"
+    depends_on: null
+
+EXPLANATION: When the user wants structured results (list of videos, titles, etc.) use target_agent: "api" with operation: "youtube_search". When they just want to watch/play, use target_agent: "action" with a YouTube URL (see Example 0b).
+
+## Example 0d: Click a Link on the Current Page
+
+Browser is currently open on: https://www.google.com/search?q=web+automation+papers
+User: "open the link named Cybernaut"
+
+- task_id: task_1
+    goal: open the link named Cybernaut
+    ai_prompt: Click on the link with text "Cybernaut" on the current page
+    device: desktop
+    context: web
+    target_agent: action
+    extra_params: {}
+    web_params:
+        action: click
+    success_message: "Opened Cybernaut link. Page loaded successfully"
+    failure_message: "Could not find or click the Cybernaut link. Please try again"
+    depends_on: null
+
+EXPLANATION: The user is referring to a link VISIBLE on the current Google search results page. Do NOT guess a URL like "https://www.cybernaut.com" — the actual href is unknown. Instead, generate a CLICK task and let the execution layer find the link by its text. This applies whenever the user says "open the link named X", "click on X", "open the X result", etc. while a page is already open.
+
+## Example 1: Simple Desktop Task
+
+User: "Open Notepad"
+
+- task_id: task_1
+    goal: Open Notepad
+    ai_prompt: Open Notepad application
+    device: desktop
+    context: local
+    target_agent: action
+    extra_params:
+        app_name: notepad
+    web_params: {}
+    success_message: "Notepad opened successfully"
+    failure_message: "Failed to open Notepad. Please try again"
+    depends_on: null
+
+## Example 2: Login Task (ANY WEBSITE)
+
+User: "Login to Gmail with user@example.com and password mypass123"
+
+- task_id: task_1
+    goal: Log in to Gmail with the provided credentials
+    ai_prompt: Navigate to Gmail login page
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: navigate
+    success_message: "Gmail login page loaded"
+    failure_message: "Could not reach Gmail login page"
+    depends_on: null
+
+- task_id: task_2
+    goal: Log in to Gmail with the provided credentials
+    ai_prompt: Fill the email or username field with user@example.com
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: user@example.com
+    success_message: "Email address entered"
+    failure_message: "Could not enter email address. Please try again"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Log in to Gmail with the provided credentials
+    ai_prompt: Fill the password field with mypass123
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: fill
+        text: mypass123
+    success_message: "Password entered"
+    failure_message: "Could not enter password. Please try again"
+    depends_on: ["task_2"]
+
+- task_id: task_4
+    goal: Log in to Gmail with the provided credentials
+    ai_prompt: Click the Sign In or Login submit button
+    device: desktop
+    context: web
+    target_agent: action
+    web_params:
+        action: click
+    success_message: "Logged in to Gmail successfully"
+    failure_message: "Login failed. Please check your credentials and try again"
+    depends_on: ["task_3"]
+
+## Example 5: Mixed Action + Reasoning (Content Generation)
+
+User: "Open Notepad and write me a scary story"
+
+- task_id: task_1
+    goal: Open Notepad and produce a scary story in it
+    ai_prompt: Open Notepad application
+    device: desktop
+    context: local
+    target_agent: action
+    extra_params:
+        app_name: notepad
+    web_params: {}
+    success_message: "Notepad opened successfully"
+    failure_message: "Failed to open Notepad"
+    depends_on: null
+
+- task_id: task_2
+    goal: Open Notepad and produce a scary story in it
+    ai_prompt: Write a very scary story
+    device: desktop
+    context: local
+    target_agent: reasoning
+    extra_params: {}
+    web_params: {}
+    success_message: "Story written successfully"
+    failure_message: "Failed to write story. Please try again"
+    depends_on: ["task_1"]
+
+- task_id: task_3
+    goal: Open Notepad and produce a scary story in it
+    ai_prompt: Confirm the generated story with the user. Read it out loud and ask if they want to proceed with typing it into Notepad or make changes.
+    device: desktop
+    context: local
+    target_agent: language
+    extra_params:
+            input_from: "task_2"
+    web_params: {}
+    depends_on: ["task_2"]
+
+- task_id: task_4
+    goal: Open Notepad and produce a scary story in it
+    ai_prompt: Type the generated story text into the active Notepad window
+    device: desktop
+    context: local
+    target_agent: action
+    extra_params: {}
+    web_params: {}
+    success_message: "Story pasted into Notepad. Check it out!"
+    failure_message: "Failed to type story into Notepad"
+    depends_on: ["task_3"]
+
+============================
+SUCCESS/FAILURE MESSAGE RULES
+============================
+- Every task MUST have both success_message and failure_message
+- Messages should be brief (1-2 sentences), user-friendly, and action-oriented
+- Success messages should convey what was accomplished (e.g., "Email sent to Sara")
+- Failure messages should suggest next steps (e.g., "Check your connection and retry")
+- These messages will be vocalized to the user via thinking steps as tasks execute
+- Use the user's language only if confirmed in conversation history
+
+============================
+OUTPUT RULES
+============================
+
+Return ONLY a valid JSON array of tasks (no markdown, no explanations, no extra text before or after).  
+Follow this exact schema for each task object:
+
+[
+  {{
+    "task_id": <string, unique>,
+    "goal": <string, identical for all tasks in this decomposition>,
+    "ai_prompt": <string>,
+    "device": "desktop",
+    "context": "local" | "web",
+    "target_agent": "action" | "reasoning" | "language" | "email",
+    "extra_params": <object>,
+    "web_params": <object>,
+    "depends_on": <array of strings | null>,
+    "success_message": <string, required>,
+    "failure_message": <string, required>
+  }},
+  ...
+]
+
+IMPORTANT:  
+- Every task MUST include both `success_message` and `failure_message` (short, user‑friendly sentences).  
+- Do NOT output any text outside the JSON array.  
+- Do NOT wrap the JSON in ````json```` fences – return raw JSON.
+
+Generate the task decomposition now:"""
+
+
+def _get_mixed_decomposition_prompt_sop() -> str:
+        return """
+============================
+MIXED COORDINATOR SOP (DESKTOP + MOBILE)
+============================
+
+You are decomposing tasks for MIXED cross-platform execution.
+
+GOAL:
+- Produce a single dependency graph where each task is explicitly assigned to either desktop or mobile.
+- Use desktop for browser/API-heavy tasks when appropriate.
+- Use mobile for app-local tasks and phone-native operations.
+
+HARD ROUTING RULES:
+1. Every task MUST set device to either "desktop" or "mobile" (never "mixed").
+2. For device="mobile", context MUST be "local" and target_agent MUST NOT be "email".
+3. For device="desktop", context may be "web" or "local".
+4. Keep one action per task with strict dependencies.
+5. If a task on one device needs output from another device, set explicit depends_on and include handoff metadata in extra_params.
+
+TARGET AGENTS:
+- action
+- reasoning
+- language
+- api (desktop-only)
+
+HANDOFF RULES (for cross-device control):
+- When cross-device control/session transfer is required, add an explicit preparation task first.
+- Use target_agent: "language" for confirmation before sensitive cross-device operations.
+- For cross-device steps, include extra_params fields:
+  - handoff_required: true
+  - handoff_from: "desktop" | "mobile"
+  - handoff_to: "desktop" | "mobile"
+  - handoff_reason: short sentence
+- Never include raw secrets or tokens in output.
+
+CONTEXT RULES:
+- device="desktop" and browser automation -> context="web"
+- device="desktop" and native app/OS action -> context="local"
+- device="mobile" -> context="local"
+
+OUTPUT RULES:
+- Return ONLY a JSON array.
+- Every task must include: task_id, goal, ai_prompt, device, context, target_agent, extra_params, web_params, depends_on, success_message, failure_message.
+- Keep the same non-empty goal across all tasks in the plan.
+
+Generate the task decomposition now:"""
+
+
+def _get_decomposition_prompt_sop(device_type: Literal["desktop", "mobile", "mixed"]) -> str:
+    """Return the device-specific SOP for task decomposition."""
+    if device_type == "mobile":
+        return _get_mobile_decomposition_prompt_sop()
+    if device_type == "mixed":
+        return _get_mixed_decomposition_prompt_sop()
+
+    return _get_desktop_decomposition_prompt_sop()
+
+
+def _apply_device_specific_task_routing(task_dicts: List[Dict[str, Any]], device_type: Literal["desktop", "mobile", "mixed"]) -> None:
+    """Enforce routing guarantees after LLM decomposition."""
+    for task in task_dicts:
+        if not isinstance(task, dict):
+            continue
+
+        extra_params = task.get("extra_params")
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+
+        target_agent = str(task.get("target_agent") or "action").strip().lower()
+        if target_agent == "langauge":
+            target_agent = "language"
+
+        if device_type == "mobile":
+            task["device"] = "mobile"
+            task["context"] = "local"
+
+            if target_agent == "api":
+                task["target_agent"] = "action"
+                extra_params["routing_note"] = "mobile_sop_api_agent_disabled"
+                if not task.get("ai_prompt"):
+                    task["ai_prompt"] = "Perform this requested operation in the mobile app using local automation."
+                task["web_params"] = {}
+            elif target_agent in {"action", "reasoning", "language"}:
+                task["target_agent"] = target_agent
+                task["web_params"] = {}
+            else:
+                task["target_agent"] = "action"
+                task["web_params"] = {}
+        elif device_type == "mixed":
+            task_device = str(task.get("device") or "desktop").strip().lower()
+            if task_device not in {"desktop", "mobile"}:
+                task_device = "desktop"
+            task["device"] = task_device
+
+            if task_device == "mobile":
+                task["context"] = "local"
+                if target_agent == "api":
+                    task["target_agent"] = "action"
+                    extra_params["routing_note"] = "mixed_sop_mobile_api_agent_disabled"
+                    task["web_params"] = {}
+                elif target_agent in {"action", "reasoning", "language"}:
+                    task["target_agent"] = target_agent
+                    task["web_params"] = {}
+                else:
+                    task["target_agent"] = "action"
+                    task["web_params"] = {}
+            else:
+                if target_agent in {"action", "reasoning", "language", "api"}:
+                    task["target_agent"] = target_agent
+                else:
+                    task["target_agent"] = "action"
+
+                task_context = str(task.get("context") or "local").strip().lower()
+                if task_context not in {"local", "web"}:
+                    task["context"] = "local"
+                else:
+                    task["context"] = task_context
+        else:
+            task["device"] = "desktop"
+            if target_agent == "email":
+                target_agent = "api"  # normalize legacy "email" target → api agent
+            if target_agent in {"action", "reasoning", "language", "api"}:
+                task["target_agent"] = target_agent
+            else:
+                task["target_agent"] = "action"
+
+        task["extra_params"] = extra_params
+
+
+def _normalize_cross_device_handoff_metadata(task_dict: Dict[str, Any]) -> None:
+    """Normalize and sanitize cross-device handoff metadata for mixed-mode tasks."""
+    if not isinstance(task_dict, dict):
+        return
+
+    extra_params = task_dict.get("extra_params")
+    if not isinstance(extra_params, dict):
+        extra_params = {}
+
+    handoff_required = bool(extra_params.get("handoff_required"))
+    if not handoff_required:
+        task_dict["extra_params"] = extra_params
+        return
+
+    current_device = str(task_dict.get("device") or "desktop").strip().lower()
+    handoff_from = str(extra_params.get("handoff_from") or current_device).strip().lower()
+    handoff_to = str(extra_params.get("handoff_to") or "desktop").strip().lower()
+
+    if handoff_from not in {"desktop", "mobile"}:
+        handoff_from = current_device if current_device in {"desktop", "mobile"} else "desktop"
+    if handoff_to not in {"desktop", "mobile"}:
+        handoff_to = "desktop"
+
+    if handoff_from == handoff_to:
+        extra_params["handoff_required"] = False
+        extra_params.pop("handoff_from", None)
+        extra_params.pop("handoff_to", None)
+        extra_params.pop("handoff_reason", None)
+        extra_params.pop("handoff_session_ref", None)
+        task_dict["extra_params"] = extra_params
+        return
+
+    # Never allow raw credentials/tokens to be emitted in decomposition metadata.
+    for sensitive_key in ("handoff_token", "session_token", "access_token", "refresh_token", "password", "secret"):
+        extra_params.pop(sensitive_key, None)
+
+    extra_params["handoff_required"] = True
+    extra_params["handoff_from"] = handoff_from
+    extra_params["handoff_to"] = handoff_to
+    if not str(extra_params.get("handoff_reason") or "").strip():
+        extra_params["handoff_reason"] = "Cross-device step requires secure handoff approval."
+    if not str(extra_params.get("handoff_session_ref") or "").strip():
+        extra_params["handoff_session_ref"] = f"handoff_{uuid.uuid4().hex[:12]}"
+
+    task_dict["extra_params"] = extra_params
 
 
 def _normalize_device_type(device_type: Optional[str]) -> Literal["desktop", "mobile", "mixed"]:
@@ -1563,7 +2678,7 @@ class ActionTask(BaseModel):
     # Interaction: {"action": "fill", "text": "search query"}  # Selector comes from RAG
     # Extraction: {"action": "extract"}  # Selector comes from RAG
     
-    target_agent: Literal["action", "reasoning", "language", "email"] = "action"
+    target_agent: Literal["action", "reasoning", "language", "email", "api"] = "action"
     depends_on: Optional[List[str]] = None
     success_message: Optional[str] = None
     failure_message: Optional[str] = None
@@ -1606,8 +2721,8 @@ def _extract_execution_clarification(task: ActionTask, result: TaskResult) -> Op
         }
 
     # Keyword-based popup/dialog detection only applies to execution tasks,
-    # NOT to API results (email agent) where content may contain false positives.
-    if getattr(task, 'target_agent', '') == 'email':
+    # NOT to API results (api agent) where content may contain false positives.
+    if getattr(task, 'target_agent', '') == 'api':
         return None
 
     # Safely access details field (may not exist for MobileTaskResult)
@@ -1702,7 +2817,7 @@ def _email_api_credentials_missing(result: TaskResult) -> bool:
 
 def _build_email_web_fallback_task(task: ActionTask) -> Optional[ActionTask]:
     """Create a web compose task when Gmail API credentials are missing for a send operation."""
-    if task.target_agent != "email":
+    if task.target_agent != "api":
         return None
 
     extra_params = task.extra_params or {}
@@ -2147,7 +3262,7 @@ async def decompose_task_to_actions(
             ai_prompt="Send an email via Gmail API",
             device="desktop",
             context="local",
-            target_agent="email",
+            target_agent="api",
             extra_params={
                 "operation": "send",
                 "to": direct_email_payload["to"],
@@ -2391,6 +3506,14 @@ Do NOT repeat the same task prompt, same approach, or same tool sequence.
                                 break
                     if extra_params.get("app_name"):
                         break
+
+            # Give mobile action tasks a larger runtime budget so the mobile
+            # execution layer does not cut off a task that is still making progress.
+            if normalized_device_type == "mobile" and str(t.get("target_agent") or "action").strip().lower() == "action":
+                timeout_seconds = extra_params.get("timeout_seconds")
+                if not isinstance(timeout_seconds, (int, float)):
+                    timeout_seconds = 0
+                extra_params["timeout_seconds"] = max(int(timeout_seconds), 120)
 
             # Give mobile action tasks a larger runtime budget so the mobile
             # execution layer does not cut off a task that is still making progress.
@@ -3484,8 +4607,15 @@ def create_coordinator_graph():
             # ✅ CAPTURE RICHEST AVAILABLE OUTPUT FOR CROSS-AGENT DATA SHARING
             # Prefer extracted_data (structured) over plain content when available
             output_to_store = None
+            web_action = (getattr(current_task, 'web_params', None) or {}).get('action')
+            extracted_payload = getattr(result, 'extracted_data', None)
+            if isinstance(extracted_payload, str):
+                extracted_payload = extracted_payload.strip() or None
             
-            if hasattr(result, 'extracted_data') and result.extracted_data:
+            if web_action == "extract" and extracted_payload:
+                output_to_store = json.dumps(extracted_payload) if isinstance(extracted_payload, dict) else str(extracted_payload)
+                logger.info(f"📊 Storing extracted_data from {current_task.task_id} (extract)")
+            elif hasattr(result, 'extracted_data') and result.extracted_data:
                 # Web extraction result - prefer rich structured data
                 output_to_store = json.dumps(result.extracted_data) if isinstance(result.extracted_data, dict) else str(result.extracted_data)
                 logger.info(f"📊 Storing extracted_data from {current_task.task_id} (structured)")
@@ -3498,9 +4628,23 @@ def create_coordinator_graph():
                 # task_outputs[current_task.task_id] = result.content
                             # Only store if there's actual content
                 cleaned_content = re.sub(r'\nPAGE_URL:https?://[^\s\n]+', '', cleaned_content).strip()
-                if cleaned_content:
+                if cleaned_content and cleaned_content.strip() != "(fallback_extract)":
                     output_to_store = cleaned_content
                     logger.info(f"💾 Storing cleaned content from {current_task.task_id}")
+                elif current_task.context == "web" and current_task.target_agent == "action":
+                    url_fallback = None
+                    url_match = re.search(r'PAGE_URL:(https?://[^\s\n]+)', result.content or "")
+                    if url_match:
+                        url_fallback = url_match.group(1).strip()
+                    if not url_fallback:
+                        nav_match = re.search(r'Navigated to (https?://[^\s\n]+)', result.content or "")
+                        if nav_match:
+                            url_fallback = nav_match.group(1).strip()
+                    if not url_fallback and session_id:
+                        url_fallback = _session_browser_state.get(session_id, {}).get("current_page_url")
+                    if url_fallback:
+                        output_to_store = f"PAGE_URL:{url_fallback}"
+                        logger.info(f"💾 Storing page URL from {current_task.task_id}")
             
             if output_to_store:
                 task_outputs[current_task.task_id] = output_to_store
@@ -3511,7 +4655,7 @@ def create_coordinator_graph():
                 # Cache YouTube results for "open the first/second result" follow-ups
                 if (
                     session_id
-                    and getattr(current_task, 'target_agent', '') == 'email'
+                    and getattr(current_task, 'target_agent', '') == 'api'
                     and (getattr(current_task, 'extra_params', {}) or {}).get('operation') == 'youtube_search'
                 ):
                     try:
@@ -4949,9 +6093,9 @@ async def execute_single_task(
     elif task.target_agent == "language":
         channel = Channels.COORDINATOR_TO_LANGUAGE
         receiver = AgentType.LANGUAGE
-    elif task.target_agent == "email":
-        channel = Channels.COORDINATOR_TO_EMAIL
-        receiver = AgentType.EMAIL
+    elif task.target_agent in {"email", "api"}:
+        channel = Channels.COORDINATOR_TO_API
+        receiver = AgentType.API
     else:
         channel = Channels.COORDINATOR_TO_REASONING
         receiver = AgentType.REASONING
@@ -5286,7 +6430,7 @@ async def start_coordinator_agent(broker_instance):
     
     async def handle_task_from_language(message: AgentMessage):
         """Handle task from Language Agent"""
-        
+
         if message.message_type != MessageType.TASK_REQUEST:
             return
 
@@ -5335,6 +6479,69 @@ async def start_coordinator_agent(broker_instance):
                 _session_stop_events.pop(session_id, None)
 
         if was_queued:
+            reference_text = _session_execution_context.get(session_id) or task_queue.current_task_id or ""
+            is_relevant = is_relevant_to_task(incoming_text, str(reference_text), threshold=0.24)
+            rel_score = relevance_score(incoming_text, str(reference_text))
+
+            if not is_relevant:
+                deferred_language_messages.append(message)
+                logger.info(
+                    f"🧾 Request deferred to global queue (relevance={rel_score:.2f}): {incoming_text[:80]}"
+                )
+
+                await broker_instance.publish(
+                    Channels.COORDINATOR_TO_LANGUAGE,
+                    AgentMessage(
+                        message_type=MessageType.TASK_RESPONSE,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=http_request_id,
+                        payload={
+                            "status": "processing",
+                            "response": (
+                                "Added to your global task queue. I will finish the active workflow first."
+                                if user_language != "ar"
+                                else "تمت إضافة طلبك إلى قائمة الانتظار العامة. سأكمل المهمة الحالية أولاً."
+                            ),
+                            "user_language": user_language,
+                        },
+                    ),
+                )
+                await broker_instance.publish(
+                    Channels.WEBSOCKET_OUTPUT,
+                    AgentMessage(
+                        message_type=MessageType.TASK_PROGRESS,
+                        sender=AgentType.COORDINATOR,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=http_request_id,
+                        payload={
+                            "ws_type": "task_progress",
+                            "stage": "coordinator",
+                            "phase": "queued_request",
+                            "active": True,
+                            "queue_snapshot": task_queue.snapshot(),
+                            "deferred_requests": len(deferred_language_messages),
+                        },
+                    ),
+                )
+                return
+
+            logger.info(
+                f"🔁 Relevant in-flight input detected (relevance={rel_score:.2f}). Interrupting current execution to re-plan with extra context."
+            )
+            await broker_instance.publish(
+                Channels.INTERRUPT_CONTROL,
+                AgentMessage(
+                    message_type=MessageType.INTERRUPT_COMMAND,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=session_id,
+                    payload={"command": "stop", "reason": "relevant_user_context", "user_id": user_id},
+                ),
+            )
+
             reference_text = _session_execution_context.get(session_id) or task_queue.current_task_id or ""
             is_relevant = is_relevant_to_task(incoming_text, str(reference_text), threshold=0.24)
             rel_score = relevance_score(incoming_text, str(reference_text))
@@ -5523,6 +6730,13 @@ async def start_coordinator_agent(broker_instance):
         - Silent failures when results arrive out of order
         """
         if message.message_type != MessageType.EXECUTION_RESPONSE:
+            return
+
+        sender = str(getattr(message, "sender", "") or "").lower()
+        if not sender or sender not in {"execution", "reasoning", "api"}:
+            logger.warning(
+                f"⚠️ Ignoring EXECUTION_RESPONSE from non-executor sender '{sender or 'unknown'}'"
+            )
             return
             
         task_id = message.task_id
@@ -5783,7 +6997,7 @@ async def start_coordinator_agent(broker_instance):
     # Subscribe to channels
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_task_from_language)
     broker_instance.subscribe(Channels.EXECUTION_TO_COORDINATOR, handle_action_result)
-    broker_instance.subscribe(Channels.EMAIL_TO_COORDINATOR, handle_action_result)
+    broker_instance.subscribe(Channels.API_TO_COORDINATOR, handle_action_result)
     broker_instance.subscribe(Channels.REASONING_TO_COORDINATOR, handle_action_result)
     # Also handle execution responses originating from the Language Agent
     broker_instance.subscribe(Channels.LANGUAGE_TO_COORDINATOR, handle_language_execution_result)

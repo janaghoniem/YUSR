@@ -490,7 +490,77 @@ Your goal is correctness, clarity, and usefulness to the system."""
             if extracted_json:
                 clean_response = extracted_json
 
-            # Parse JSON
+            # Fix literal newlines/tabs inside JSON string values
+            # (Mistral often returns bare newlines in strings, which is invalid JSON)
+            def _fix_newlines_in_json_strings(s: str) -> str:
+                """Escape bare newlines/tabs that appear inside JSON string values."""
+                out = []
+                in_str = False
+                esc = False
+                for ch in s:
+                    if esc:
+                        out.append(ch)
+                        esc = False
+                        continue
+                    if ch == '\\' and in_str:
+                        out.append(ch)
+                        esc = True
+                        continue
+                    if ch == '"':
+                        in_str = not in_str
+                        out.append(ch)
+                        continue
+                    if in_str:
+                        if ch == '\n':
+                            out.append('\\n')
+                            continue
+                        if ch == '\r':
+                            out.append('\\r')
+                            continue
+                        if ch == '\t':
+                            out.append('\\t')
+                            continue
+                    out.append(ch)
+                return ''.join(out)
+
+            clean_response = _fix_newlines_in_json_strings(clean_response)
+
+            # Strip JavaScript-style // comments outside of JSON string values
+            # (ministral-3b often adds "// Hypothetical placeholder" after values)
+            def _strip_js_comments(s: str) -> str:
+                out = []
+                i = 0
+                in_str = False
+                esc = False
+                while i < len(s):
+                    ch = s[i]
+                    if esc:
+                        out.append(ch)
+                        esc = False
+                        i += 1
+                        continue
+                    if ch == '\\' and in_str:
+                        out.append(ch)
+                        esc = True
+                        i += 1
+                        continue
+                    if ch == '"':
+                        in_str = not in_str
+                        out.append(ch)
+                        i += 1
+                        continue
+                    if not in_str and ch == '/' and i + 1 < len(s) and s[i + 1] == '/':
+                        # Skip until end of line
+                        while i < len(s) and s[i] != '\n':
+                            i += 1
+                        continue
+                    out.append(ch)
+                    i += 1
+                return ''.join(out)
+
+            clean_response = _strip_js_comments(clean_response)
+
+            # Parse JSON response
             try:
                 parsed_response = json.loads(clean_response)
                 parsed_response = self._sanitize_result_content(parsed_response)

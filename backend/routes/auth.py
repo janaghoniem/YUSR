@@ -14,6 +14,29 @@ from face_auth import face_auth
 from core.mongo import get_database
 from core.dependencies import logger
 
+
+_face_auth_instance = None
+
+
+def _get_face_auth():
+    """Lazy-load face auth to keep server startup fast and robust."""
+    global _face_auth_instance
+    if _face_auth_instance is None:
+        from face_auth import face_auth as loaded_face_auth
+
+        _face_auth_instance = loaded_face_auth
+    return _face_auth_instance
+
+
+class _FaceAuthProxy:
+    """Proxy that delays heavy face_auth import until first actual use."""
+
+    def __getattr__(self, name):
+        return getattr(_get_face_auth(), name)
+
+
+face_auth = _FaceAuthProxy()
+
 router = APIRouter()
 
 
@@ -583,4 +606,71 @@ async def update_user_profile(data: UpdateProfileData):
     except HTTPException:
         raise
     except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/api/email/oauth/authorize")
+async def google_oauth_authorize(user_id: str):
+    """
+    Generate a Google OAuth authorization URL for the given user_id.
+    The state->user_id mapping is stored in the running server process so the
+    callback can look it up correctly.
+    """
+    try:
+        from agents.api_agent import ApiAgent
+
+        agent = ApiAgent()
+        auth_url, state = await agent.initiate_oauth_flow(user_id)
+        if not auth_url:
+            raise HTTPException(status_code=500, detail="Failed to generate authorization URL.")
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=auth_url)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"❌ OAuth authorize failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/api/email/oauth/callback")
+async def google_oauth_callback(state: str = None, code: str = None, error: str = None):
+    """
+    Google OAuth2 callback endpoint.
+    Receives the authorization code from Google, exchanges it for tokens,
+    and stores credentials for the associated user.
+    """
+    if error:
+        logger.error(f"❌ OAuth callback received error from Google: {error}")
+        return {"status": "error", "detail": f"Google OAuth error: {error}"}
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing 'code' or 'state' parameter")
+
+    try:
+        from agents.api_agent import ApiAgent, _oauth_state_cache
+
+        user_id = _oauth_state_cache.get(state)
+        if not user_id:
+            logger.warning(f"⚠️ OAuth callback: unknown state '{state}'")
+            raise HTTPException(status_code=400, detail="Unknown or expired OAuth state. Please re-authorize.")
+
+        agent = ApiAgent()
+        success = await agent.handle_oauth_callback(user_id, code)
+
+        if success:
+            # Clean up used state
+            _oauth_state_cache.pop(state, None)
+            logger.info(f"✅ OAuth tokens stored for user {user_id}")
+            return {
+                "status": "ok",
+                "message": "Authorization successful! You can close this tab and return to the app.",
+                "user_id": user_id,
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to exchange authorization code for tokens.")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"❌ OAuth callback failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))

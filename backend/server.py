@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 app = FastAPI(
@@ -111,6 +111,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
 
     uvicorn.run(
+        "server:app",
         "server:app",
         host="0.0.0.0",
         port=port,

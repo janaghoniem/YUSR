@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_email_agent.py - Unit Tests for Email Agent
+test_api_agent.py - Unit Tests for API Agent (Gmail, YouTube, Calendar, Drive)
 
 Tests:
 - OAuth flow initialization
@@ -18,14 +18,18 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta
 
-# Import email agent components
-from agents.email_agent import (
-    EmailAgent, 
-    EmailTask, 
-    EmailResult,
+# Import api agent components
+from agents.api_agent import (
+    ApiAgent,
+    ApiTask,
+    ApiResult,
     TokenEncryptor,
     GmailCredential
 )
+# Backward-compat aliases (also verifies they exist)
+EmailAgent = ApiAgent
+EmailTask = ApiTask
+EmailResult = ApiResult
 
 
 class TestTokenEncryptor:
@@ -56,13 +60,13 @@ class TestTokenEncryptor:
         assert decrypted is None
 
 
-class TestEmailAgent:
-    """Test EmailAgent class"""
+class TestApiAgent:
+    """Test ApiAgent class"""
     
     @pytest.fixture
     def agent(self):
         """Fixture: Initialize email agent"""
-        return EmailAgent()
+        return ApiAgent()
     
     @pytest.mark.asyncio
     async def test_agent_initialization(self, agent):
@@ -75,7 +79,7 @@ class TestEmailAgent:
     async def test_oauth_flow_initiation(self, agent):
         """Test OAuth flow initiation"""
         with patch.dict(os.environ, {'GMAIL_CLIENT_ID': 'test_client_id'}):
-            with patch('agents.email_agent.InstalledAppFlow') as mock_flow:
+            with patch('agents.api_agent.InstalledAppFlow') as mock_flow:
                 mock_instance = MagicMock()
                 mock_flow.from_client_secrets_file.return_value = mock_instance
                 mock_instance.authorization_url.return_value = ('https://auth.url', 'state123')
@@ -89,7 +93,7 @@ class TestEmailAgent:
     @pytest.mark.asyncio
     async def test_send_email_success(self, agent):
         """Test successful email sending"""
-        with patch('agents.email_agent.build') as mock_build:
+        with patch('agents.api_agent.build') as mock_build:
             # Mock Gmail service
             mock_service = MagicMock()
             mock_build.return_value = mock_service
@@ -122,7 +126,7 @@ class TestEmailAgent:
     @pytest.mark.asyncio
     async def test_read_emails_success(self, agent):
         """Test reading unread emails"""
-        with patch('agents.email_agent.build') as mock_build:
+        with patch('agents.api_agent.build') as mock_build:
             mock_service = MagicMock()
             mock_build.return_value = mock_service
             
@@ -230,8 +234,8 @@ class TestEmailAgent:
             assert 'test_user' not in agent.credentials_cache
 
 
-class TestEmailTask:
-    """Test EmailTask model"""
+class TestApiTask:
+    """Test ApiTask model"""
     
     def test_email_task_creation(self):
         """Test creating email task"""
@@ -262,8 +266,8 @@ class TestEmailTask:
         assert task.query == 'from:important@example.com'
 
 
-class TestEmailResult:
-    """Test EmailResult model"""
+class TestApiResult:
+    """Test ApiResult model"""
     
     def test_success_result(self):
         """Test successful result"""
@@ -297,7 +301,7 @@ class TestIntegration:
     @pytest.mark.asyncio
     async def test_email_workflow_no_credentials(self):
         """Test that operations fail gracefully without credentials"""
-        agent = EmailAgent()
+        agent = ApiAgent()
         
         with patch.object(agent, '_get_credentials_mongodb', new_callable=AsyncMock) as mock_creds:
             mock_creds.return_value = None

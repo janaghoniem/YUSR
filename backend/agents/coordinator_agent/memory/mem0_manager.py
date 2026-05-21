@@ -886,7 +886,28 @@ class Mem0PreferenceManager:
                         logger.info(f"  ✅ Injected personal info: {pref.get('memory', '')[:60]}")
                 except Exception as e:
                     logger.debug(f"Fallback personal_info fetch failed: {e}")
-            combined_results = combined_results[:limit]
+            # ── Deduplicate near-identical results at read time ──────────────────
+            # Multiple near-identical memories (same email stored 6 times) inflate
+            # the context and confuse the LLM. Keep only one per semantic topic.
+            deduped_results = []
+            seen_fingerprints: set = set()
+            for _r in combined_results:
+                _text = (_r.get("memory") or "").strip().lower()
+                if not _text:
+                    deduped_results.append(_r)
+                    continue
+                # Build a short fingerprint: first 60 chars after stripping filler words
+                import re as _re_dedup
+                _fp = _re_dedup.sub(r'\b(is|are|was|the|a|an|has|have|user|email|address)\b', '', _text)
+                _fp = _re_dedup.sub(r'\s+', ' ', _fp).strip()[:60]
+                if _fp and _fp in seen_fingerprints:
+                    logger.debug(f"⏭️ Dedup: skipping near-duplicate result: '{_text[:60]}'")
+                    continue
+                if _fp:
+                    seen_fingerprints.add(_fp)
+                deduped_results.append(_r)
+
+            combined_results = deduped_results[:limit]
 
             logger.info(
                 f"✅ Found {len(combined_results)} relevant preferences "

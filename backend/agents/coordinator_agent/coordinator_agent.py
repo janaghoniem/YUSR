@@ -30,7 +30,7 @@ from agents.ICRL.icrl_buffer import ICRLBuffer
 from agents.ICRL.icrl_reward_bridge import compute_reward, summarize_task_attempt, classify_failure_type
 from agents.ICRL.icrl_prompt_builder import inject_icrl_into_decomposition_prompt, inject_icrl_into_execution_prompt
 
-ICRL_ENABLED = False
+ICRL_ENABLED = True  # Enabled for desktop; mobile is gated per-task below
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -2633,10 +2633,17 @@ def create_coordinator_graph():
                         logger.info(f"🔄 Found previous execution state")
                 except Exception as e:
                     logger.debug(f"No previous execution state: {e}")
-            
-            preferences_context = pref_mgr.get_relevant_preferences(
-                str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
-            )
+
+            # Use pre-fetched preferences from Language Agent when available —
+            # this avoids a redundant vector search for the same query.
+            _prefetched = str(raw_task.get("_prefetched_preferences", "")).strip()
+            if _prefetched:
+                logger.info("⚡ Using pre-fetched preferences from Language Agent (skipping duplicate Mem0 search)")
+                preferences_context = _prefetched
+            else:
+                preferences_context = pref_mgr.get_relevant_preferences(
+                    str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
+                )
 
             # ── Memory Fix 3: Strip credentials and conversation_history from coordinator context ──
             # T-M3/T-M4: Coordinator was embedding stored passwords into task
@@ -4070,11 +4077,13 @@ def create_coordinator_graph():
                     "search for ", "search ", "play ", "watch ",
                     "set alarm", "set an alarm", "find ",
                 )
-                _original_req_lower = str(
+                _original_req_raw = str(
                     state["input"].get("original_input",
                     state["input"].get("confirmation",
                     state["input"].get("action", "")))
-                ).lower().strip()
+                ).strip()
+                _sanitized_request = sanitize_confirmation_for_prompt(_original_req_raw)
+                _original_req_lower = _original_req_raw.lower()
                 # A request has a personal signal if it mentions the user specifically.
                 # Without a personal signal, there is nothing worth storing as a preference.
                 _has_personal_signal = any(
@@ -4316,6 +4325,15 @@ Extract now:"""
             icrl_round = current_state.get("_icrl_plan_round", 0)
 
             if not session_id or not results:
+                return {**current_state, "_icrl_plan_round": icrl_round}
+
+            # Skip ICRL retries for mobile plans — mobile task failures are
+            # usually environmental (app not installed, permissions) not plan errors.
+            _plan_device = str(
+                current_state.get("input", {}).get("device_type", "desktop")
+            ).strip().lower()
+            if _plan_device in {"mobile", "android", "ios", "phone", "tablet"}:
+                logger.debug("🔄 ICRL: Skipping plan retry — mobile device")
                 return {**current_state, "_icrl_plan_round": icrl_round}
 
             # Results may be TaskResult objects OR plain dicts depending on
@@ -4888,6 +4906,7 @@ async def execute_single_task(
             and task.target_agent == "action"
             and payload_status in ("success", "failed")
             and not _interrupted
+            and str(getattr(task, "device", "desktop")).strip().lower() != "mobile"
         ):       
             try:
                 icrl_buffer = _get_icrl_buffer(
@@ -4928,7 +4947,12 @@ async def execute_single_task(
     except asyncio.TimeoutError:
         logger.error(f"⏰ Task {task.task_id} timeout after {wait_timeout} seconds")
         # Record timeout as near-zero reward in ICRL buffer
-        if ICRL_ENABLED and session_id and task.target_agent == "action":
+        if (
+            ICRL_ENABLED
+            and session_id
+            and task.target_agent == "action"
+            and str(getattr(task, "device", "desktop")).strip().lower() != "mobile"
+        ):
             try:
                 icrl_buffer = _get_icrl_buffer(
                     session_id, task.task_id, task.goal or task.ai_prompt

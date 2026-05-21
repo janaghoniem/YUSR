@@ -1699,6 +1699,8 @@ async def start_language_agent(broker):
                 context_parts.append("# USER PREFERENCES")
                 for i, pref in enumerate(preferences[:3], 1):
                     context_parts.append(f"{i}. {pref}")
+            # Make context_parts visible outside the try block for the task payload
+            agent._last_context_parts = context_parts
             # conversation_history entries from Mem0 contain coordinator-internal
             # execution summaries ("User completed task: X. Apps used: Y.") that
             # are not useful for the Language Agent's clarification decisions and
@@ -1727,6 +1729,7 @@ async def start_language_agent(broker):
 
         except Exception as e:
             logger.error(f"❌ Failed to fetch memory: {e}")
+            agent._last_context_parts = []
 
         # ── Process request via Task Clarity Prompt ───────────────────────────
         response, is_complete, personal_info, output_language = agent.user_turn(input_text)
@@ -1851,6 +1854,11 @@ async def start_language_agent(broker):
 
             chat_title = generate_chat_title(input_text, response)
 
+            # Build a compact preferences string from what we already retrieved
+            # so the Coordinator can skip its own vector search for this request.
+            _prefetched_prefs = "\n".join(
+                getattr(agent, "_last_context_parts", [])
+            )
             task_msg = AgentMessage(
                 message_type=MessageType.TASK_REQUEST,
                 sender=AgentType.LANGUAGE,
@@ -1871,6 +1879,9 @@ async def start_language_agent(broker):
                     "first_input": input_text,
                     # Pass user profile so Coordinator/Reasoning can personalize
                     "user_profile": agent.user_profile,
+                    # Pre-fetched preferences — Coordinator skips its own vector search
+                    # when this is present, eliminating the duplicate Mem0 call.
+                    "_prefetched_preferences": _prefetched_prefs,
                 }
             )
             await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, task_msg)

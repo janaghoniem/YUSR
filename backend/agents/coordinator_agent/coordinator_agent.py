@@ -1555,6 +1555,7 @@ class ActionTask(BaseModel):
     device: Literal["desktop", "mobile"]
     context: Literal["local", "web"]
     extra_params: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    target_device_id: Optional[str] = None
     
     # Web-specific parameters - NO URLs here, execution layer resolves them
     web_params: Optional[Dict[str, Any]] = Field(default_factory=dict)
@@ -2080,6 +2081,7 @@ async def decompose_task_to_actions(
     """Decompose user request into ActionTask queue - URLs resolved by execution layer"""
     normalized_device_type = _normalize_device_type(device_type)
     request_text = _get_user_request_text(user_request)
+    selected_target_device_id = user_request.get("target_device_id")
 
     # ─────────────────────────────────────────────────────────────────────
     # PRE-CHECK: "open the first/second result" from cached YouTube results
@@ -2530,6 +2532,9 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
         # ── POST-PROCESS: Assign devices and insert handoff tasks ────────────
         task_dicts_for_handoff = [t.dict() for t in action_tasks]
         processed_task_dicts = assign_devices_and_handoffs(task_dicts_for_handoff, request_text)
+        if selected_target_device_id:
+            for task_dict in processed_task_dicts:
+                task_dict["target_device_id"] = selected_target_device_id
         action_tasks = [ActionTask(**task) for task in processed_task_dicts]
         logger.info(f"📋 After device assignment and handoffs: {len(action_tasks)} tasks")
         
@@ -2705,6 +2710,7 @@ def namespace_task_plan(tasks: List[ActionTask], namespace: str) -> List[ActionT
             extra_params=dict(task.extra_params or {}),
             web_params=dict(task.web_params or {}),
             target_agent=task.target_agent,
+            target_device_id=task.target_device_id,
             depends_on=mapped_deps,
         )
         input_from = cloned.extra_params.get("input_from")
@@ -2726,6 +2732,7 @@ def create_coordinator_graph():
         device_type = _normalize_device_type(raw_task.get("device_type", "desktop"))
 
         cross_device_target = raw_task.get("cross_device_target") or {}
+        selected_target_device_id = raw_task.get("target_device_id")
         target_platform = raw_task.get("target_device") or cross_device_target.get("target_platform")
         is_cross_platform = bool(cross_device_target) or device_type == "mixed"
 
@@ -3387,6 +3394,7 @@ def create_coordinator_graph():
                     user_profile,
                     user_id,
                     current_device_id,
+                    forced_target_device_id=getattr(current_task, "target_device_id", None),
                 )
             else:
                 result = await execute_single_task(
@@ -5138,6 +5146,7 @@ async def route_single_task(
     user_profile: Optional[Dict[str, Any]] = None,
     user_id: str = "default_user",
     source_device_id: str = "",
+    forced_target_device_id: Optional[str] = None,
 ) -> TaskResult:
     """Route a single task to the best matching remote device and wait for its result."""
     mgr = get_cross_platform_manager()
@@ -5148,11 +5157,18 @@ async def route_single_task(
             error="Cross-platform manager unavailable",
         )
 
-    target_device = await mgr._registry.get_target_device(  # noqa: SLF001 - coordinator needs registry lookup
-        user_id=user_id,
-        target_platform=_normalize_device_type(getattr(task, "device", "") or None),
-        exclude_device_id=source_device_id or None,
-    )
+    target_device = None
+    target_device_id = forced_target_device_id or getattr(task, "target_device_id", None)
+    if target_device_id:
+        device_context = await mgr._registry.find_device_context(target_device_id)  # noqa: SLF001 - coordinator needs registry lookup
+        if device_context and device_context.get("device"):
+            target_device = device_context["device"]
+    if not target_device:
+        target_device = await mgr._registry.get_target_device(  # noqa: SLF001 - coordinator needs registry lookup
+            user_id=user_id,
+            target_platform=_normalize_device_type(getattr(task, "device", "") or None),
+            exclude_device_id=source_device_id or None,
+        )
     if not target_device:
         _pending_remote_tasks.pop(task.task_id, None)
         return TaskResult(

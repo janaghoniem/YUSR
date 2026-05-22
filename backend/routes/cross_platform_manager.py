@@ -142,31 +142,36 @@ class DeviceRegistry:
         label: str = "",
     ) -> None:
         now = datetime.now(timezone.utc)
+        resolved_label = label or f"{platform.capitalize()} device"
         device_doc = {
             "device_id": device_id,
             "platform": platform,
-            "label": label or f"{platform.capitalize()} device",
+            "label": resolved_label,
             "session_id": session_id,
             "online": True,
             "last_seen": now,
         }
-        # Update existing entry
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self._col.update_one,
             {"user_id": user_id, "devices.device_id": device_id},
-            {"$set": {"devices.$": device_doc}},
-        )
-        # Or insert if first time
-        await asyncio.to_thread(
-            self._col.update_one,
-            {"user_id": user_id},
             {
-                "$setOnInsert": {"user_id": user_id},
-                "$addToSet": {"devices": device_doc},
+                "$set": {
+                    "devices.$.platform": platform,
+                    "devices.$.label": resolved_label,
+                    "devices.$.session_id": session_id,
+                    "devices.$.online": True,
+                    "devices.$.last_seen": now,
+                }
             },
-            True,  # upsert
         )
-        logger.info(f"📱 Registered device {device_id} ({platform}) for user {user_id}")
+        if result.matched_count == 0:
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"user_id": user_id},
+                {"$push": {"devices": device_doc}},
+                True,
+            )
+        logger.info(f"📱 Registered/updated device {device_id} ({platform}) for user {user_id}")
 
     async def set_device_online(self, user_id: str, device_id: str, session_id: str, online: bool) -> None:
         now = datetime.now(timezone.utc)
@@ -185,6 +190,27 @@ class DeviceRegistry:
         if not doc:
             return []
         return doc.get("devices", [])
+
+    async def get_matching_devices(
+        self,
+        user_id: str,
+        target_platform: Optional[str],
+        exclude_device_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        devices = await self.get_user_devices(user_id)
+        candidates = [
+            d for d in devices
+            if (target_platform is None or d.get("platform") == target_platform)
+            and d.get("device_id") != exclude_device_id
+        ]
+        candidates.sort(
+            key=lambda d: (
+                not bool(d.get("online", False)),
+                d.get("last_seen") or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+        return candidates
 
     async def find_device_context(self, device_id: str) -> Optional[Dict[str, Any]]:
         doc = await asyncio.to_thread(self._col.find_one, {"devices.device_id": device_id})

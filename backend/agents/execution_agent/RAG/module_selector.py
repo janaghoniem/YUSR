@@ -278,7 +278,7 @@ ACTIVE FILE RESOLUTION (do this first, every time):
 if "[ACTIVE FILE:" in PROMPT:
     active_file = "<extract path from [ACTIVE FILE: ...]>"
 else:
-    active_file = None  # word_tools will use latest .docx in docs folder
+    active_file = None  # No active file — must create new one for EDIT tasks
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -293,7 +293,11 @@ TASK → EXACT EXECUTION PATTERN:
     path = doc_create("<descriptive_name_from_task>")
     # DO NOT open. Stop here. Let next task do edits.
 
-[EDIT] task says "write", "add", "insert", "type", "put":
+[EDIT] task says "write", "add", "insert", "type", "put", "save":
+    ⚠️ CRITICAL: If active_file is None, MUST create new document first:
+    if active_file is None:
+        active_file = doc_create("<descriptive_name_for_content>")
+
     doc = doc_load(active_file)
     # chain only what the task asks for:
     doc = doc_add_heading(doc, "<text>", level=1)   # only if heading needed
@@ -301,16 +305,20 @@ TASK → EXACT EXECUTION PATTERN:
     doc = doc_add_table(doc, ["H1","H2"], [["r1c1","r1c2"]])  # only if table needed
     path = doc_save(doc, active_file)
 
-[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    # If task mentions "save", ALWAYS open the document after saving
+    if "save" in task_prompt.lower():
+        doc_open(active_file)
+
+[SAVE/CONFIRM] task says "press save", "click ok", "confirm":
     doc_open(active_file)
     # DO NOT call doc_save(). File is already saved. Just open it.
 
 RULES:
+- ⚠️ CRITICAL: For EDIT tasks, ALWAYS check if active_file is None BEFORE calling doc_load(). If None, call doc_create() first.
 - Always call doc_save() at the end of any EDIT task — never leave a doc unsaved
 - Never call doc_open() inside an EDIT task — doc_save() opens it automatically
 - Never hardcode folder paths — word_tools handles folder detection internally
 - doc_load() does not print anything — that is expected behaviour
-- If active_file is None and task is EDIT, call doc_create() first to get a path
 """
 ),
 "excel": ModuleGuidance(
@@ -339,7 +347,7 @@ ACTIVE FILE RESOLUTION (do this first, every time):
 if "[ACTIVE FILE:" in PROMPT:
     active_file = "<extract path from [ACTIVE FILE: ...]>"
 else:
-    active_file = None  # excel_tools will use latest .xlsx in excel folder
+    active_file = None  # No active file — must create new one for EDIT tasks
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -354,7 +362,11 @@ TASK → EXACT EXECUTION PATTERN:
     path = xl_create("<descriptive_name_from_task>")
     # DO NOT open. Stop here. Let next task do edits.
 
-[EDIT] task says "write", "fill", "add", "insert", "enter", "update":
+[EDIT] task says "write", "fill", "add", "insert", "enter", "update", "save":
+    ⚠️ CRITICAL: If active_file is None, MUST create new spreadsheet first:
+    if active_file is None:
+        active_file = xl_create("<descriptive_name_for_content>")
+
     wb = xl_load(active_file)
     ws = wb.active
     # chain only what the task asks for:
@@ -364,16 +376,20 @@ TASK → EXACT EXECUTION PATTERN:
     ws = xl_set_formula(ws, 1, 3, "=A1+B1")          # only if formula needed
     path = xl_save(wb, active_file)
 
-[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    # If task mentions "save", ALWAYS open the spreadsheet after saving
+    if "save" in task_prompt.lower():
+        xl_open(active_file)
+
+[SAVE/CONFIRM] task says "press save", "click ok", "confirm":
     xl_open(active_file)
     # DO NOT call xl_save(). File is already saved. Just open it.
 
 RULES:
+- ⚠️ CRITICAL: For EDIT tasks, ALWAYS check if active_file is None BEFORE calling xl_load(). If None, call xl_create() first.
 - Always call xl_save() at the end of any EDIT task — never leave a workbook unsaved
 - Never call xl_open() inside an EDIT task — xl_save() opens it automatically
 - Never hardcode folder paths — excel_tools handles folder detection internally
 - xl_load() does not print anything — that is expected behaviour
-- If active_file is None and task is EDIT, call xl_create() first to get a path
 - ws = wb.active must be called after xl_load() to get the worksheet
 """
 ),
@@ -404,7 +420,7 @@ ACTIVE FILE RESOLUTION (do this first, every time):
 if "[ACTIVE FILE:" in PROMPT:
     active_file = "<extract path from [ACTIVE FILE: ...]>"
 else:
-    active_file = None  # ppt_tools will use latest .pptx in ppts folder
+    active_file = None  # No active file — must create new one for EDIT tasks
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -419,7 +435,11 @@ TASK → EXACT EXECUTION PATTERN:
     path = ppt_create("<descriptive_name_from_task>")
     # DO NOT open. Stop here. Let next task do edits.
 
-[EDIT] task says "add slide", "insert slide", "write", "put", "type":
+[EDIT] task says "add slide", "insert slide", "write", "put", "type", "save":
+    ⚠️ CRITICAL: If active_file is None, MUST create new presentation first:
+    if active_file is None:
+        active_file = ppt_create("<descriptive_name_for_content>")
+
     prs = ppt_load(active_file)
     # chain only what the task asks for:
     prs = ppt_add_title_slide(prs, "<title>", "<subtitle>")      # only if title slide needed
@@ -427,16 +447,20 @@ TASK → EXACT EXECUTION PATTERN:
     prs = ppt_add_bullet_slide(prs, "<title>", ["b1","b2","b3"]) # only if bullet slide needed
     path = ppt_save(prs, active_file)
 
-[SAVE/CONFIRM] task says "save", "press save", "click ok", "confirm":
+    # If task mentions "save", ALWAYS open the presentation after saving
+    if "save" in task_prompt.lower():
+        ppt_open(active_file)
+
+[SAVE/CONFIRM] task says "press save", "click ok", "confirm":
     ppt_open(active_file)
     # DO NOT call ppt_save(). File is already saved. Just open it.
 
 RULES:
+- ⚠️ CRITICAL: For EDIT tasks, ALWAYS check if active_file is None BEFORE calling ppt_load(). If None, call ppt_create() first.
 - Always call ppt_save() at the end of any EDIT task — never leave a presentation unsaved
 - Never call ppt_open() inside an EDIT task — ppt_save() opens it automatically
 - Never hardcode folder paths — ppt_tools handles folder detection internally
 - ppt_load() does not print anything — that is expected behaviour
-- If active_file is None and task is EDIT, call ppt_create() first to get a path
 - Use ppt_add_title_slide() for the FIRST slide only — use ppt_add_content_slide() or ppt_add_bullet_slide() for all subsequent slides
 """
 ),

@@ -631,7 +631,7 @@ class FileSearch:
         self._indexer.save_cache(self._index)            # persist so next run is fast
         logger.debug(f"[Index] Added new entry: {path}")
 
-def find(self, query: str, force_refresh: bool = False) -> Dict[str, Any]:
+    def find(self, query: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Search for a file.
 

@@ -387,6 +387,7 @@ GENERAL RULES:
   - The send task must depend on the confirmation task.
   - If a user replies with a **critique** or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending. 
   - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+    - CRITICAL: When an action task comes AFTER a confirmation task (e.g., sending content after user confirms), the action task must ALSO include {"input_from": "<generation_task_id>"} to receive the ORIGINAL generated content, NOT the confirmation task's output. Example: if task_1 generates email, task_2 confirms it, then task_3 sends it, task_3 should have input_from: "task_1", not the confirmation task.
 
 # DEVICE & CONTEXT
 
@@ -856,6 +857,7 @@ Summary:
     - The send task must depend on the confirmation task.
     - If a user replies with a critique or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending.
     - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+    - CRITICAL: When an action task comes AFTER a confirmation task (e.g., typing/saving content after user confirms), the action task must ALSO include {"input_from": "<generation_task_id>"} to receive the ORIGINAL generated content, NOT the confirmation task's output. Example: if task_2 generates content, task_3 confirms it, then task_4 types it, task_4 should have input_from: "task_2", not the confirmation task.
 
 ============================
 EXAMPLES (DESKTOP/WEB/EMAIL)
@@ -1202,7 +1204,8 @@ User: "Open Notepad and write me a scary story"
     device: desktop
     context: local
     target_agent: action
-    extra_params: {}
+    extra_params:
+        input_from: "task_2"
     web_params: {}
     success_message: "Story pasted into Notepad. Check it out!"
     failure_message: "Failed to type story into Notepad"
@@ -1501,6 +1504,7 @@ GENERAL RULES:
   - The send task must depend on the confirmation task.
   - If a user replies with a **critique** or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending. 
   - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+    - CRITICAL: When an action task comes AFTER a confirmation task (e.g., sending content after user confirms), the action task must ALSO include {"input_from": "<generation_task_id>"} to receive the ORIGINAL generated content, NOT the confirmation task's output. Example: if task_1 generates email, task_2 confirms it, then task_3 sends it, task_3 should have input_from: "task_1", not the confirmation task.
 
 # DEVICE & CONTEXT
 
@@ -1903,6 +1907,7 @@ Summary:
     - The send task must depend on the confirmation task.
     - If a user replies with a critique or asks for revisions on previously generated content (e.g., "make it shorter", "sound more professional"), treat it as a NEW modification request. You MUST generate a fresh pipeline to revise the content (using target_agent: "reasoning" with the old content and user critique), fill the revised content, and once again append a language confirmation task before sending.
     - The Language Agent will handle the user interaction and signal approval or return the user's critique.
+    - CRITICAL: When an action task comes AFTER a confirmation task (e.g., typing/saving content after user confirms), the action task must ALSO include {"input_from": "<generation_task_id>"} to receive the ORIGINAL generated content, NOT the confirmation task's output. Example: if task_2 generates content, task_3 confirms it, then task_4 types it, task_4 should have input_from: "task_2", not the confirmation task.
 
 ============================
 EXAMPLES (DESKTOP/WEB/EMAIL)
@@ -2110,7 +2115,8 @@ User: "Open Notepad and write me a scary story"
     device: desktop
     context: local
     target_agent: action
-    extra_params: {}
+    extra_params:
+        input_from: "task_2"
     web_params: {}
     success_message: "Story pasted into Notepad. Check it out!"
     failure_message: "Failed to type story into Notepad"

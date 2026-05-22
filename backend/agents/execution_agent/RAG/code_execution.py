@@ -1183,6 +1183,7 @@ async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_p
             task_data = message.payload
             task_id = message.task_id or task_data.get('task_id', 'unknown')
             session_id = message.session_id
+            logger.info(f"🔧 EXECUTION AGENT received task {task_id} for session {session_id}")
             
             logger.info(f"🎯 Task received: {task_data.get('ai_prompt', 'Unknown')}")
             logger.info(f"   Context: {task_data.get('context', 'NO CONTEXT')}")
@@ -1387,6 +1388,8 @@ async def start_desktop_only_execution_agent(broker_instance, rag_system, sandbo
     async def handle_execution_request(message):
         try:
             task_data = message.payload
+            incoming_task_id = message.task_id or task_data.get('task_id', 'unknown')
+            logger.info(f"🔧 EXECUTION AGENT received task {incoming_task_id} for session {message.session_id}")
             task = ActionTask.from_dict(task_data)
             
             if task.context == "web":
@@ -1436,6 +1439,7 @@ async def start_simple_execution_agent(broker_instance):
             task_data = message.payload
             task_id = task_data.get('task_id', 'unknown')
             ai_prompt = task_data.get('ai_prompt', '')
+            logger.info(f"🔧 EXECUTION AGENT received task {task_id} for session {message.session_id}")
             
             logger.info(f"🎯 Fallback execution agent received task {task_id}: {ai_prompt[:50]}...")
             

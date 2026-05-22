@@ -293,6 +293,37 @@ async def get_pending_actions(device_id: str = Path(...)):
     return response
 
 
+@router.get("/cross-platform-tasks")
+async def get_cross_platform_tasks(
+    user_id: Optional[str] = Query(None),
+    device_id: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None),
+):
+    """Get pending cross-platform tasks for desktop polling clients.
+
+    Desktop clients poll this alias, while mobile clients keep using
+    /device/{device_id}/pending-actions. Both paths share the same claim logic.
+    """
+    if not device_id:
+        return {"tasks": [], "count": 0}
+
+    device_context = DEVICE_REGISTRY.get(device_id, {})
+    if user_id:
+        device_context = {**device_context, "user_id": user_id}
+    if session_id:
+        device_context = {**device_context, "session_id": session_id}
+    DEVICE_REGISTRY[device_id] = device_context
+
+    try:
+        await _refresh_device_context(device_id, device_context)
+        tasks = await _claim_cross_platform_actions(device_id)
+    except Exception as _poll_err:
+        logger.debug(f"⚠️ Cross-platform polling failed for {device_id}: {_poll_err}")
+        tasks = []
+
+    return {"tasks": tasks, "count": len(tasks)}
+
+
 @router.post("/{device_id}/action-result")
 async def receive_action_result(
     device_id: str = Path(...),

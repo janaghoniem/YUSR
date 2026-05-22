@@ -80,9 +80,32 @@ async def get_page_semantics_fallback(page) -> str:
                 
                 // Strategy 6: Common UI patterns
                 const clickableElements = Array.from(document.querySelectorAll('[onclick], [data-action]'));
+
+                const isVisible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0
+                        && s.display !== 'none'
+                        && s.visibility !== 'hidden'
+                        && s.opacity !== '0'
+                        && r.top < window.innerHeight
+                        && r.top >= -100;
+                };
+
+                const isAccessibilityWidget = (el) => {
+                    const text = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+                    const id = (el.id || '').toLowerCase();
+                    const cls = (el.className || '').toLowerCase();
+                    return /accessibility|acsb|visual.impairment|seizure|epileptic|dyslexia|adhd/i.test(text)
+                        || id.includes('acsb')
+                        || cls.includes('acsb');
+                };
                 
                 return {
-                    buttons: buttons.slice(0, 15).map(el => {
+                    buttons: buttons
+                        .filter(isVisible)
+                        .sort((a, b) => isAccessibilityWidget(a) - isAccessibilityWidget(b))
+                        .slice(0, 15).map(el => {
                         const s = getComputedStyle(el);
                         return {
                             text: el.textContent?.trim() || el.ariaLabel || el.title || el.getAttribute('data-tooltip') || 'Unnamed button',

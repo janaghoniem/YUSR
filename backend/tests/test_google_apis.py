@@ -1120,6 +1120,10 @@ class TestBrokerHandler:
         published_msg = call_args[0][1]
         assert published_msg.payload["needs_clarification"] is True
         assert published_msg.payload["metadata"]["email_api_credentials_missing"] is True
+        assert published_msg.payload["metadata"]["oauth_authorize_url"] == (
+            "http://localhost:8000/api/email/oauth/authorize?user_id=user_1"
+        )
+        assert "Open the API allow page here" in published_msg.payload["clarification_question"]
 
         task.cancel()
 

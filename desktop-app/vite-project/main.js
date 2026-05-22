@@ -3,7 +3,7 @@
 
 /* eslint-env node */
 // Add Menu and screen here
-import { app, BrowserWindow, ipcMain, Menu, screen } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, screen, shell } from "electron";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import path from "path";
@@ -262,6 +262,18 @@ ipcMain.handle("widget:exit", () => {
   } else {
     mainWindow.setBounds({ width: 900, height: 700 }, true);
     mainWindow.center();
+  }
+});
+
+// Allow renderer to ask main to open external URLs
+ipcMain.handle('open-external', async (_event, url) => {
+  try {
+    if (!url) return { ok: false, error: 'No URL provided' };
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    console.error('[open-external] failed to open', url, err);
+    return { ok: false, error: String(err) };
   }
 });
 

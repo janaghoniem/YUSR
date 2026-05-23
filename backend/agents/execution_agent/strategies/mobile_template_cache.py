@@ -107,7 +107,9 @@ _APP_KEYWORD_RULES: List[Tuple[Tuple[str, ...], str]] = [
       "open messages", "message input"), "messages"),
     # Email
     (("gmail", "compose email", "send email", "recipient", "subject",
-      "inbox", "email app", " email ", "open gmail"), "gmail"),
+            "inbox", "email app", " email ", "open gmail",
+            "composing", "composition", "compose a new", "start composing",
+            "new email composition"), "gmail"),
     # Clock / Alarm
     (("alarm", "clock app", "stopwatch", "timer", "open clock",
       "open the clock"), "clock"),
@@ -443,13 +445,25 @@ class ChromaTemplateCache:
     @staticmethod
     def _infer_task_type(task_text: str) -> str:
         t = task_text.lower()
-        if any(k in t for k in ("open ", "launch ", "start ")):
+        # Compose/new-email tasks must be "action" — they open a compose screen.
+        # Previously "start composing" matched "start " → "launch", which caused
+        # the is_launch_task fast-path to fire and just call app_start() instead
+        # of clicking the Compose FAB.
+        if any(k in t for k in ("compose", "composing", "composition",
+                                 "new email composition", "create new email")):
+            return "action"
+        # "find and tap" / "find and open" are navigate, not search
+        if any(k in t for k in ("find and tap", "find and open", "search for the chat")):
+            return "navigate"
+        if any(k in t for k in ("open ", "launch ", "start the ", "start ")):
             return "launch"
         if any(k in t for k in ("navigate", "go to", "tap the", "click")):
             return "navigate"
-        if any(k in t for k in ("fill", "type ", "enter ", "write ", "input ", "set the")):
+        if any(k in t for k in ("fill ", "type ", "enter ", "write ",
+                                 "input ", "set the alarm", "set the event",
+                                 "set the document")):
             return "fill"
-        if any(k in t for k in ("search for", "find", "look up")):
+        if any(k in t for k in ("search for", "look up")):
             return "search"
         if any(k in t for k in ("confirm", "press ok", "press save", "tap send",
                                  "tap the send", "click send", "click the send")):

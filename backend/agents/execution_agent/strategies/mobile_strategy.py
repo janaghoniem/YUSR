@@ -471,6 +471,34 @@ class ParameterExtractor:
 
         ParameterExtractor._extract_time(text, params)
         ParameterExtractor._extract_email(text, params)
+
+        # Extract doc_title BEFORE _extract_query and _extract_quoted so the
+        # value maps to doc_title, not search_query.
+        # Handles: "Type the title 'synapse' in the document title field"
+        #          "Set the document title to 'synapse'"
+        _doc_title_re = re.compile(
+            r"(?:title|name|rename)[^\'\"]*[\'\"]([ \w-]{1,100})[\'\"]"
+            r"|[\'\"]([ \w-]{1,100})[\'\"][^\'\"]*(?:title|document name)",
+            re.IGNORECASE,
+        )
+        _dt = _doc_title_re.search(text)
+        if _dt and not params.has("doc_title"):
+            _dt_val = (_dt.group(1) or _dt.group(2) or "").strip()
+            if _dt_val and _dt_val.lower() not in _TASK_LABEL_WORDS:
+                params.set("doc_title", _dt_val)
+
+        # Extract message_text before _extract_quoted to avoid the value being
+        # mapped to search_query when the task is about sending an SMS/WhatsApp.
+        _msg_re = re.compile(
+            r'(?:type|send|write|enter)\s+(?:the\s+)?(?:message\s+)?[\'\"](.*?)[\'\"]'
+            r'(?:\s+in\s+(?:the\s+)?(?:message|chat|field))?',
+            re.IGNORECASE,
+        )
+        _mg = _msg_re.search(text)
+        if _mg and not params.has("message_text"):
+            _mg_val = _mg.group(1).strip()
+            if _mg_val and _mg_val.lower() not in _TASK_LABEL_WORDS and len(_mg_val) >= 2:
+                params.set("message_text", _mg_val)
         ParameterExtractor._extract_query(text, params)  # FIX #1/#2 applied inside
 
         pm = _PHONE_RE.search(text)
@@ -674,8 +702,18 @@ class ParameterExtractor:
 
     @staticmethod
     def _extract_quoted(text: str, params: TaskParameters) -> None:
-        quoted = _QUOTED_RE.findall(text)
-        # Filter out UI button/label words — these are task instructions, not param values
+        # Use smarter quote extraction that handles apostrophes in contractions.
+        # The old _QUOTED_RE fired on the apostrophe in "you're", truncating
+        # "heyy haya hope you're doing well" to "heyy haya hope you".
+        #
+        # Strategy: double-quoted strings are always safe. Single-quoted strings
+        # only match when the opening quote is preceded by a word boundary and
+        # the closing quote is followed by whitespace/punctuation/end-of-string.
+        double_quoted = re.findall(r'"([^"]{2,300})"', text)
+        single_quoted = re.findall(
+            r"(?:(?<=\s)|(?<=^))\'([^\']{2,300})\'(?=\s|$|[,.:;!?])", text
+        )
+        quoted = double_quoted + single_quoted
         real_values = [
             q for q in quoted
             if q.lower().strip() not in _TASK_LABEL_WORDS and len(q.strip()) >= 2
@@ -1809,6 +1847,7 @@ class MobileCodeGenStrategy:
             and not any(k in task_lower for k in (
                 "search", "type", "navigate", "click", "set ", "press",
                 "find", "play", "send", "compose", "read",
+                "composing", "composition", "new email", "new document",
             ))
         )
 

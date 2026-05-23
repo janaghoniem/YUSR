@@ -1,5 +1,10 @@
+import asyncio
 import logging
 import os
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
@@ -109,12 +114,15 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", 8000))
     logger.info(f"🚀 Starting server on 0.0.0.0:{port}")
+    reload_enabled = sys.platform != "win32"
+    if not reload_enabled:
+        logger.info("ℹ️ Disabling uvicorn reload on Windows to keep the Proactor event loop for Playwright")
 
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=reload_enabled,
         log_level="info",
         access_log=True,
     )

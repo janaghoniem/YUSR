@@ -291,7 +291,12 @@ class PlaywrightLLM:
         
         messages = []
         if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            mistral_guard = (
+                "\n\nCRITICAL: If the AVAILABLE INTERACTIVE ELEMENTS section already lists the target "
+                "button/link/input, interact with it directly using locator(...).first or .nth(...). "
+                "Do NOT add wait_for_selector() for elements that are already present in the DOM."
+            )
+            messages.append({"role": "system", "content": system_prompt + mistral_guard})
         messages.append({"role": "user", "content": prompt})
         
         url = "https://api.mistral.ai/v1/chat/completions"
@@ -373,7 +378,7 @@ class PlaywrightRAGSystem:
         
         # ✅ FIX 2: Add debug call on first run
         if not hasattr(self, '_debugged'):
-            self.vectordb.debug_search(user_query)
+            self.vectordb.debug_search(cache_key or user_query)
             self._debugged = True  # Only debug once
         
         # Step 1: Retrieve relevant context
@@ -544,6 +549,7 @@ If the page inspector lists inputs or fields with an index hint like [nth=N], yo
 ❌ Incorrect: await page.locator('input[type="text"]').first.fill('value')
 
 When a visible label is present in the inspector (label='...'), prefer selectors that match label/aria-label first; if none exist, use the provided [nth=N] index.
+If the inspector already lists the target under BUTTONS, click it directly with a union locator (button/a/[role="button"]) instead of waiting for it to appear with wait_for_selector().
 
 📄 PDF VIEWER RULE:
 - Browser PDF toolbars are NOT in the DOM.
@@ -690,6 +696,9 @@ FINDING ELEMENTS BY VISUAL APPEARANCE (FIX 2)
 ================================================================
 When elements lack text or standard attributes, use visual/color-based locators.
 Page semantics now includes: color, backgroundColor, title, data-test-id, data-qa.
+
+For visible BUTTONS labels, prefer a union locator across real buttons, links, and role-based buttons, e.g.:
+    await page.locator('button:has-text("LABEL"), a:has-text("LABEL"), [role="button"]:has-text("LABEL")').first.click()
 
 COLOR-BASED FINDING:
   # Find red button by inline style

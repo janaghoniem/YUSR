@@ -277,6 +277,18 @@ ipcMain.handle("widget:exit", () => {
   }
 });
 
+// Allow renderer to ask main to open external URLs
+ipcMain.handle('open-external', async (_event, url) => {
+  try {
+    if (!url) return { ok: false, error: 'No URL provided' };
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    console.error('[open-external] failed to open', url, err);
+    return { ok: false, error: String(err) };
+  }
+});
+
 // main.js
 // main.js - Update your aura:init handler
 ipcMain.handle("aura:init", (_event, options = {}) => {

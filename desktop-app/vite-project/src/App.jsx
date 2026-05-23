@@ -921,6 +921,20 @@ function App() {
             } else {
               speakAssistantResponse(msg.question, msg.user_language || userLanguage);
             }
+
+            // If the server provided a local authorize URL for missing API credentials,
+            // open it externally so the user is taken directly to the API allow page.
+            try {
+              const oauthUrl = msg?.metadata?.oauth_authorize_url || msg?.metadata?.api_allow_url;
+              if (oauthUrl && window?.electronAPI?.openExternal) {
+                // small delay to let the UI update before opening external browser
+                setTimeout(() => {
+                  window.electronAPI.openExternal(oauthUrl).catch((e) => console.warn('[openExternal] failed', e));
+                }, 200);
+              }
+            } catch (err) {
+              console.warn('[App] Failed to trigger oauth external open:', err);
+            }
             break;
 
           case 'processing':

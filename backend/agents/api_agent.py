@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 GMAIL_CLIENT_ID = os.environ.get("GMAIL_CLIENT_ID")
 GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET")
 GMAIL_REDIRECT_URI = os.environ.get("GMAIL_REDIRECT_URI", "http://localhost:8000/api/email/oauth/callback")
+GMAIL_AUTHORIZE_ROUTE = os.environ.get("GMAIL_AUTHORIZE_ROUTE", "http://localhost:8000/api/email/oauth/authorize")
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send", 
                 "https://www.googleapis.com/auth/gmail.readonly",
                 "https://www.googleapis.com/auth/youtube.readonly",
@@ -605,8 +606,8 @@ class ApiAgent:
                 }
             )
         
-        except Exception as e:
-            logger.error(f"âŒ Failed to send email: {e}")
+        except Exception:
+            logger.exception("Failed to send email")
             return ApiResult(
                 task_id=task_id,
                 status="failed",
@@ -1658,31 +1659,15 @@ async def start_api_agent(broker_instance=None):
                     response_metadata["requires_oauth"] = True
                     response_metadata["oauth_redirect_uri"] = GMAIL_REDIRECT_URI
                     response_metadata["oauth_scopes"] = GMAIL_SCOPES
+                    oauth_authorize_url = f"{GMAIL_AUTHORIZE_ROUTE}?user_id={user_id}"
+                    response_metadata["oauth_authorize_url"] = oauth_authorize_url
+                    response_metadata["api_allow_url"] = oauth_authorize_url
 
-                    auth_url = None
-                    oauth_state = None
-                    try:
-                        auth_url, oauth_state = await agent.initiate_oauth_flow(user_id)
-                    except Exception as oauth_err:
-                        logger.error(f"âŒ Failed to initiate OAuth flow for {user_id}: {oauth_err}")
-                        response_metadata["oauth_error"] = str(oauth_err)
-
-                    if auth_url:
-                        response_metadata["oauth_auth_url"] = auth_url
-                    if oauth_state:
-                        response_metadata["oauth_state"] = oauth_state
-
-                    if auth_url:
-                        clarification_question = (
-                            "I need Gmail authorization before I can use the Gmail API. "
-                            f"Please connect your account here: {auth_url} "
-                            "Then tell me to retry your email request."
-                        )
-                    else:
-                        clarification_question = (
-                            "I need Gmail authorization before I can use the Gmail API, but I could not create the OAuth link automatically. "
-                            "Please configure Gmail OAuth credentials and then tell me to retry your email request."
-                        )
+                    clarification_question = (
+                        "I need Gmail authorization before I can use the API. "
+                        f"Open the API allow page here: {oauth_authorize_url} "
+                        "Then come back and tell me to retry your email request."
+                    )
             
             # Publish result
             response = AgentMessage(

@@ -18,6 +18,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import hashlib
+from textwrap import dedent
 from .web_rag_sandbox import rag_sandbox
 from .bot_evasion import BotEvasion, ProxyRotator
 from .verification import ScreenshotVerifier
@@ -791,6 +792,7 @@ ENHANCED RULES WITH SMART INTENT HANDLING:
    After any click that triggers navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)
 
 1. **Primary Approach**: Use ONLY elements that exist in the list above
+    - If a Google result link shows a visible href, prefer navigating to that href directly instead of matching the composite title text.
 
 2. **Smart Intent for Missing Elements**: 
 {smart_intent_rules}
@@ -3505,6 +3507,51 @@ class WebExecutionPipeline:
                             logger.warning(f"⚠️ Keyboard shortcut executed but no state change detected")
                     else:
                         logger.info(f"ℹ️ Keyboard shortcut not available for {action_word} on {platform}, falling back to RAG")
+
+            # ✅ FAST PATH: If a click target is already listed in the DOM context, click it directly.
+            # This avoids generating defensive wait_for_selector code for visible buttons like Moodle's "Log in".
+            if action_type == 'click':
+                direct_target = None
+                quoted_target = re.search(r'["\']([^"\']+)["\']', clean_prompt)
+                if quoted_target:
+                    direct_target = quoted_target.group(1).strip()
+                else:
+                    action_target = re.search(
+                        r'(?:click\s+on|click|open|press|tap|select)\s+(?:the\s+)?(.+?)(?:\s+(?:button|link|result)\b|\s*[,\.;:]|$)',
+                        clean_prompt,
+                        re.IGNORECASE,
+                    )
+                    if action_target:
+                        direct_target = action_target.group(1).strip()
+
+                if direct_target:
+                    try:
+                        target_pattern = re.compile(re.escape(direct_target), re.IGNORECASE)
+                        candidate_locators = [
+                            page.get_by_role('button', name=target_pattern).first,
+                            page.get_by_role('link', name=target_pattern).first,
+                            page.locator('button').filter(has_text=direct_target).first,
+                            page.locator('a').filter(has_text=direct_target).first,
+                            page.locator('[role="button"]').filter(has_text=direct_target).first,
+                        ]
+                        for locator in candidate_locators:
+                            if await locator.count() > 0:
+                                await locator.scroll_into_view_if_needed()
+                                await page.wait_for_timeout(300)
+                                await locator.click()
+                                await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                                logger.info(f"✅ FAST-PATH click succeeded for visible target: {direct_target}")
+                                return WebExecutionResult(
+                                    validation_passed=True,
+                                    security_passed=True,
+                                    output=f"EXECUTION_SUCCESS: Clicked {direct_target}" + (f"\nPAGE_URL:{page.url}" if page.url and page.url != 'about:blank' else ''),
+                                    page_url=page.url,
+                                    page_title=await page.title(),
+                                    page_state_before=page_state_before,
+                                    execution_time=(datetime.now() - start_time).total_seconds()
+                                )
+                    except Exception as fast_click_err:
+                        logger.debug(f"FAST-PATH click skipped/failed for '{direct_target}': {fast_click_err}")
             
             # ✅ STEP 3: GENERATE CODE WITH SMART INTENT (PLATFORM-AWARE)
             # FIX: add human-like behavior before interacting with auth pages
@@ -3846,6 +3893,7 @@ class WebExecutionPipeline:
         try:
             rag_result = self._rag_system.generate_code(
                 enhanced_prompt,
+                cache_key=ai_prompt,
                 include_explanation=False
             )
             
@@ -4067,77 +4115,96 @@ class WebExecutionPipeline:
         quoted_match = re.search(r'["\']([^"\']+)["\']', ai_prompt)
         link_name_match = re.search(r'(?:named|called|titled)\s+["\']?([^"\']+)["\']?(?:\.|$)', ai_prompt, re.IGNORECASE)
         link_name = quoted_match.group(1) if quoted_match else (link_name_match.group(1) if link_name_match else ai_prompt)
+        if link_name == ai_prompt:
+            action_match = re.search(
+                r'(?:click\s+on|click|open|press|tap|locate|find|select)\s+(?:the\s+)?(.+?)(?:\s+(?:link|button|result)\b|\s*[\.,;:]|$)',
+                ai_prompt,
+                re.IGNORECASE,
+            )
+            if action_match:
+                link_name = action_match.group(1)
+        link_name = re.sub(r'https?://\S+', '', link_name)
+        link_name = re.sub(r'\([^)]*\)', ' ', link_name)
+        link_name = re.sub(r'^(click\s+on\s+|click\s+|open\s+|press\s+|tap\s+)(the\s+)?', '', link_name, flags=re.IGNORECASE).strip()
         
         # Clean it up
         link_name = re.sub(r'\s*(and|or)\s*.*$', '', link_name).strip()
+        link_name = re.sub(r'\s+', ' ', link_name).strip()
         
         # Escape quotes in link_name for safe embedding
         link_name_escaped = link_name.replace("\\", "\\\\").replace("'", "\\'")
         
-        code = f"""
-# ✅ FALLBACK: Find and click link by text (with scrolling)
-import asyncio
+        code = dedent(f"""
+        # ✅ FALLBACK: Find and click link/button by text (with scrolling)
+        import asyncio
 
-async def main():
-    link_text = '{link_name_escaped}'
-    
-    # Strategy 1: Use Playwright locator with text matching + scroll
-    try:
-        locator = page.locator(f'a:has-text("{{link_text}}")')
-        count = await locator.count()
-        if count > 0:
-            # CRITICAL: Scroll into view BEFORE clicking (handles arXiv, long pages, etc.)
-            await locator.first.scroll_into_view_if_needed()
-            await page.wait_for_timeout(300)
-            await locator.first.click()
-            print('EXECUTION_SUCCESS')
-            return
-    except Exception as e:
-        pass  # Strategy 1 failed, try next
-    
-    # Strategy 2: Partial text match with scrolling (case-insensitive)
-    try:
-        links = await page.query_selector_all('a')
-        for link in links:
-            text = await link.text_content()
-            if text and link_text.lower() in text.lower():
-                # Scroll into view
-                await page.evaluate('el => el.scrollIntoView(true)', link)
-                await page.wait_for_timeout(300)
-                await link.click()
-                print('EXECUTION_SUCCESS')
-                return
-    except Exception as e:
-        logger.debug(f"Strategy 2 failed: {{e}}")
-        pass
-    
-    # Strategy 3: Search for text in any element, then find parent link with scrolling
-    try:
-        elements = await page.query_selector_all('*')
-        for elem in elements:
-            text = await elem.text_content()
-            if text and link_text.lower() in text.lower():
-                # Find parent link
-                try:
-                    parent_link = await elem.evaluate_handle('el => el.closest("a")')
-                    if parent_link:
-                        # Scroll parent link into view
-                        await page.evaluate('el => el.scrollIntoView(true)', parent_link)
-                        await page.wait_for_timeout(300)
-                        await parent_link.click()
-                        print('EXECUTION_SUCCESS')
-                        return
-                except Exception as e:
-                    logger.debug(f"Strategy 3 link click failed: {{e}}")
-                    pass
-    except Exception as e:
-        logger.debug(f"Strategy 3 failed: {{e}}")
-        pass
-    
-    print(f'FAILED: Could not find link with text "{{link_text}}"')
+        async def main():
+            link_text = '{link_name_escaped}'
 
-await main()
-"""
+            # Strategy 1: Button by text (covers Moodle-style Log in buttons)
+            try:
+                btn = page.locator(f'button:has-text("{{link_text}}")').first
+                if await btn.count() > 0:
+                    await btn.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(300)
+                    await btn.click()
+                    await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                    print('EXECUTION_SUCCESS')
+                    return
+            except Exception as e:
+                pass  # Strategy 1 failed, try next
+
+            # Strategy 2: role=button by text
+            try:
+                btn = page.locator(f'[role="button"]:has-text("{{link_text}}")').first
+                if await btn.count() > 0:
+                    await btn.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(300)
+                    await btn.click()
+                    await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                    print('EXECUTION_SUCCESS')
+                    return
+            except Exception as e:
+                logger.debug(f"Strategy 2 failed: {{e}}")
+                pass
+
+            # Strategy 3: Any clickable element by text (links + buttons)
+            try:
+                locator = page.locator(f'a:has-text("{{link_text}}"), button:has-text("{{link_text}}")')
+                if await locator.count() > 0:
+                    await locator.first.scroll_into_view_if_needed()
+                    await page.wait_for_timeout(300)
+                    await locator.first.click()
+                    await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                    print('EXECUTION_SUCCESS')
+                    return
+            except Exception as e:
+                logger.debug(f"Strategy 3 failed: {{e}}")
+                pass
+
+            # Strategy 4: JS scan across all clickable elements (case-insensitive)
+            try:
+                found = await page.evaluate('''(text) => {{
+                    const all = [...document.querySelectorAll('a, button, [role="button"]')];
+                    const target = all.find(el => (el.textContent || '').trim().toLowerCase() === text.toLowerCase());
+                    if (target) {{
+                        target.click();
+                        return true;
+                    }}
+                    return false;
+                }}''', link_text)
+                if found:
+                    await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                    print('EXECUTION_SUCCESS')
+                    return
+            except Exception as e:
+                logger.debug(f"Strategy 4 failed: {{e}}")
+                pass
+
+            print(f'FAILED: Could not find link or button with text "{{link_text}}"')
+
+        await main()
+        """)
         return code.strip()
     
     def _generate_fallback_search_fill(self, ai_prompt: str, text_to_fill: str) -> str:
@@ -4338,6 +4405,7 @@ async def __rag_step__(page):
                 '__result__': None,
                 '__stdout__': '',
                 'random': random,  # ✅ Make random available for jitter
+                'logger': logger,
             }
             
             # ✅ Add helper function for Google searches

@@ -815,7 +815,6 @@ For navigation tasks WITHOUT a known URL (unknown/unfamiliar sites):
     "action": "navigate"
 }
 Put the site name or description in ai_prompt — RAG will resolve the URL.
-
 For interaction tasks (click, fill):
 {
     "action": "fill",
@@ -3282,9 +3281,10 @@ async def decompose_task_to_actions(
     
     # ✅ FIX 2: Extract credentials FIRST - FOR ANY LOGIN/SIGNUP TASK
     login_keywords = ['login', 'sign in', 'sign up', 'register', 'create account', 'log in', 'authenticate']
+    login_context_markers = ['with', 'using', 'email', 'password', 'account', '@']
     full_text = request_text.lower()
     is_email_send_intent = _looks_like_email_send_intent(request_text)
-    is_login_task = any(keyword in full_text for keyword in login_keywords)
+    is_login_task = any(keyword in full_text for keyword in login_keywords) and any(marker in full_text for marker in login_context_markers)
 
     # Credential-only follow-ups may omit explicit login keywords.
     if not is_login_task and not is_email_send_intent:

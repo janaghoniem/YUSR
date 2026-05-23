@@ -34,4 +34,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('aura-status', handler);
     return () => ipcRenderer.removeListener('aura-status', handler);
   },
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });

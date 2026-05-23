@@ -883,6 +883,74 @@ def open_file(filename: str) -> bool:
     return _open_file(path)
 
 
+def get_latest_file(folder_path: str, file_pattern: str = "*", exclude_dirs: bool = True) -> Dict[str, Any]:
+    """
+    Find the most recently modified file in a folder.
+
+    Args:
+        folder_path:   Full path to the folder (e.g., "C:\\Users\\user\\Downloads")
+        file_pattern:  File pattern to match (default: "*" = all files)
+        exclude_dirs:  If True, exclude directories (only return files)
+
+    Returns:
+        Dict with keys: status, path, modified_time
+        - status: "found" (single file) or "error" (no files/invalid path)
+        - path: Full path to the most recent file
+        - modified_time: ISO 8601 timestamp of modification time
+
+    Examples:
+        >>> result = get_latest_file("C:\\Users\\user\\Downloads")
+        >>> if result["status"] == "found":
+        ...     print(result["path"])
+
+        >>> result = get_latest_file("C:\\Users\\user\\Downloads", "*.pdf")
+        >>> if result["status"] == "found":
+        ...     print(f"Latest PDF: {result['path']}")
+    """
+    try:
+        import glob
+        from pathlib import Path
+
+        # Validate folder exists
+        folder_path = os.path.expanduser(folder_path)
+        if not os.path.isdir(folder_path):
+            logger.error(f"❌ Folder not found: {folder_path}")
+            return {"status": "error", "message": f"Folder not found: {folder_path}"}
+
+        # Build glob pattern
+        pattern = os.path.join(folder_path, file_pattern)
+        matches = glob.glob(pattern)
+
+        if not matches:
+            logger.warning(f"⚠️ No files matching '{file_pattern}' in {folder_path}")
+            return {"status": "error", "message": f"No files matching '{file_pattern}'"}
+
+        # Filter to files only if requested
+        if exclude_dirs:
+            matches = [f for f in matches if os.path.isfile(f)]
+
+        if not matches:
+            logger.warning(f"⚠️ No files (only directories) found in {folder_path}")
+            return {"status": "error", "message": "No files found (only directories)"}
+
+        # Find the most recent file by modification time
+        latest_file = max(matches, key=lambda x: os.path.getmtime(x))
+        modified_time = os.path.getmtime(latest_file)
+        modified_dt = datetime.fromtimestamp(modified_time).isoformat()
+
+        logger.info(f"✅ Found latest file: {latest_file} (modified: {modified_dt})")
+        return {
+            "status": "found",
+            "path": latest_file,
+            "modified_time": modified_dt,
+            "modified_timestamp": modified_time
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error finding latest file: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 def refresh_index() -> None:
     """Force a full re-index. Call after moving/creating files."""
     _get_engine().refresh()

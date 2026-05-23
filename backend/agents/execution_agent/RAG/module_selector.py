@@ -257,7 +257,7 @@ MODULES = {
     library_name="python-docx",
     library_import="from docx import Document",
     keywords=["word", "document","page", "paragraph", "heading", "table", "text formatting"],
-    guidance="""
+    guidance=r"""
 Use ONLY these word_tools functions. Never import python-docx directly. Never use pyautogui.
 
 IMPORT (copy exactly):
@@ -274,11 +274,18 @@ except ImportError:
         doc_save, doc_launch
     )
 
-ACTIVE FILE RESOLUTION (do this first, every time):
-if "[ACTIVE FILE:" in PROMPT:
-    active_file = "<extract path from [ACTIVE FILE: ...]>"
-else:
-    active_file = None  # No active file — must create new one for EDIT tasks
+ACTIVE FILE RESOLUTION - READ THIS CAREFULLY:
+The task description may contain [ACTIVE FILE: /path/to/file.docx]
+Check if this pattern exists in the task description YOU receive.
+If it exists, extract the path from between the brackets.
+If it does NOT exist, set active_file = None
+
+Example:
+  Task: "Add a paragraph to the document"
+  → No [ACTIVE FILE:] pattern found → active_file = None
+
+  Task: "Edit [ACTIVE FILE: C:\Users\a\Documents\report.docx]"
+  → Pattern found → active_file = "C:\Users\a\Documents\report.docx"
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -291,9 +298,11 @@ TASK → EXACT EXECUTION PATTERN:
 
 [CREATE] task says "create", "new document", "make a doc":
     path = doc_create("<descriptive_name_from_task>")
-    # DO NOT open. Stop here. Let next task do edits.
+    # ⚠️ DO NOT call doc_open() or doc_launch()
+    # ⚠️ DO NOT print anything - let the framework track the path
+    # Stop here. Next task will do edits programmatically.
 
-[EDIT] task says "write", "add", "insert", "type", "put", "save":
+[EDIT] task says "write", "add", "insert", "type", "put" (WITHOUT "save"):
     ⚠️ CRITICAL: If active_file is None, MUST create new document first:
     if active_file is None:
         active_file = doc_create("<descriptive_name_for_content>")
@@ -305,18 +314,20 @@ TASK → EXACT EXECUTION PATTERN:
     doc = doc_add_table(doc, ["H1","H2"], [["r1c1","r1c2"]])  # only if table needed
     path = doc_save(doc, active_file)
 
-    # If task mentions "save", ALWAYS open the document after saving
-    if "save" in task_prompt.lower():
+    # ⚠️ CRITICAL: Never open Word during EDIT tasks
+    # Let all edits complete first, then open on final SAVE
+
+[SAVE/CONFIRM] task says "save" or "press save" or "confirm" or "view":
+    if active_file:
+        # ✅ NOW open the document for display/saving
         doc_open(active_file)
 
-[SAVE/CONFIRM] task says "press save", "click ok", "confirm":
-    doc_open(active_file)
-    # DO NOT call doc_save(). File is already saved. Just open it.
-
 RULES:
+- ⚠️ CRITICAL: For CREATE tasks, NEVER call doc_open() or doc_launch() - keep Word closed
+- ⚠️ CRITICAL: For EDIT tasks, NEVER call doc_open() - save only, don't open yet
+- ✅ ONLY call doc_open() during SAVE/CONFIRM tasks (when user is done editing)
 - ⚠️ CRITICAL: For EDIT tasks, ALWAYS check if active_file is None BEFORE calling doc_load(). If None, call doc_create() first.
 - Always call doc_save() at the end of any EDIT task — never leave a doc unsaved
-- Never call doc_open() inside an EDIT task — doc_save() opens it automatically
 - Never hardcode folder paths — word_tools handles folder detection internally
 - doc_load() does not print anything — that is expected behaviour
 """
@@ -326,7 +337,7 @@ RULES:
     library_name="openpyxl",
     library_import="from openpyxl import Workbook",
     keywords=["excel", "spreadsheet", "xlsx", "sheet", "cell", "row", "column", "formula", "data table"],
-    guidance="""
+    guidance=r"""
 Use ONLY these excel_tools functions. Never import openpyxl directly. Never use pyautogui.
 
 IMPORT (copy exactly):
@@ -343,11 +354,18 @@ except ImportError:
         xl_set_formula, xl_save, xl_launch
     )
 
-ACTIVE FILE RESOLUTION (do this first, every time):
-if "[ACTIVE FILE:" in PROMPT:
-    active_file = "<extract path from [ACTIVE FILE: ...]>"
-else:
-    active_file = None  # No active file — must create new one for EDIT tasks
+ACTIVE FILE RESOLUTION - READ THIS CAREFULLY:
+The task description may contain [ACTIVE FILE: /path/to/file.docx]
+Check if this pattern exists in the task description YOU receive.
+If it exists, extract the path from between the brackets.
+If it does NOT exist, set active_file = None
+
+Example:
+  Task: "Add a paragraph to the document"
+  → No [ACTIVE FILE:] pattern found → active_file = None
+
+  Task: "Edit [ACTIVE FILE: C:\Users\a\Documents\report.docx]"
+  → Pattern found → active_file = "C:\Users\a\Documents\report.docx"
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -399,7 +417,7 @@ RULES:
     library_name="python-pptx",
     library_import="from pptx import Presentation",
     keywords=["powerpoint", "pptx", "slide", "presentation", "bullet point", "layout", "slide show"],
-    guidance="""
+    guidance=r"""
 Use ONLY these ppt_tools functions. Never import python-pptx directly. Never use pyautogui.
 
 IMPORT (copy exactly):
@@ -416,11 +434,18 @@ except ImportError:
         ppt_add_bullet_slide, ppt_save, ppt_launch
     )
 
-ACTIVE FILE RESOLUTION (do this first, every time):
-if "[ACTIVE FILE:" in PROMPT:
-    active_file = "<extract path from [ACTIVE FILE: ...]>"
-else:
-    active_file = None  # No active file — must create new one for EDIT tasks
+ACTIVE FILE RESOLUTION - READ THIS CAREFULLY:
+The task description may contain [ACTIVE FILE: /path/to/file.docx]
+Check if this pattern exists in the task description YOU receive.
+If it exists, extract the path from between the brackets.
+If it does NOT exist, set active_file = None
+
+Example:
+  Task: "Add a paragraph to the document"
+  → No [ACTIVE FILE:] pattern found → active_file = None
+
+  Task: "Edit [ACTIVE FILE: C:\Users\a\Documents\report.docx]"
+  → Pattern found → active_file = "C:\Users\a\Documents\report.docx"
 
 TASK → EXACT EXECUTION PATTERN:
 
@@ -467,22 +492,23 @@ RULES:
     "file": ModuleGuidance(
         module_name="File",
         library_name="file_agent (smart file search with fuzzy matching)",
-        library_import="try:\n    from agents.execution_agent.RAG.file_agent import find_file, open_file\nexcept ImportError:\n    from file_agent import find_file, open_file",
+        library_import="try:\n    from agents.execution_agent.RAG.file_agent import find_file, open_file, get_latest_file\nexcept ImportError:\n    from file_agent import find_file, open_file, get_latest_file",
         keywords=["file", "open file", "find file", "search file", "locate file", "read file", "delete file",".pdf", ".xlsx", ".pptx", ".csv"],
-        guidance="""
+        guidance=r"""
 Use the file_agent module for fast, intelligent file operations with fuzzy matching.
 
 SETUP:
 try:
-    from agents.execution_agent.RAG.file_agent import find_file, open_file
+    from agents.execution_agent.RAG.file_agent import find_file, open_file, get_latest_file
 except ImportError:
-    from file_agent import find_file, open_file
+    from file_agent import find_file, open_file, get_latest_file
 import os
 
 ============ KEY FEATURES ============
 ✅ Fuzzy matching - "flutter quiz" matches "flutter_quiz_answers.pdf"
 ✅ Caching - first search indexes files, subsequent searches <0.5s
 ✅ Smart fallback - uses system search if cached index doesn't match
+✅ get_latest_file() - reliably finds most recent file in a folder
 ✅ Structured responses - JSON with status, path, confidence, suggestions
 
 ============ RETURN FORMAT ============
@@ -579,6 +605,30 @@ Not found:
     print(f"[FILE]: {save_path}")
     print("EXECUTION_SUCCESS")
 
+[7] GET LATEST FILE IN FOLDER — task says "open latest", "most recent", "last downloaded":
+    ⚠️ CRITICAL: Use this for "last downloaded file" or "most recent PDF" tasks
+
+    result = get_latest_file(os.path.expanduser('~\\\\Downloads'), "*.pdf")
+    if result["status"] == "found":
+        path = result["path"]
+        # Open the file
+        success = open_file(path)
+        if success:
+            print(f"[FILE]: {path}")
+            print("EXECUTION_SUCCESS")
+        else:
+            print("EXECUTION_FAILED: Could not open file")
+    else:
+        print(f"EXECUTION_FAILED: {result['message']}")
+
+    ⚠️ RELIABLE METHOD FOR FINDING RECENT FILES:
+    - get_latest_file() uses os.path.getmtime() which is 100% reliable
+    - Works with any folder path: Downloads, Documents, Desktop, etc.
+    - Supports file patterns: "*.pdf", "*.xlsx", "*" (all files)
+    - Returns ISO 8601 timestamp for verification
+
+    ⚠️ DO NOT use glob.glob() + max() manually - use get_latest_file() instead
+
 ============ KEY POINTS ============
 ✅ ALWAYS check result["status"] before accessing path/paths
 ✅ Fuzzy matching means you can use partial queries: "flutter quiz" not just "flutter_quiz_answers.docx"
@@ -586,6 +636,7 @@ Not found:
 ✅ open_file() outputs [FILE]: <path> automatically
 ✅ OUTPUT DATA BEFORE status messages (critical for pipelines)
 ✅ Use [FILE]: marker for downstream tasks
+✅ For "latest file" tasks, ALWAYS use get_latest_file() - it's reliable and fast
 ✅ Cache automatically refreshes after 24 hours, manual refresh via find_file(query, "full")
 """
     ),
@@ -594,7 +645,7 @@ Not found:
         library_name="notepad_tools (native text file handling)",
         library_import="from agents.execution_agent.RAG.scripts.notepad_tools import (...)",
         keywords=["notepad", "text editor", "note", "text entry", "type text", "write note", "arabic text"],
-        guidance="""
+        guidance=r"""
 Use ONLY these notepad_tools functions. Never use pyautogui for text entry unless absolutely necessary.
 For all text input tasks, use notepad_type() with clipboard for reliable Unicode/Arabic support.
 

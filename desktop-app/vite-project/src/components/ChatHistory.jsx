@@ -20,7 +20,9 @@ const ChatHistory = ({ messages, onClose, chatTitle }) => {
 
     if (role === "assistant") {
       try {
-        const parsed = JSON.parse(content);
+        // Strip markdown code fences (```json ... ``` or ``` ... ```)
+        const stripped = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+        const parsed = JSON.parse(stripped);
         return (
           parsed.response_text ||
           parsed.text ||

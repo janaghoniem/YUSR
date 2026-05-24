@@ -49,7 +49,7 @@ const SideBar = ({ collapsed, onToggle, onSettingsClick, onNewChat, chats = [], 
                 {chats.slice(0, 20).map((chat, idx) => {
                   const sid = chat.session_id || chat.sessionId || chat.id || null;
                   const rawTitle = chat.title || chat.name || `Chat ${idx + 1}`;
-                  const title = rawTitle.replace(/<user_input>([\s\S]*?)<\/user_input>/g, "$1").trim();
+                  const title = rawTitle.replace(/<user_input>([\s\S]*?)<\/user_input>/g, "$1").replace(/<user_input>/g, "").trim();
                   const isActive = currentSessionId === sid;
                   if (!sid) {
                     return (

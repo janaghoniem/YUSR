@@ -199,15 +199,8 @@ class TaskDispatcher:
 
             try:
                 await ws_manager.send_to_session(target_session_id, push_payload)
-
-                # Mark as running so we don't re-push on the next tick
-                await asyncio.to_thread(
-                    collection.update_one,
-                    {"_id": task_doc["_id"]},
-                    {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
-                )
                 logger.info(
-                    f"📤 TaskDispatcher pushed task {task_id} to session {target_session_id}"
+                    f"📤 TaskDispatcher notified session {target_session_id} about task {task_id}; task remains pending until a device claims it"
                 )
             except Exception as push_exc:
                 logger.warning(

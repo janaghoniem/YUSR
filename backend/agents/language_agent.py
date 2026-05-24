@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 from ThinkingStepManager import ThinkingStepManager
 from agents.security.input_sanitiser import sanitise_input
 from core.mongo import get_database
-from routes.cross_platform_manager import detect_cross_platform_intent
+from routes.cross_platform_manager import detect_cross_platform_intent, get_cross_platform_manager
 from utils.semantic_intent import classify_draft_reading_intent, classify_polar_intent
 
 load_dotenv()
@@ -1595,6 +1595,96 @@ async def start_language_agent(broker):
                 await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
                 return
 
+            if agent.awaiting_user_response.get("type") == "device_selection":
+                context = agent.awaiting_user_response
+                candidates = context.get("candidates") or []
+                pending_payload = dict(context.get("pending_payload") or {})
+                selection_text = normalize_arabic(input_text)
+                selected_device = None
+
+                if selection_text.isdigit():
+                    selection_index = int(selection_text) - 1
+                    if 0 <= selection_index < len(candidates):
+                        selected_device = candidates[selection_index]
+                if not selected_device:
+                    for candidate in candidates:
+                        label = str(candidate.get("label") or candidate.get("device_id") or "")
+                        device_id = str(candidate.get("device_id") or "")
+                        if label and label.lower() in selection_text:
+                            selected_device = candidate
+                            break
+                        if device_id and device_id.lower() in selection_text:
+                            selected_device = candidate
+                            break
+
+                if not selected_device:
+                    prompt = context.get("question") or (
+                        "I need you to choose one of the listed devices." if agent.preferred_language != "ar" else "أحتاج منك اختيار أحد الأجهزة المعروضة."
+                    )
+                    clarification_msg = AgentMessage(
+                        message_type=MessageType.CLARIFICATION_REQUEST,
+                        sender=AgentType.LANGUAGE,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=http_request_id,
+                        payload={
+                            "question": prompt,
+                            "context": "multiple_target_devices",
+                            "device_type": context.get("device_type", device_type),
+                        }
+                    )
+                    await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+                    return
+
+                agent.awaiting_user_response = None
+                agent.save_memory()
+
+                selected_device_id = str(selected_device.get("device_id") or "")
+                selected_platform = str(selected_device.get("platform") or pending_payload.get("target_device") or device_type)
+                pending_payload["target_device_id"] = selected_device_id
+                pending_payload["target_device"] = selected_platform
+                pending_payload["cross_device_target"] = {
+                    **(pending_payload.get("cross_device_target") or {}),
+                    "selected_device_id": selected_device_id,
+                    "selected_device_label": selected_device.get("label") or selected_device_id,
+                    "target_platform": selected_platform,
+                }
+
+                await ThinkingStepManager.update_step(
+                    session_id, "preparing_for_coordinator", http_request_id,
+                    language=agent.preferred_language
+                )
+
+                task_msg = AgentMessage(
+                    message_type=MessageType.TASK_REQUEST,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=session_id,
+                    response_to=context.get("response_to") or http_request_id,
+                    payload=pending_payload,
+                )
+                await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, task_msg)
+
+                ack_text = (
+                    f"تم اختيار {selected_device.get('label') or selected_device_id}. سأتابع الآن."
+                    if agent.preferred_language == "ar"
+                    else f"Selected {selected_device.get('label') or selected_device_id}. Continuing now."
+                )
+                ws_msg = AgentMessage(
+                    message_type=MessageType.TASK_RESPONSE,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=http_request_id,
+                    payload={
+                        "status": "processing",
+                        "response": ack_text,
+                        "user_language": agent.preferred_language,
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, ws_msg)
+                return
+
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
         contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
         if contextual_follow_up:
@@ -1851,6 +1941,76 @@ async def start_language_agent(broker):
             cross_platform_intent = detect_cross_platform_intent(input_text, source_platform=device_type)
             if cross_platform_intent:
                 device_type = "mixed"
+
+                mgr = get_cross_platform_manager()
+                if mgr:
+                    candidates = await mgr._registry.get_matching_devices(  # noqa: SLF001 - language agent needs registry lookup
+                        user_id=user_id,
+                        target_platform=cross_platform_intent.get("target_platform"),
+                        exclude_device_id=(message.payload or {}).get("device_id") or session_id,
+                    )
+                    if len(candidates) > 1:
+                        candidate_lines = []
+                        for idx, candidate in enumerate(candidates, start=1):
+                            label = candidate.get("label") or candidate.get("device_id") or f"Device {idx}"
+                            candidate_lines.append(f"{idx}. {label}")
+                        candidate_text = "\n".join(candidate_lines)
+                        prompt_lang = agent.preferred_language or "en"
+                        if prompt_lang == "ar":
+                            clarification_text = (
+                                f"وجدت أكثر من جهاز {cross_platform_intent.get('target_platform') or 'مناسب'}:\n"
+                                f"{candidate_text}\n\n"
+                                "أي جهاز تريدني أن أستخدم؟ أرسل الرقم أو اسم الجهاز."
+                            )
+                        else:
+                            clarification_text = (
+                                f"I found multiple {cross_platform_intent.get('target_platform') or 'matching'} devices:\n"
+                                f"{candidate_text}\n\n"
+                                "Which one should I use? Reply with the number or device name."
+                            )
+
+                        pending_payload = {
+                            "confirmation": response,
+                            "original_input": input_text,
+                            "user_language": agent.preferred_language,
+                            "output_language": output_language,
+                            "device_type": device_type,
+                            "target_device": cross_platform_intent.get("target_platform"),
+                            "cross_device_target": cross_platform_intent,
+                            "user_id": user_id,
+                            "chat_title": generate_chat_title(input_text, response),
+                            "first_input": input_text,
+                            "user_profile": agent.user_profile,
+                        }
+                        agent.awaiting_user_response = {
+                            "type": "device_selection",
+                            "question": clarification_text,
+                            "original_request": input_text,
+                            "response_to": http_request_id,
+                            "pending_payload": pending_payload,
+                            "candidates": candidates,
+                            "user_language": agent.preferred_language,
+                            "output_language": output_language,
+                            "user_profile": agent.user_profile,
+                            "device_type": device_type,
+                            "cross_device_target": cross_platform_intent,
+                        }
+                        agent.save_memory()
+
+                        clarification_msg = AgentMessage(
+                            message_type=MessageType.CLARIFICATION_REQUEST,
+                            sender=AgentType.LANGUAGE,
+                            receiver=AgentType.LANGUAGE,
+                            session_id=session_id,
+                            response_to=http_request_id,
+                            payload={
+                                "question": clarification_text,
+                                "context": "multiple_target_devices",
+                                "device_type": device_type,
+                            }
+                        )
+                        await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+                        return
 
             await ThinkingStepManager.update_step(
                 session_id, "preparing_for_coordinator", http_request_id,

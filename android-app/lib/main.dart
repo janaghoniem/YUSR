@@ -91,8 +91,8 @@ class _MyAppState extends State<MyApp> {
           textDirection: getTextDirection(_languageCode),
           child: child ?? const SizedBox.shrink(),
         );
-      },      
-    home: const StartupScreen(),
+      },
+      home: const StartupScreen(),
     );
   }
 }
@@ -634,7 +634,12 @@ class _AutomationDemoState extends State<AutomationDemo>
     await _wsSub?.cancel();
     await _wsChannel?.sink.close();
 
-    final uri = Uri.parse('ws://10.0.2.2:8000/ws/$_activeSessionId');
+    final uri = Uri.parse(
+      'ws://10.0.2.2:8000/ws/$_activeSessionId'
+      '?user_id=$_activeUserId'
+      '&device_id=${DeviceManager.deviceId}'
+      '&platform=mobile',
+    );
     _wsChannel = WebSocketChannel.connect(uri);
     _wsSub = _wsChannel!.stream.listen(
       (event) {
@@ -3527,7 +3532,7 @@ class _AutomationDemoState extends State<AutomationDemo>
           Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: accent,
+            activeThumbColor: accent,
             activeTrackColor: accent.withOpacity(0.3),
             inactiveThumbColor: Colors.white.withOpacity(0.4),
             inactiveTrackColor: Colors.white.withOpacity(0.1),

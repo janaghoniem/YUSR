@@ -142,31 +142,36 @@ class DeviceRegistry:
         label: str = "",
     ) -> None:
         now = datetime.now(timezone.utc)
+        resolved_label = label or f"{platform.capitalize()} device"
         device_doc = {
             "device_id": device_id,
             "platform": platform,
-            "label": label or f"{platform.capitalize()} device",
+            "label": resolved_label,
             "session_id": session_id,
             "online": True,
             "last_seen": now,
         }
-        # Update existing entry
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self._col.update_one,
             {"user_id": user_id, "devices.device_id": device_id},
-            {"$set": {"devices.$": device_doc}},
-        )
-        # Or insert if first time
-        await asyncio.to_thread(
-            self._col.update_one,
-            {"user_id": user_id},
             {
-                "$setOnInsert": {"user_id": user_id},
-                "$addToSet": {"devices": device_doc},
+                "$set": {
+                    "devices.$.platform": platform,
+                    "devices.$.label": resolved_label,
+                    "devices.$.session_id": session_id,
+                    "devices.$.online": True,
+                    "devices.$.last_seen": now,
+                }
             },
-            True,  # upsert
         )
-        logger.info(f"📱 Registered device {device_id} ({platform}) for user {user_id}")
+        if result.matched_count == 0:
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"user_id": user_id},
+                {"$push": {"devices": device_doc}},
+                True,
+            )
+        logger.info(f"📱 Registered/updated device {device_id} ({platform}) for user {user_id}")
 
     async def set_device_online(self, user_id: str, device_id: str, session_id: str, online: bool) -> None:
         now = datetime.now(timezone.utc)
@@ -185,6 +190,27 @@ class DeviceRegistry:
         if not doc:
             return []
         return doc.get("devices", [])
+
+    async def get_matching_devices(
+        self,
+        user_id: str,
+        target_platform: Optional[str],
+        exclude_device_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        devices = await self.get_user_devices(user_id)
+        candidates = [
+            d for d in devices
+            if (target_platform is None or d.get("platform") == target_platform)
+            and d.get("device_id") != exclude_device_id
+        ]
+        candidates.sort(
+            key=lambda d: (
+                not bool(d.get("online", False)),
+                d.get("last_seen") or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+        return candidates
 
     async def find_device_context(self, device_id: str) -> Optional[Dict[str, Any]]:
         doc = await asyncio.to_thread(self._col.find_one, {"devices.device_id": device_id})
@@ -301,6 +327,109 @@ class CrossPlatformTaskManager:
         )
         return task_id
 
+    async def _execute_claimed_remote_task(self, task_doc: Dict[str, Any]) -> None:
+        """Run a claimed remote task through the existing coordinator pipeline."""
+        task_id = task_doc.get("task_id", "unknown")
+        user_id = task_doc.get("user_id") or "default_user"
+        target_device_id = task_doc.get("target_device_id") or ""
+        target_session_id = task_doc.get("target_session_id") or ""
+        task_payload = dict(task_doc.get("task_payload") or {})
+
+        if not task_payload:
+            logger.error(f"❌ Remote task {task_id} has no payload")
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"_id": task_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc),
+                        "result": {"error": "missing task payload"},
+                    }
+                },
+            )
+            return
+
+        try:
+            from agents.coordinator_agent.coordinator_agent import ActionTask, execute_single_task
+            task = ActionTask(**task_payload)
+        except Exception as exc:
+            logger.error(f"❌ Failed to reconstruct ActionTask for {task_id}: {exc}", exc_info=True)
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"_id": task_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc),
+                        "result": {"error": "invalid task payload", "detail": str(exc)},
+                    }
+                },
+            )
+            return
+
+        current_session_id = target_session_id or task_doc.get("source_session_id") or ""
+        device_context = None
+        if target_device_id:
+            device_context = await self._registry.find_device_context(target_device_id)
+        if device_context and device_context.get("device", {}).get("session_id"):
+            registry_session_id = device_context["device"]["session_id"]
+            if registry_session_id != current_session_id:
+                logger.info(
+                    f"🔄 Using current session {registry_session_id} for device {target_device_id} "
+                    f"(was {current_session_id or 'none'})"
+                )
+            current_session_id = registry_session_id
+
+        session_id = current_session_id
+        if not session_id:
+            logger.error(f"❌ Remote task {task_id} has no execution session_id")
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"_id": task_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc),
+                        "result": {"error": "missing session id"},
+                    }
+                },
+            )
+            return
+
+        try:
+            result = await execute_single_task(
+                task,
+                session_id=session_id,
+                original_message_id="remote-task-dispatcher",
+                user_language=task_payload.get("user_language", "en"),
+                output_language=task_payload.get("output_language", "en"),
+                user_profile=task_payload.get("user_profile", {}),
+                user_id=user_id,
+            )
+            result_payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+            await self.complete_remote_task(
+                task_id=task_id,
+                user_id=user_id,
+                device_id=target_device_id,
+                result=result_payload,
+                status=result.status,
+            )
+            logger.info(f"✅ Remote task {task_id} executed via coordinator pipeline")
+        except Exception as exc:
+            logger.error(f"❌ Remote task execution failed for {task_id}: {exc}", exc_info=True)
+            await asyncio.to_thread(
+                self._col.update_one,
+                {"_id": task_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "completed_at": datetime.now(timezone.utc),
+                        "result": {"error": str(exc)},
+                    }
+                },
+            )
+
     async def complete_remote_task(
         self,
         task_id: str,
@@ -390,26 +519,6 @@ class CrossPlatformTaskManager:
             "result": None,
         }
 
-        if target_device.get("online") and target_session_id:
-            ws_connected = target_session_id in self._ws_manager.active_connections
-            if ws_connected:
-                try:
-                    push_payload = {
-                        "type": "cross_platform_task",
-                        "task_id": task_id,
-                        "source_platform": task_doc["source_platform"],
-                        "original_request": original_request,
-                        "task_payload": task_payload,
-                    }
-                    await self._ws_manager.send_to_session(target_session_id, push_payload)
-                    task_doc["status"] = "running"
-                    task_doc["started_at"] = datetime.now(timezone.utc)
-                    await self._save_task(task_doc)
-                    logger.info(f"✅ Cross-platform task {task_id} pushed via WebSocket to {target_device_id}")
-                    return {"status": "running", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
-                except Exception as e:
-                    logger.warning(f"⚠️ WebSocket push failed for {target_device_id}: {e} — falling back to queue")
-
         await self._save_task(task_doc)
         logger.info(f"📬 Cross-platform task {task_id} queued in MongoDB for {target_device_id}")
         return {"status": "queued", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "mongodb_queue"}
@@ -454,33 +563,6 @@ class CrossPlatformTaskManager:
         }
 
         await self._save_task(task_doc)
-
-        if target_device.get("online") and target_session_id:
-            try:
-                await self._ws_manager.send_to_session(
-                    target_session_id,
-                    {
-                        "type": "single_task",
-                        "task_id": task_id,
-                        "session_id": session_id,
-                        "target_device_id": target_device_id,
-                        "task": task_payload,
-                    },
-                )
-                await asyncio.to_thread(
-                    self._col.update_one,
-                    {"task_id": task_id, "user_id": user_id, "target_device_id": target_device_id},
-                    {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
-                )
-                return {"status": "running", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "websocket"}
-            except Exception as e:
-                logger.warning(f"⚠️ Single-task WebSocket push failed for {target_device_id}: {e} — falling back to queue")
-
-        await asyncio.to_thread(
-            self._col.update_one,
-            {"task_id": task_id, "user_id": user_id, "target_device_id": target_device_id},
-            {"$set": {"status": "queued"}},
-        )
         return {"status": "queued", "task_id": task_id, "target_device_id": target_device_id, "delivery_method": "mongodb_queue"}
 
     async def _save_task(self, task_doc: Dict[str, Any]) -> None:
@@ -504,23 +586,32 @@ class CrossPlatformTaskManager:
             "status": "pending",
             "expires_at": {"$gt": now},
         }
-        if session_id:
-            query["target_session_id"] = session_id
 
         tasks = list(await asyncio.to_thread(self._col.find, query))
         if not tasks:
             return []
 
-        task_ids = [t["task_id"] for t in tasks]
+        executable_tasks: List[Dict[str, Any]] = []
+        for task_doc in tasks:
+            task_payload = task_doc.get("task_payload") or {}
+            if task_payload.get("target_agent") == "language":
+                logger.info(f"⏭️ Task {task_doc.get('task_id', 'unknown')} is a language task; leaving pending")
+                continue
+            executable_tasks.append(task_doc)
+
+        if not executable_tasks:
+            return []
+
+        task_ids = [t["task_id"] for t in executable_tasks]
         await asyncio.to_thread(
             self._col.update_many,
             {"task_id": {"$in": task_ids}},
             {"$set": {"status": "running", "started_at": now}},
         )
-        for t in tasks:
-            t.pop("_id", None)
-        logger.info(f"📨 Claimed {len(tasks)} pending tasks for {device_id} (session: {session_id or 'any'})")
-        return tasks
+        for t in executable_tasks:
+            asyncio.create_task(self._execute_claimed_remote_task(dict(t)))
+        logger.info(f"📨 Claimed {len(executable_tasks)} pending tasks for {device_id} (session: {session_id or 'any'})")
+        return [{k: v for k, v in task.items() if k != "_id"} for task in executable_tasks]
 
     async def update_task_result(
         self,

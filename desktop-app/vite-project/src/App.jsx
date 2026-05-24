@@ -742,7 +742,8 @@ function App() {
   const connectWebSocket = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(`ws://localhost:8000/ws/${sessionId}`);
+    const wsUrl = `ws://localhost:8000/ws/${sessionId}?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}&platform=desktop`;
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -1065,7 +1066,7 @@ function App() {
       console.warn('[WS] Error:', err);
       ws.close();
     };
-  }, [sessionId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, buildDraftPages, clearDraftDecisionTimer, registerWorkspaceArtifacts]);
+  }, [sessionId, userId, deviceId, translateThinkingStep, stopThinkingSpeech, rememberUserLanguageFromText, speakAssistantResponse, t, extractReadableText, userLanguage, buildDraftPages, clearDraftDecisionTimer, registerWorkspaceArtifacts]);
 
   useEffect(() => {
     connectWebSocket();

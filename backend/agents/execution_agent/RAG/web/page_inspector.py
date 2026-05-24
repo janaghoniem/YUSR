@@ -80,9 +80,32 @@ async def get_page_semantics_fallback(page) -> str:
                 
                 // Strategy 6: Common UI patterns
                 const clickableElements = Array.from(document.querySelectorAll('[onclick], [data-action]'));
+
+                const isVisible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0
+                        && s.display !== 'none'
+                        && s.visibility !== 'hidden'
+                        && s.opacity !== '0'
+                        && r.top < window.innerHeight
+                        && r.top >= -100;
+                };
+
+                const isAccessibilityWidget = (el) => {
+                    const text = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+                    const id = (el.id || '').toLowerCase();
+                    const cls = (el.className || '').toLowerCase();
+                    return /accessibility|acsb|visual.impairment|seizure|epileptic|dyslexia|adhd/i.test(text)
+                        || id.includes('acsb')
+                        || cls.includes('acsb');
+                };
                 
                 return {
-                    buttons: buttons.slice(0, 15).map(el => {
+                    buttons: buttons
+                        .filter(isVisible)
+                        .sort((a, b) => isAccessibilityWidget(a) - isAccessibilityWidget(b))
+                        .slice(0, 15).map(el => {
                         const s = getComputedStyle(el);
                         return {
                             text: el.textContent?.trim() || el.ariaLabel || el.title || el.getAttribute('data-tooltip') || 'Unnamed button',
@@ -125,6 +148,52 @@ async def get_page_semantics_fallback(page) -> str:
                             borderColor: s.borderColor || '',
                         };
                         
+                        // Helper: find nearby visible label or question text
+                        function findNearbyLabel(el) {
+                            try {
+                                // 1) label[for=id]
+                                const id = el.id || '';
+                                if (id) {
+                                    const lab = document.querySelector('label[for="' + id + '"]');
+                                    if (lab && (lab.innerText || '').trim()) return (lab.innerText || '').trim();
+                                }
+                                // 2) aria-labelledby
+                                const labelled = el.getAttribute('aria-labelledby');
+                                if (labelled) {
+                                    const node = document.getElementById(labelled);
+                                    if (node && (node.innerText || '').trim()) return (node.innerText || '').trim();
+                                }
+                                // 3) aria-label
+                                const aria = el.getAttribute('aria-label');
+                                if (aria) return aria;
+                                // 4) previous siblings with text
+                                let prev = el.previousElementSibling;
+                                let attempts = 0;
+                                while (prev && attempts < 6) {
+                                    const t = (prev.innerText || '').trim();
+                                    if (t && t.length < 300) return t;
+                                    prev = prev.previousElementSibling;
+                                    attempts++;
+                                }
+                                // 5) look up ancestors and their previous siblings
+                                let p = el.parentElement;
+                                attempts = 0;
+                                while (p && attempts < 4) {
+                                    let sib = p.previousElementSibling;
+                                    while (sib) {
+                                        const t = (sib.innerText || '').trim();
+                                        if (t && t.length < 300) return t;
+                                        sib = sib.previousElementSibling;
+                                    }
+                                    p = p.parentElement;
+                                    attempts++;
+                                }
+                            } catch (e) { /* ignore */ }
+                            return '';
+                        }
+
+                        const nearbyLabel = findNearbyLabel(el) || '';
+
                         // Special handling for contenteditable elements (Gmail recipients)
                         if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') {
                             return {
@@ -136,6 +205,7 @@ async def get_page_semantics_fallback(page) -> str:
                                 ariaLabel: el.getAttribute('aria-label') || '',
                                 visible: visible,
                                 isContentEditable: true,
+                                label: nearbyLabel,
                                 ...baseAttrs,
                             };
                         }
@@ -148,6 +218,7 @@ async def get_page_semantics_fallback(page) -> str:
                             disabled: el.disabled || el.hasAttribute('disabled'),
                             ariaLabel: el.getAttribute('aria-label') || '',
                             visible: visible,
+                            label: nearbyLabel,
                             ...baseAttrs,
                         };
                     }),
@@ -206,12 +277,14 @@ async def get_page_semantics_fallback(page) -> str:
             hidden_inputs  = [i for i in elements_info['inputs'] if not i.get('visible', True)]
             if visible_inputs:
                 descriptions.append("\nINPUT FIELDS (visible — USE THESE):")
-                for inp in visible_inputs:
+                for idx, inp in enumerate(visible_inputs):
                     status = " (disabled)" if inp['disabled'] else ""
                     value_info = f" [current: '{inp['value']}']" if inp['value'] else ""
                     placeholder_info = f" placeholder='{inp['placeholder']}'" if inp['placeholder'] else ""
                     aria_info = f" aria-label='{inp['ariaLabel']}'" if inp['ariaLabel'] else ""
-                    descriptions.append(f"  - {inp['type']} ({inp['name']}){placeholder_info}{aria_info}{value_info}{status}")
+                    label_info = f" label='{inp.get('label')}'" if inp.get('label') else ""
+                    index_hint = f" [nth={idx}]"
+                    descriptions.append(f"  - {inp['type']} ({inp['name']}){index_hint}{placeholder_info}{aria_info}{label_info}{value_info}{status}")
             if hidden_inputs:
                 descriptions.append("\nINPUT FIELDS (hidden — DO NOT TARGET — not yet visible on page):")
                 for inp in hidden_inputs:
@@ -314,6 +387,12 @@ async def get_page_context(page) -> Dict:
         
         # Check if page is loaded
         ready_state = await page.evaluate("() => document.readyState")
+
+        # Best-effort content type for PDF detection and diagnostics
+        try:
+            content_type = await page.evaluate("() => document.contentType || ''")
+        except Exception:
+            content_type = ''
         
         # ✅ NEW: Detect page type
         page_type = await detect_page_type(page)
@@ -336,6 +415,7 @@ async def get_page_context(page) -> Dict:
             'ready_state': ready_state,
             'is_loaded': ready_state == 'complete',
             'page_type': page_type,
+            'content_type': content_type,
             'auth_state': auth_state,  # FIX: which fields are currently visible
         }
     
@@ -410,6 +490,7 @@ async def detect_page_type(page) -> str:
             () => {
                 const url = window.location.href;
                 const hostname = window.location.hostname;
+                const contentType = document.contentType || '';
                 
                 // Gmail-specific detection
                 const isGmailCompose = hostname.includes('mail.google.com') && url.includes('compose');
@@ -448,6 +529,7 @@ async def detect_page_type(page) -> str:
                     isAudio: !!document.querySelector('audio'),
                     isForm: !!document.querySelector('form'),
                     isSearch: !!document.querySelector('input[type="search"], input[placeholder*="search" i]'),
+                    isPdf: contentType.toLowerCase().includes('pdf') || url.toLowerCase().endsWith('.pdf') || url.toLowerCase().includes('/pdf/'),
                     // Gmail detection
                     isGmailCompose: isGmailCompose,
                     isGmail: isGmail,
@@ -469,6 +551,10 @@ async def detect_page_type(page) -> str:
         if page_info.get('isGmailCompose') or (page_info.get('isGmail') and page_info.get('hasComposeArea')):
             return 'gmail_compose'
         
+        # ✅ PRIORITY: PDF viewer detection (before auth/media)
+        if page_info.get('isPdf'):
+            return 'pdf_viewer'
+
         # ⚠️ PRIORITY 1: Multi-page auth detection (BEFORE media detection)
         # This MUST come before video/audio detection because auth pages may have captcha audio
         if page_info.get('isGoogleAuth'):
@@ -662,6 +748,13 @@ async def build_rag_context(page, task_description: str) -> str:
 - Only password field is visible (email was on previous page)
 - Look for "Sign in" or "Login" button
 """
+    elif context.get('page_type') == 'pdf_viewer':
+        page_type_guidance = """
+📄 PDF VIEWER DETECTED:
+- This is a browser PDF viewer; toolbar buttons are NOT in the page DOM.
+- Prefer keyboard save (Ctrl+S / Cmd+S) or a direct PDF download URL.
+- If no DOM controls exist, do NOT search for "Download" buttons in the page.
+"""
     elif context.get('page_type') == 'youtube':
         page_type_guidance = """
 📺 YOUTUBE DETECTED - Special Guidelines:
@@ -683,6 +776,7 @@ async def build_rag_context(page, task_description: str) -> str:
         f"URL: {context['url']}",
         f"Title: {context['title']}",
         f"Page Type: {context.get('page_type', 'unknown')}",
+        f"Content Type: {context.get('content_type', 'unknown')}",
         f"Page Loaded: {context['is_loaded']}",
         "",
         page_type_guidance,

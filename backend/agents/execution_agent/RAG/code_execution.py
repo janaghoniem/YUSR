@@ -258,14 +258,36 @@ class CoordinatorRAGBridge:
 
         # 🔥 PRE-LOAD FILE INDEX to avoid timeout on first find_file() call
         # This is critical - builds cache on first agent run (~5-15s), instant on subsequent runs
-        # try:
-        #     logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
-        #     from agents.execution_agent.RAG.file_agent import preload_index
-        #     preload_index()
-        #     logger.info("✅ [INIT] File index ready")
-        # except Exception as e:
-        #     logger.warning(f"⚠️ [INIT] Could not pre-load file index: {e}")
-        #     logger.info("   (Index will be loaded on first find_file() call)")
+        try:
+            logger.info("📂 [INIT] Pre-loading file index for fast file searches...")
+            from agents.execution_agent.RAG.file_agent import preload_index, start_periodic_refresh
+            preload_index()
+            logger.info("✅ [INIT] File index ready")
+
+            # 🔥 START PERIODIC REFRESH - Detects new files every 5 minutes
+            logger.info("🔄 [INIT] Starting periodic file refresh (5 min interval)...")
+            start_periodic_refresh(
+                interval_seconds=300,  # 5 minutes
+                on_refresh=lambda: logger.debug("[FileAgent] Index refreshed")
+            )
+            logger.info("✅ [INIT] Periodic refresh started")
+
+            # 🔥 START DESKTOP WATCHER - Real-time detection of new files
+            logger.info("👁️  [INIT] Starting Desktop file watcher (real-time detection)...")
+            try:
+                from agents.execution_agent.RAG.watch_desktop_files import start_desktop_watcher
+                start_desktop_watcher()
+                logger.info("✅ [INIT] Desktop watcher started (files detected within 1-2 seconds)")
+            except ImportError:
+                logger.warning("⚠️  [INIT] watchdog not installed. Install with: pip install watchdog")
+                logger.info("   (Using periodic refresh as fallback)")
+            except Exception as e:
+                logger.warning(f"⚠️  [INIT] Could not start desktop watcher: {e}")
+                logger.info("   (Using periodic refresh as fallback)")
+
+        except Exception as e:
+            logger.warning(f"⚠️ [INIT] Could not initialize file detection: {e}")
+            logger.info("   (Index will be loaded on first find_file() call)")
 
 
     #added by shahd for omniparser
@@ -1319,6 +1341,10 @@ class CoordinatorWebRAGBridge:
             except Exception as e:
                 logger.error(f"❌ Exception during web execution: {e}")
                 error_context = str(e)
+            
+            # Brief delay before retry to let browser/driver recover
+            if attempt < max_retries:
+                await asyncio.sleep(2)
         
         logger.error(f"❌ Web task {task.task_id} failed after {max_retries} attempts")
         return TaskResult(
@@ -1361,7 +1387,8 @@ async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_p
             task_data = message.payload
             task_id = message.task_id or task_data.get('task_id', 'unknown')
             session_id = message.session_id
-
+            logger.info(f"🔧 EXECUTION AGENT received task {task_id} for session {session_id}")
+            
             logger.info(f"🎯 Task received: {task_data.get('ai_prompt', 'Unknown')}")
             logger.info(f"   Context: {task_data.get('context', 'NO CONTEXT')}")
             logger.info(f"   Target Agent: {task_data.get('target_agent', 'NO AGENT')}")
@@ -1561,8 +1588,13 @@ async def initialize_execution_agent_for_server(broker_instance):
             web_pipeline = WebExecutionPipeline(web_config)
             
             # ✅ SHARE Groq client from desktop RAG to avoid API key issues
-            web_pipeline.shared_groq_client = desktop_rag.llm.client
-            logger.info("🔗 Shared Groq client from desktop RAG to web pipeline")
+            # Only share if it's a real Groq SDK client (not a string like "mistral_rest")
+            desktop_client = desktop_rag.llm.client
+            if desktop_client is not None and not isinstance(desktop_client, str):
+                web_pipeline.shared_groq_client = desktop_client
+                logger.info("🔗 Shared Groq client from desktop RAG to web pipeline")
+            else:
+                logger.info(f"ℹ️ Desktop RAG uses {desktop_rag.config.llm_provider} — web pipeline will init its own Groq client")
             
             await web_pipeline.initialize()
             
@@ -1622,7 +1654,8 @@ async def start_desktop_only_execution_agent(broker_instance, rag_system, sandbo
     async def handle_execution_request(message):
         try:
             task_data = message.payload
-            task_id = message.task_id or task_data.get('task_id', 'unknown')
+            incoming_task_id = message.task_id or task_data.get('task_id', 'unknown')
+            logger.info(f"🔧 EXECUTION AGENT received task {incoming_task_id} for session {message.session_id}")
             task = ActionTask.from_dict(task_data)
 
             # ✅ CHECK FOR STOP SIGNAL IMMEDIATELY
@@ -1727,7 +1760,8 @@ async def start_simple_execution_agent(broker_instance):
             task_data = message.payload
             task_id = task_data.get('task_id', 'unknown')
             ai_prompt = task_data.get('ai_prompt', '')
-
+            logger.info(f"🔧 EXECUTION AGENT received task {task_id} for session {message.session_id}")
+            
             logger.info(f"🎯 Fallback execution agent received task {task_id}: {ai_prompt[:50]}...")
 
             # ✅ CHECK FOR STOP SIGNAL IMMEDIATELY

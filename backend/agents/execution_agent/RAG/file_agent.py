@@ -24,10 +24,11 @@ import json
 import logging
 import subprocess
 import threading
+import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Callable
 
 # Try rapidfuzz first (faster), fall back to difflib
 try:
@@ -707,11 +708,85 @@ class FileSearch:
 
 
 # ============================================================================
+# PeriodicRefresher — background thread for index updates
+# ============================================================================
+
+class PeriodicRefresher:
+    """
+    Background thread that refreshes the file index at regular intervals.
+    Useful for detecting newly downloaded files or created files.
+    """
+
+    def __init__(self, interval_seconds: int = 300, on_refresh: Optional[Callable] = None):
+        """
+        Args:
+            interval_seconds: How often to refresh index (default: 5 min)
+            on_refresh: Optional callback after refresh completes
+        """
+        self.interval = interval_seconds
+        self.on_refresh = on_refresh
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._running = False
+
+    def start(self, file_search: "FileSearch") -> None:
+        """Start background refresh thread."""
+        if self._running:
+            logger.warning("[PeriodicRefresher] Already running")
+            return
+
+        self._running = True
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._refresh_loop,
+            args=(file_search,),
+            daemon=False,
+            name="FileIndexRefresher"
+        )
+        self._thread.start()
+        logger.info(f"[PeriodicRefresher] Started (interval={self.interval}s)")
+
+    def _refresh_loop(self, file_search: "FileSearch") -> None:
+        """Background loop that refreshes the index periodically."""
+        while not self._stop_event.is_set():
+            try:
+                # Wait for the interval or until stop is signaled
+                if self._stop_event.wait(timeout=self.interval):
+                    break  # Stop was signaled
+
+                logger.debug("[PeriodicRefresher] Triggering refresh…")
+                file_search.refresh()
+                logger.debug("[PeriodicRefresher] Refresh complete")
+
+                if self.on_refresh:
+                    self.on_refresh()
+
+            except Exception as e:
+                logger.error(f"[PeriodicRefresher] Error during refresh: {e}")
+
+    def stop(self) -> None:
+        """Stop the background thread gracefully."""
+        if not self._running:
+            return
+
+        logger.info("[PeriodicRefresher] Stopping…")
+        self._stop_event.set()
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+        self._running = False
+        logger.info("[PeriodicRefresher] Stopped")
+
+
+# ============================================================================
 # Module-level API  (one shared engine, but thread-safe internally)
 # ============================================================================
 
 _engine: Optional[FileSearch] = None
 _engine_lock = threading.Lock()
+_refresher: Optional[PeriodicRefresher] = None
+_refresher_lock = threading.Lock()
 
 
 def _get_engine() -> FileSearch:
@@ -721,6 +796,25 @@ def _get_engine() -> FileSearch:
             if _engine is None:          # double-checked locking
                 _engine = FileSearch()
     return _engine
+
+
+def _get_refresher() -> PeriodicRefresher:
+    global _refresher
+    if _refresher is None:
+        with _refresher_lock:
+            if _refresher is None:
+                _refresher = PeriodicRefresher(interval_seconds=300)  # 5 minutes default
+    return _refresher
+
+
+def _cleanup_refresher():
+    """Cleanup function to stop refresher on exit."""
+    global _refresher
+    if _refresher is not None:
+        _refresher.stop()
+
+
+atexit.register(_cleanup_refresher)
 
 
 def find_file(filename: str, force_refresh: bool = False) -> Dict[str, Any]:
@@ -789,9 +883,192 @@ def open_file(filename: str) -> bool:
     return _open_file(path)
 
 
+def get_latest_file(folder_path: str, file_pattern: str = "*", exclude_dirs: bool = True) -> Dict[str, Any]:
+    """
+    Find the most recently modified file in a folder.
+
+    Args:
+        folder_path:   Full path to the folder (e.g., "C:\\Users\\user\\Downloads")
+        file_pattern:  File pattern to match (default: "*" = all files)
+        exclude_dirs:  If True, exclude directories (only return files)
+
+    Returns:
+        Dict with keys: status, path, modified_time
+        - status: "found" (single file) or "error" (no files/invalid path)
+        - path: Full path to the most recent file
+        - modified_time: ISO 8601 timestamp of modification time
+
+    Examples:
+        >>> result = get_latest_file("C:\\Users\\user\\Downloads")
+        >>> if result["status"] == "found":
+        ...     print(result["path"])
+
+        >>> result = get_latest_file("C:\\Users\\user\\Downloads", "*.pdf")
+        >>> if result["status"] == "found":
+        ...     print(f"Latest PDF: {result['path']}")
+    """
+    try:
+        import glob
+        from pathlib import Path
+
+        # Validate folder exists
+        folder_path = os.path.expanduser(folder_path)
+        if not os.path.isdir(folder_path):
+            logger.error(f"❌ Folder not found: {folder_path}")
+            return {"status": "error", "message": f"Folder not found: {folder_path}"}
+
+        # Build glob pattern
+        pattern = os.path.join(folder_path, file_pattern)
+        matches = glob.glob(pattern)
+
+        if not matches:
+            logger.warning(f"⚠️ No files matching '{file_pattern}' in {folder_path}")
+            return {"status": "error", "message": f"No files matching '{file_pattern}'"}
+
+        # Filter to files only if requested
+        if exclude_dirs:
+            matches = [f for f in matches if os.path.isfile(f)]
+
+        if not matches:
+            logger.warning(f"⚠️ No files (only directories) found in {folder_path}")
+            return {"status": "error", "message": "No files found (only directories)"}
+
+        # Find the most recent file by modification time
+        latest_file = max(matches, key=lambda x: os.path.getmtime(x))
+        modified_time = os.path.getmtime(latest_file)
+        modified_dt = datetime.fromtimestamp(modified_time).isoformat()
+
+        logger.info(f"✅ Found latest file: {latest_file} (modified: {modified_dt})")
+        return {
+            "status": "found",
+            "path": latest_file,
+            "modified_time": modified_dt,
+            "modified_timestamp": modified_time
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error finding latest file: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 def refresh_index() -> None:
     """Force a full re-index. Call after moving/creating files."""
     _get_engine().refresh()
+
+
+def preload_index(extra_roots: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Preload and build the file index at startup.
+
+    This function explicitly loads the cache if available, or builds a fresh
+    index from all configured scan roots. Use this at server startup to ensure
+    the index is ready before any find_file() calls.
+
+    Args:
+        extra_roots: Additional root directories to scan (optional)
+
+    Returns:
+        {
+            "status": "loaded" | "built",
+            "file_count": int,
+            "timestamp": str (ISO format),
+            "cache_path": str
+        }
+
+    Examples:
+        >>> result = preload_index()
+        >>> print(f"Index ready: {result['file_count']} files")
+
+        >>> preload_index(["/path/to/downloads", "/path/to/custom"])
+    """
+    engine = _get_engine()
+    indexer = engine._indexer
+
+    start_time = datetime.now()
+
+    # Try to load from cache first (fast)
+    index = indexer.load_cache()
+
+    if index is not None:
+        logger.info(f"[PreloadIndex] ✅ Loaded from cache: {len(index)} files")
+        with engine._lock:
+            engine._index = index
+            engine._matcher = FuzzyMatcher(index)
+
+        return {
+            "status": "loaded",
+            "file_count": len(index),
+            "timestamp": start_time.isoformat(),
+            "cache_path": CACHE_PATH,
+        }
+
+    # Cache miss or expired — build fresh index
+    logger.info("[PreloadIndex] Cache miss or expired, building fresh index…")
+    roots = _get_scan_roots() + (extra_roots or [])
+    index = indexer.build_index(roots)
+    indexer.save_cache(index)
+
+    with engine._lock:
+        engine._index = index
+        engine._matcher = FuzzyMatcher(index)
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+    logger.info(f"[PreloadIndex] ✅ Built fresh index: {len(index)} files in {elapsed:.2f}s")
+
+    return {
+        "status": "built",
+        "file_count": len(index),
+        "timestamp": start_time.isoformat(),
+        "cache_path": CACHE_PATH,
+        "build_time_seconds": elapsed,
+    }
+
+
+def start_periodic_refresh(
+    interval_seconds: int = 300,
+    on_refresh: Optional[Callable] = None
+) -> PeriodicRefresher:
+    """
+    Start a background thread that refreshes the file index periodically.
+    Useful for detecting newly downloaded or created files.
+
+    Args:
+        interval_seconds: Refresh interval in seconds (default: 300 = 5 min)
+        on_refresh: Optional callback function to execute after each refresh
+
+    Returns:
+        PeriodicRefresher instance (call .stop() to halt background thread)
+
+    Examples:
+        >>> refresher = start_periodic_refresh(interval_seconds=180)  # 3 minutes
+        >>> # ... later ...
+        >>> refresher.stop()
+
+        >>> def on_refresh_callback():
+        ...     print("Index refreshed!")
+        >>> refresher = start_periodic_refresh(
+        ...     interval_seconds=300,
+        ...     on_refresh=on_refresh_callback
+        ... )
+    """
+    refresher = _get_refresher()
+
+    # Update interval and callback
+    refresher.interval = interval_seconds
+    refresher.on_refresh = on_refresh
+
+    if not refresher._running:
+        refresher.start(_get_engine())
+    else:
+        logger.info(f"[PeriodicRefresh] Already running (interval updated to {interval_seconds}s)")
+
+    return refresher
+
+
+def stop_periodic_refresh() -> None:
+    """Stop the background refresh thread."""
+    refresher = _get_refresher()
+    refresher.stop()
 
 
 # ============================================================================
@@ -806,7 +1083,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     tests = [
-        "final_draft.docx"
+        "Test_File_Agent.txt"
     ]
 
     import time

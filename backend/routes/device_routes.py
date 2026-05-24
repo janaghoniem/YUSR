@@ -17,8 +17,10 @@ Fixes applied:
 from fastapi import APIRouter, HTTPException, Path, Body, Query
 from typing import Dict, Any, Optional, List
 import logging
+from datetime import datetime, timezone
 
 from routes.cross_platform_manager import get_cross_platform_manager
+from agents.language_agent import active_agents
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,92 @@ def _normalize_action(action_data: Dict[str, Any]) -> Dict[str, Any]:
     return action_data
 
 
+async def _refresh_device_context(device_id: str, device_data: Optional[Dict[str, Any]] = None) -> None:
+    """Keep the in-memory registry and MongoDB heartbeat in sync for polling devices."""
+    device = DEVICE_REGISTRY.setdefault(
+        device_id,
+        {
+            "device_id": device_id,
+            "name": f"Device {device_id}",
+            "status": "online",
+            "last_seen": None,
+            "screen_width": 1080,
+            "screen_height": 2340,
+        },
+    )
+    device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
+
+    if device_data:
+        device.update({
+            "user_id": device_data.get("user_id", device.get("user_id")),
+            "session_id": device_data.get("session_id", device.get("session_id")),
+            "platform": device_data.get("platform", device.get("platform")),
+            "name": device_data.get("name", device.get("name")),
+            "android_version": device_data.get("android_version", device.get("android_version")),
+            "screen_width": device_data.get("screen_width", device.get("screen_width", 1080)),
+            "screen_height": device_data.get("screen_height", device.get("screen_height", 2340)),
+        })
+
+    mgr = get_cross_platform_manager()
+    if not mgr:
+        return
+
+    user_id = device.get("user_id")
+    session_id = device.get("session_id")
+    if user_id and session_id:
+        try:
+            await mgr._registry.set_device_online(user_id, device_id, session_id, True)
+        except Exception as _heartbeat_err:
+            logger.debug(f"⚠️ Could not refresh device heartbeat for {device_id}: {_heartbeat_err}")
+
+
+async def _claim_cross_platform_actions(device_id: str) -> List[Dict[str, Any]]:
+    """Claim pending MongoDB tasks for the device and expose them through polling."""
+    mgr = get_cross_platform_manager()
+    if not mgr:
+        return []
+
+    device = DEVICE_REGISTRY.get(device_id, {})
+    user_id = device.get("user_id")
+    session_id = device.get("session_id")
+
+    if not user_id:
+        try:
+            context = await mgr._registry.find_device_context(device_id)
+        except Exception:
+            context = None
+        if context:
+            user_id = context.get("user_id")
+            device = context.get("device", device) or device
+            session_id = session_id or device.get("session_id")
+
+    if not user_id:
+        return []
+
+    try:
+        await mgr._registry.set_device_online(user_id, device_id, session_id or device.get("session_id", ""), True)
+    except Exception as _heartbeat_err:
+        logger.debug(f"⚠️ Could not mark {device_id} online before polling: {_heartbeat_err}")
+
+    tasks = await mgr.claim_pending_tasks(user_id=user_id, device_id=device_id, session_id=session_id)
+    if not tasks:
+        return []
+
+    actions: List[Dict[str, Any]] = []
+    for task in tasks:
+        payload = dict(task.get("task_payload") or {})
+        payload.setdefault("task_id", task.get("task_id"))
+        payload.setdefault("source_platform", task.get("source_platform", "coordinator"))
+        payload.setdefault("target_device_id", task.get("target_device_id"))
+        payload.setdefault("target_session_id", task.get("target_session_id"))
+        payload.setdefault("task_kind", "cross_platform_task")
+        payload.setdefault("cross_platform_task", task)
+        actions.append(payload)
+
+    return actions
+
+
 # ---------------------------------------------------------------------------
 # UI Tree endpoints
 # ---------------------------------------------------------------------------
@@ -122,6 +210,8 @@ async def update_ui_tree(device_id: str = Path(...), tree_data: Dict[str, Any] =
             "name": f"Device {device_id}",
             "status": "online",
             "last_seen": None,
+            "user_id": (tree_data or {}).get("user_id"),
+            "session_id": (tree_data or {}).get("session_id"),
             "screen_width": (tree_data or {}).get("screen_width", 1080),
             "screen_height": (tree_data or {}).get("screen_height", 2340),
             "ui_tree": tree_data,
@@ -130,8 +220,11 @@ async def update_ui_tree(device_id: str = Path(...), tree_data: Dict[str, Any] =
     else:
         device = DEVICE_REGISTRY[device_id]
         device["status"] = "online"
+        device["last_seen"] = datetime.now(timezone.utc)
         device["ui_tree"] = tree_data
         if tree_data:
+            device["user_id"] = tree_data.get("user_id", device.get("user_id"))
+            device["session_id"] = tree_data.get("session_id", device.get("session_id"))
             device["screen_width"] = tree_data.get("screen_width", 1080)
             device["screen_height"] = tree_data.get("screen_height", 2340)
     
@@ -151,15 +244,20 @@ async def update_device_status(device_id: str = Path(...), status_data: Dict[str
             "name": f"Device {device_id}",
             "status": "online",
             "last_seen": None,
+            "user_id": (status_data or {}).get("user_id"),
+            "session_id": (status_data or {}).get("session_id"),
             "screen_width": 1080,
             "screen_height": 2340,
         }
     
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
     
     if status_data:
         device.update({
+            "user_id": status_data.get("user_id", device.get("user_id")),
+            "session_id": status_data.get("session_id", device.get("session_id")),
             "android_version": status_data.get("android_version"),
             "app_name": status_data.get("app_name"),
             "screen_width": status_data.get("screen_width", 1080),
@@ -176,13 +274,54 @@ async def update_device_status(device_id: str = Path(...), status_data: Dict[str
 async def get_pending_actions(device_id: str = Path(...)):
     """Get pending actions for device (polling endpoint)."""
     PENDING_ACTIONS.setdefault(device_id, [])
-    actions = PENDING_ACTIONS[device_id]
+    actions = list(PENDING_ACTIONS[device_id])
+
+    try:
+        device_context = DEVICE_REGISTRY.get(device_id)
+        await _refresh_device_context(device_id, device_context)
+        cross_platform_actions = await _claim_cross_platform_actions(device_id)
+        if cross_platform_actions:
+            actions.extend(cross_platform_actions)
+    except Exception as _poll_err:
+        logger.debug(f"⚠️ Polling bridge failed for {device_id}: {_poll_err}")
+
     if actions:
         logger.debug(f"📤 Returning {len(actions)} pending actions for {device_id}")
     response = {"actions": actions, "count": len(actions)}
     PENDING_ACTIONS[device_id] = []
     
     return response
+
+
+@router.get("/cross-platform-tasks")
+async def get_cross_platform_tasks(
+    user_id: Optional[str] = Query(None),
+    device_id: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None),
+):
+    """Get pending cross-platform tasks for desktop polling clients.
+
+    Desktop clients poll this alias, while mobile clients keep using
+    /device/{device_id}/pending-actions. Both paths share the same claim logic.
+    """
+    if not device_id:
+        return {"tasks": [], "count": 0}
+
+    device_context = DEVICE_REGISTRY.get(device_id, {})
+    if user_id:
+        device_context = {**device_context, "user_id": user_id}
+    if session_id:
+        device_context = {**device_context, "session_id": session_id}
+    DEVICE_REGISTRY[device_id] = device_context
+
+    try:
+        await _refresh_device_context(device_id, device_context)
+        tasks = await _claim_cross_platform_actions(device_id)
+    except Exception as _poll_err:
+        logger.debug(f"⚠️ Cross-platform polling failed for {device_id}: {_poll_err}")
+        tasks = []
+
+    return {"tasks": tasks, "count": len(tasks)}
 
 
 @router.post("/{device_id}/action-result")
@@ -224,6 +363,7 @@ async def execute_action_on_device(
             "error": "Device is offline",
             "execution_time_ms": 0,
         }
+    device["last_seen"] = datetime.now(timezone.utc)
     action_data = _normalize_action(action_data)
     PENDING_ACTIONS.setdefault(device_id, [])
     PENDING_ACTIONS[device_id].append(action_data)
@@ -247,6 +387,7 @@ async def register_device_get(
     name: Optional[str] = None,
     android_version: Optional[str] = None,
     session_id: str = Query(default=""),
+    platform: str = Query(default="mobile", description="Device platform: 'mobile' or 'desktop'"),
 ):
     """Register device via GET (used by Android app startup)."""
     logger.info(f"✅ Registering device: {device_id} for user: {user_id}")
@@ -255,12 +396,19 @@ async def register_device_get(
         "name": name or f"Device {device_id}",
         "status": "online",
         "last_seen": None,
+        "user_id": user_id,
+        "session_id": session_id,
         "android_version": android_version,
         "screen_width": 1080,
         "screen_height": 2340,
     })
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
+    if user_id:
+        device["user_id"] = user_id
+    if session_id:
+        device["session_id"] = session_id
     if name:
         device["name"] = name
     if android_version:
@@ -269,20 +417,41 @@ async def register_device_get(
     # FIX V-6: Also register in MongoDB user_devices (async, non-blocking)
     if user_id and session_id:
         try:
-            mgr = get_cross_platform_manager()
-            if mgr:
-                import asyncio
-                asyncio.create_task(
-                    mgr._registry.register_device(
-                        user_id=user_id,
-                        device_id=device_id,
-                        platform="mobile",
-                        session_id=session_id,
-                        label=name or f"Device {device_id}",
-                    )
-                )
+            from core.mongo import get_database
+            from core.dependencies import ws_manager as shared_ws_manager
+            db = get_database("aura_db")
+
+            # Try to use the manager if available; otherwise use DeviceRegistry directly
+            mgr = get_cross_platform_manager(db=db, ws_manager=shared_ws_manager) if db is not None else None
+
+            async def _do_register():
+                try:
+                    if mgr:
+                        await mgr._registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=name or f"Device {device_id}",
+                        )
+                    else:
+                        # Fallback: instantiate registry directly if manager not initialized
+                        from routes.cross_platform_manager import DeviceRegistry
+                        registry = DeviceRegistry(db)
+                        await registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=name or f"Device {device_id}",
+                        )
+                except Exception as _inner_err:
+                    logger.warning(f"⚠️ MongoDB device registration failed for {device_id}: {_inner_err}")
+
+            import asyncio
+            asyncio.create_task(_do_register())
         except Exception as _reg_err:
-            logger.debug(f"⚠️ MongoDB device registration skipped: {_reg_err}")
+            logger.debug(f"⚠️ MongoDB device registration scheduling skipped: {_reg_err}")
 
     return {"status": "ok", "message": f"Device {device_id} registered", "device_info": device}
 
@@ -299,14 +468,19 @@ async def register_device_post(
         "name": (device_data or {}).get("name", f"Device {device_id}"),
         "status": "online",
         "last_seen": None,
+        "user_id": (device_data or {}).get("user_id", ""),
+        "session_id": (device_data or {}).get("session_id", ""),
         "screen_width": 1080,
         "screen_height": 2340,
     })
     device = DEVICE_REGISTRY[device_id]
     device["status"] = "online"
+    device["last_seen"] = datetime.now(timezone.utc)
     if device_data:
         device.update({
             "name": device_data.get("name", device["name"]),
+            "user_id": device_data.get("user_id", device.get("user_id")),
+            "session_id": device_data.get("session_id", device.get("session_id")),
             "android_version": device_data.get("android_version"),
             "device_model": device_data.get("device_model"),
             "screen_width": device_data.get("screen_width", 1080),
@@ -318,20 +492,41 @@ async def register_device_post(
     session_id = (device_data or {}).get("session_id", "")
     if user_id and session_id:
         try:
-            mgr = get_cross_platform_manager()
-            if mgr:
-                import asyncio
-                asyncio.create_task(
-                    mgr._registry.register_device(
-                        user_id=user_id,
-                        device_id=device_id,
-                        platform=device_data.get("platform", "mobile"),
-                        session_id=session_id,
-                        label=device_data.get("name", f"Device {device_id}"),
-                    )
-                )
+            from core.mongo import get_database
+            from core.dependencies import ws_manager as shared_ws_manager
+            db = get_database("aura_db")
+
+            mgr = get_cross_platform_manager(db=db, ws_manager=shared_ws_manager) if db is not None else None
+
+            async def _do_register_post():
+                try:
+                    platform = device_data.get("platform", "mobile")
+                    label = device_data.get("name", f"Device {device_id}")
+                    if mgr:
+                        await mgr._registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=label,
+                        )
+                    else:
+                        from routes.cross_platform_manager import DeviceRegistry
+                        registry = DeviceRegistry(db)
+                        await registry.register_device(
+                            user_id=user_id,
+                            device_id=device_id,
+                            platform=platform,
+                            session_id=session_id,
+                            label=label,
+                        )
+                except Exception as _inner_err:
+                    logger.warning(f"⚠️ MongoDB device registration failed for {device_id}: {_inner_err}")
+
+            import asyncio
+            asyncio.create_task(_do_register_post())
         except Exception as _reg_err:
-            logger.debug(f"⚠️ MongoDB device registration skipped: {_reg_err}")
+            logger.debug(f"⚠️ MongoDB device registration scheduling skipped: {_reg_err}")
 
     logger.info(f"✅ Device {device_id} is now ONLINE")
     return {
@@ -366,48 +561,23 @@ async def list_devices():
 # Cross-platform task endpoints (NEW)
 # ---------------------------------------------------------------------------
 
-@router.get("/cross-platform-tasks")
-async def get_cross_platform_tasks(
-    user_id: str = Query(..., description="Authenticated user ID"),
-    device_id: str = Query(..., description="This device's ID"),
-):
-    """
-    Poll for cross-platform tasks assigned to this device.
-    Called by the device after reconnecting or periodically.
-
-    Returns pending tasks and marks them as delivered.
-    user_id + device_id are validated server-side to prevent
-    one device claiming another user's tasks (FIX V-6).
-    """
-    if not user_id or not device_id:
-        raise HTTPException(status_code=400, detail="user_id and device_id are required")
-
-    try:
-        mgr = get_cross_platform_manager()
-        if not mgr:
-            return {"tasks": [], "count": 0}
-
-        tasks = await mgr.claim_pending_tasks(user_id=user_id, device_id=device_id)
-        return {"tasks": tasks, "count": len(tasks)}
-
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch cross-platform tasks: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/cross-platform-result")
-async def post_cross_platform_result(
+@router.post("/remote-task-result")
+async def submit_remote_task_result(
     result_data: Dict[str, Any] = Body(...),
 ):
     """
-    Report the result of a cross-platform task back to the server.
-    The executing device calls this after completing the task.
+    Report the result of a remotely executed subtask.
+    The device calls this after executing a task received via WebSocket.
     """
     task_id = result_data.get("task_id", "")
     user_id = result_data.get("user_id", "")
     device_id = result_data.get("device_id", "")
     result = result_data.get("result", {})
-    status = result_data.get("status", "completed")
+    status = str(result.get("status", "completed") or "completed").strip().lower()
+    if status in {"success", "done", "ok"}:
+        status = "completed"
+    elif status not in {"pending", "running", "completed", "failed", "expired"}:
+        status = "failed"
 
     if not task_id or not user_id or not device_id:
         raise HTTPException(status_code=400, detail="task_id, user_id, and device_id are required")
@@ -417,7 +587,7 @@ async def post_cross_platform_result(
         if not mgr:
             return {"status": "ok", "message": "Manager not initialized"}
 
-        success = await mgr.update_task_result(
+        success = await mgr.complete_remote_task(
             task_id=task_id,
             user_id=user_id,
             device_id=device_id,
@@ -427,10 +597,62 @@ async def post_cross_platform_result(
         if not success:
             raise HTTPException(status_code=404, detail="Task not found or access denied")
 
+        # Clear any stale clarification waiting on this session if available.
+        session_id = result_data.get("session_id", "")
+        if session_id:
+            agent_key = f"{user_id}_{session_id}"
+            if agent_key in active_agents:
+                try:
+                    active_agents[agent_key].awaiting_user_response = None
+                except Exception:
+                    pass
+
+        logger.info(f"✅ Remote task {task_id} result stored in MongoDB (status={status})")
         return {"status": "ok", "task_id": task_id}
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Failed to store cross-platform task result: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/clear-pending-confirmations")
+async def clear_pending_confirmations(
+    user_id: str = Query(..., description="Authenticated user ID"),
+    session_id: str = Query(..., description="Session ID"),
+    reason: str = Query("timeout", description="Reason for clearing: timeout, failed, or success"),
+):
+    """
+    Explicitly clear pending confirmations/clarifications for a session.
+    Called when:
+    - Task times out (device didn't respond in time)
+    - Task fails with error
+    - Task succeeds but pending confirmation still exists
+    
+    This prevents stale confirmations from blocking subsequent messages.
+    """
+    if not user_id or not session_id:
+        raise HTTPException(status_code=400, detail="user_id and session_id are required")
+
+    try:
+        agent_key = f"{user_id}_{session_id}"
+        
+        if agent_key in active_agents:
+            try:
+                agent = active_agents[agent_key]
+                # Clear the awaiting_user_response field
+                agent.awaiting_user_response = None
+                logger.info(f"✅ Cleared pending confirmations for {agent_key} (reason: {reason})")
+                return {"status": "ok", "message": "Pending confirmations cleared"}
+            except Exception as e:
+                logger.warning(f"⚠️ Could not clear pending confirmations for {agent_key}: {e}")
+                # Still return success to avoid blocking the calling code
+                return {"status": "ok", "message": f"Clear attempted: {str(e)}"}
+        else:
+            logger.debug(f"ℹ️ No active agent found for {agent_key}, nothing to clear")
+            return {"status": "ok", "message": "No active agent found"}
+
+    except Exception as e:
+        logger.error(f"❌ Failed to clear pending confirmations: {e}")
         raise HTTPException(status_code=500, detail=str(e))

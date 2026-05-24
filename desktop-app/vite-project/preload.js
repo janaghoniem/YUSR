@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () => ipcRenderer.invoke('window:close'),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
+  openExternalUrl: (url) => ipcRenderer.invoke('shell:openExternal', url),
   enterWidgetMode: () => ipcRenderer.invoke('widget:enter'),
   exitWidgetMode: () => ipcRenderer.invoke('widget:exit'),
   initAura: (options) => ipcRenderer.invoke('aura:init', options),
@@ -33,4 +34,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('aura-status', handler);
     return () => ipcRenderer.removeListener('aura-status', handler);
   },
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });

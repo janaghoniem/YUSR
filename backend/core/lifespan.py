@@ -2,12 +2,14 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from agents.coordinator_agent.coordinator_agent import start_coordinator_agent
+from agents.api_agent import start_api_agent
 from agents.execution_agent.RAG.code_execution import initialize_execution_agent_for_server
 from agents.language_agent import start_language_agent
 from agents.reasoning_agent import start_reasoning_agent
 from agents.utils.protocol import Channels
 from agents.utils.broker import broker
 from core.mongo import close_mongo_client, get_database, get_mongo_client
+from services.task_dispatcher import TaskDispatcher
 
 from utils.response_handlers import handle_coordinator_output, handle_language_output, handle_ws_output
 from core.dependencies import logger
@@ -24,6 +26,9 @@ def _preload_task_memory_embedding() -> None:
         logger.info("✅ TaskMemory embedding model preloaded")
     except Exception as exc:
         logger.warning(f"⚠️ TaskMemory preload skipped: {exc}")
+
+
+dispatcher = TaskDispatcher(poll_interval_seconds=2)
 
 
 @asynccontextmanager
@@ -56,6 +61,11 @@ async def lifespan(app):
     except Exception as exc:
         logger.warning(f"⚠️ Cross-platform manager initialization skipped: {exc}")
 
+    try:
+        await dispatcher.start()
+    except Exception as exc:
+        logger.warning(f"⚠️ Task dispatcher startup skipped: {exc}")
+
     await asyncio.to_thread(_preload_task_memory_embedding)
 
     try:
@@ -75,6 +85,10 @@ async def lifespan(app):
         asyncio.create_task(initialize_execution_agent_for_server(broker))
         await asyncio.sleep(0.1)
 
+        logger.info("🚀 Starting API Agent...")
+        asyncio.create_task(start_api_agent(broker))
+        await asyncio.sleep(0.1)
+
         logger.info("✅ All agents scheduled successfully")
     except Exception as exc:
         logger.error(f"❌ Error starting agents: {exc}", exc_info=True)
@@ -82,6 +96,7 @@ async def lifespan(app):
     yield
 
     logger.info("🛑 Shutting down AURA Backend...")
+    await dispatcher.stop()
     await broker.stop()
     close_mongo_client()
     logger.info("✅ Broker stopped")

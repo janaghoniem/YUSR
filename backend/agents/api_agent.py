@@ -1,12 +1,16 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-email_agent.py - Gmail API Integration with OAuth2
+api_agent.py - Google API Integration (Gmail, YouTube, Calendar, Drive)
 
 Features:
 - OAuth 2.0 authentication with token refresh
 - Send emails with MIME formatting
 - Read unread emails
 - Extract OTP codes and magic links from emails
+- YouTube search/video info
+- Google Calendar create/list events
+- Google Drive upload/list files
+- Browser cookie injection for seamless Google web automation
 - Message broker integration for async operations
 - Encrypted token storage (Fernet)
 """
@@ -52,11 +56,13 @@ logger = logging.getLogger(__name__)
 GMAIL_CLIENT_ID = os.environ.get("GMAIL_CLIENT_ID")
 GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET")
 GMAIL_REDIRECT_URI = os.environ.get("GMAIL_REDIRECT_URI", "http://localhost:8000/api/email/oauth/callback")
+GMAIL_AUTHORIZE_ROUTE = os.environ.get("GMAIL_AUTHORIZE_ROUTE", "http://localhost:8000/api/email/oauth/authorize")
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.send", 
                 "https://www.googleapis.com/auth/gmail.readonly",
                 "https://www.googleapis.com/auth/youtube.readonly",
                 "https://www.googleapis.com/auth/calendar",
                 "https://www.googleapis.com/auth/drive.file",
+                "https://www.googleapis.com/auth/drive.metadata.readonly",
                 "openid",
                 "https://www.googleapis.com/auth/userinfo.email",
                 "https://www.googleapis.com/auth/userinfo.profile"
@@ -72,17 +78,17 @@ AURA_DB = "aura_db"
 try:
     mongo_client = MongoClient(MONGODB_URI)
     mongo_client.admin.command('ping')
-    logger.info("✅ MongoDB connected for email agent")
+    logger.info("âœ… MongoDB connected for email agent")
 except Exception as e:
-    logger.error(f"❌ MongoDB connection failed: {e}")
+    logger.error(f"âŒ MongoDB connection failed: {e}")
     mongo_client = None
 
 # ============================================================================
 # DATA MODELS
 # ============================================================================
 
-class EmailTask(BaseModel):
-    """Task format for email and Google API operations"""
+class ApiTask(BaseModel):
+    """Task format for Google API operations (Gmail, YouTube, Calendar, Drive)"""
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     operation: str  # "send", "read", "extract_otp", "extract_links", "youtube_search", "youtube_video_info", "calendar_create", "calendar_list", "drive_upload", "drive_list", "get_browser_cookies"
     user_id: str
@@ -119,8 +125,8 @@ class EmailTask(BaseModel):
         use_enum_values = True
 
 
-class EmailResult(BaseModel):
-    """Result from email operation"""
+class ApiResult(BaseModel):
+    """Result from Google API operation"""
     task_id: str
     status: str  # "success", "failed", "pending"
     operation: str
@@ -153,7 +159,7 @@ class TokenEncryptor:
         if not key:
             key = os.environ.get("ENCRYPTION_KEY")
             if not key:
-                logger.warning("⚠️ ENCRYPTION_KEY not set, using temporary key (not recommended for production)")
+                logger.warning("âš ï¸ ENCRYPTION_KEY not set, using temporary key (not recommended for production)")
                 key = Fernet.generate_key().decode()
         
         if isinstance(key, str):
@@ -170,7 +176,7 @@ class TokenEncryptor:
         try:
             return self.cipher.decrypt(encrypted_token.encode()).decode()
         except Exception as e:
-            logger.error(f"❌ Token decryption failed: {e}")
+            logger.error(f"âŒ Token decryption failed: {e}")
             return None
 
 
@@ -185,26 +191,26 @@ _oauth_state_cache = {}  # state -> user_id mapping for active OAuth flows
 # EMAIL AGENT
 # ============================================================================
 
-class EmailAgent:
-    """Gmail API agent with OAuth token management"""
+class ApiAgent:
+    """Google API agent â€” Gmail, YouTube, Calendar, Drive, OAuth token management"""
     
     def __init__(self):
         self.encryptor = TokenEncryptor()
         self.gmail_service = None
         self.credentials_cache = {}  # user_id -> Credentials object
-        logger.info("✅ Email Agent initialized")
+        logger.info("âœ… API Agent initialized")
     
     def get_mongodb_collection(self, collection_name: str):
         """Get MongoDB collection"""
         if mongo_client is None:
-            logger.error("❌ MongoDB not available")
+            logger.error("âŒ MongoDB not available")
             return None
         db = mongo_client[MONGO_DB]
         return db[collection_name]
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # OAuth Token Management
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _create_oauth_flow(self) -> Flow:
         """Create an OAuth flow from environment variables (web application client)."""
@@ -234,7 +240,7 @@ class EmailAgent:
             flow = self._create_oauth_flow()
             flow.redirect_uri = GMAIL_REDIRECT_URI
             
-            logger.info(f"🔐 OAuth Flow Config:")
+            logger.info(f"ðŸ” OAuth Flow Config:")
             logger.info(f"   Client ID: {GMAIL_CLIENT_ID[:20]}...")
             logger.info(f"   Redirect URI: {GMAIL_REDIRECT_URI}")
             logger.info(f"   Scopes: {GMAIL_SCOPES}")
@@ -244,14 +250,14 @@ class EmailAgent:
             
             # Store mapping of state -> user_id in global cache for retrieval on callback
             _oauth_state_cache[state] = user_id
-            logger.info(f"✅ Stored state->{user_id} mapping in cache")
+            logger.info(f"âœ… Stored state->{user_id} mapping in cache")
             
-            logger.info(f"✅ Authorization URL generated (length: {len(auth_url)})")
-            logger.info(f"🔐 OAuth flow initiated for user {user_id}")
+            logger.info(f"âœ… Authorization URL generated (length: {len(auth_url)})")
+            logger.info(f"ðŸ” OAuth flow initiated for user {user_id}")
             return auth_url, state
         
         except Exception as e:
-            logger.error(f"❌ Failed to initiate OAuth flow: {e}")
+            logger.error(f"âŒ Failed to initiate OAuth flow: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return None, None
@@ -276,18 +282,18 @@ class EmailAgent:
             # Cache credentials
             self.credentials_cache[user_id] = creds
             
-            logger.info(f"✅ OAuth callback processed for user {user_id}")
+            logger.info(f"âœ… OAuth callback processed for user {user_id}")
             return True
         
         except Exception as e:
-            logger.error(f"❌ OAuth callback failed: {e}")
+            logger.error(f"âŒ OAuth callback failed: {e}")
             return False
     
     async def _store_credentials_mongodb(self, user_id: str, creds: Credentials):
         """Store OAuth credentials in MongoDB with encryption"""
         collection = self.get_mongodb_collection("user_credentials_email")
         if collection is None:
-            logger.error("❌ Cannot store credentials: MongoDB unavailable")
+            logger.error("âŒ Cannot store credentials: MongoDB unavailable")
             return
         
         try:
@@ -327,10 +333,10 @@ class EmailAgent:
                 upsert=True
             )
             
-            logger.info(f"✅ Credentials stored for {user_id} ({email_address})")
+            logger.info(f"âœ… Credentials stored for {user_id} ({email_address})")
         
         except Exception as e:
-            logger.error(f"❌ Failed to store credentials: {e}")
+            logger.error(f"âŒ Failed to store credentials: {e}")
     
     async def _get_credentials_mongodb(self, user_id: str) -> Optional[Credentials]:
         """Retrieve and refresh credentials from MongoDB"""
@@ -342,24 +348,24 @@ class EmailAgent:
         
         collection = self.get_mongodb_collection("user_credentials_email")
         if collection is None:
-            logger.error("❌ Cannot retrieve credentials: MongoDB unavailable")
+            logger.error("âŒ Cannot retrieve credentials: MongoDB unavailable")
             return None
         
         try:
             doc = collection.find_one({'user_id': user_id})
             if not doc:
-                logger.warning(f"⚠️ No credentials found for user {user_id}")
+                logger.warning(f"âš ï¸ No credentials found for user {user_id}")
                 return None
             
             # Decrypt refresh token
             encrypted_token = doc.get('encrypted_refresh_token')
             if not encrypted_token:
-                logger.error(f"❌ No refresh token for user {user_id}")
+                logger.error(f"âŒ No refresh token for user {user_id}")
                 return None
             
             refresh_token = self.encryptor.decrypt(encrypted_token)
             if not refresh_token:
-                logger.error(f"❌ Failed to decrypt refresh token for user {user_id}")
+                logger.error(f"âŒ Failed to decrypt refresh token for user {user_id}")
                 return None
             
             # Reconstruct credentials
@@ -387,9 +393,9 @@ class EmailAgent:
                             'updated_at': datetime.now().isoformat()
                         }}
                     )
-                    logger.info(f"✅ Access token refreshed for {user_id}")
+                    logger.info(f"âœ… Access token refreshed for {user_id}")
                 except RefreshError as e:
-                    logger.error(f"❌ Token refresh failed: {e}")
+                    logger.error(f"âŒ Token refresh failed: {e}")
                     return None
             
             # Cache
@@ -397,7 +403,7 @@ class EmailAgent:
             return creds
         
         except Exception as e:
-            logger.error(f"❌ Failed to retrieve credentials: {e}")
+            logger.error(f"âŒ Failed to retrieve credentials: {e}")
             return None
     
     async def revoke_credentials(self, user_id: str):
@@ -415,9 +421,9 @@ class EmailAgent:
             # Remove from cache
             self.credentials_cache.pop(user_id, None)
             
-            logger.info(f"✅ Credentials revoked for {user_id}")
+            logger.info(f"âœ… Credentials revoked for {user_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to revoke credentials: {e}")
+            logger.error(f"âŒ Failed to revoke credentials: {e}")
 
     async def _get_credentials_with_fallback(self, user_id: str) -> Tuple[Optional[Credentials], str]:
         """
@@ -432,7 +438,7 @@ class EmailAgent:
         mapped_user = self._resolve_credential_owner_from_db(user_id)
         if mapped_user and mapped_user != user_id:
             logger.warning(
-                f"⚠️ No credentials for user {user_id}; mapped to credential owner {mapped_user} from DB"
+                f"âš ï¸ No credentials for user {user_id}; mapped to credential owner {mapped_user} from DB"
             )
             mapped_creds = await self._get_credentials_mongodb(mapped_user)
             if mapped_creds:
@@ -441,7 +447,7 @@ class EmailAgent:
         fallback_user = EMAIL_CREDENTIAL_FALLBACK_USER_ID
         if fallback_user and fallback_user != user_id:
             logger.warning(
-                f"⚠️ No credentials for user {user_id}; trying fallback credential owner {fallback_user}"
+                f"âš ï¸ No credentials for user {user_id}; trying fallback credential owner {fallback_user}"
             )
             fallback_creds = await self._get_credentials_mongodb(fallback_user)
             if fallback_creds:
@@ -492,7 +498,7 @@ class EmailAgent:
                         return candidate
 
                 # Search credentials by gmail_address containing the username
-                # e.g., user_id "user_173..." → aura_db.users has email "hala@..." → search
+                # e.g., user_id "user_173..." â†’ aura_db.users has email "hala@..." â†’ search
                 # credentials where gmail_address starts with that local-part
                 for candidate in candidates:
                     gmail_match = collection.find_one(
@@ -508,27 +514,27 @@ class EmailAgent:
             if total_creds == 1:
                 single_doc = collection.find_one({}, {'_id': 0, 'user_id': 1})
                 if single_doc:
-                    logger.info(f"🔑 Single credential fallback: using {single_doc['user_id']}")
+                    logger.info(f"ðŸ”‘ Single credential fallback: using {single_doc['user_id']}")
                     return single_doc['user_id']
 
             return None
         except Exception as e:
-            logger.warning(f"⚠️ Failed resolving credential owner for {user_id}: {e}")
+            logger.warning(f"âš ï¸ Failed resolving credential owner for {user_id}: {e}")
             return None
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Email Operations
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
     async def send_email(self, user_id: str, to: str, subject: str, body: str, 
-                         attachments: Optional[List[Dict]] = None) -> EmailResult:
+                         attachments: Optional[List[Dict]] = None) -> ApiResult:
         """Send email via Gmail API"""
         task_id = str(uuid.uuid4())
         
         try:
             creds, credential_user_id = await self._get_credentials_with_fallback(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=task_id,
                     status="failed",
                     operation="send",
@@ -576,7 +582,7 @@ class EmailAgent:
                         part.add_header('Content-Disposition', f'attachment; filename= {att.get("name", att["path"])}')
                         message.attach(part)
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to attach {att.get('name')}: {e}")
+                        logger.warning(f"âš ï¸ Failed to attach {att.get('name')}: {e}")
             
             # Send
             raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
@@ -585,10 +591,10 @@ class EmailAgent:
             service.users().messages().send(userId='me', body=send_message).execute()
             
             logger.info(
-                f"✅ Email sent to {to} for user {user_id} using credentials from {credential_user_id}"
+                f"âœ… Email sent to {to} for user {user_id} using credentials from {credential_user_id}"
             )
             
-            return EmailResult(
+            return ApiResult(
                 task_id=task_id,
                 status="success",
                 operation="send",
@@ -600,9 +606,9 @@ class EmailAgent:
                 }
             )
         
-        except Exception as e:
-            logger.error(f"❌ Failed to send email: {e}")
-            return EmailResult(
+        except Exception:
+            logger.exception("Failed to send email")
+            return ApiResult(
                 task_id=task_id,
                 status="failed",
                 operation="send",
@@ -610,14 +616,14 @@ class EmailAgent:
             )
     
     async def read_unread_emails(self, user_id: str, max_results: int = 10, 
-                                  query: str = "is:unread") -> EmailResult:
+                                  query: str = "is:unread") -> ApiResult:
         """Read unread emails from Gmail"""
         task_id = str(uuid.uuid4())
         
         try:
             creds, credential_user_id = await self._get_credentials_with_fallback(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=task_id,
                     status="failed",
                     operation="read",
@@ -661,13 +667,13 @@ class EmailAgent:
                     await self._cache_email(user_id, msg['id'], from_addr, subject, snippet)
                 
                 except Exception as e:
-                    logger.warning(f"⚠️ Failed to process message {msg['id']}: {e}")
+                    logger.warning(f"âš ï¸ Failed to process message {msg['id']}: {e}")
             
             logger.info(
-                f"✅ Retrieved {len(email_data)} unread emails for user {user_id} using credentials from {credential_user_id}"
+                f"âœ… Retrieved {len(email_data)} unread emails for user {user_id} using credentials from {credential_user_id}"
             )
             
-            return EmailResult(
+            return ApiResult(
                 task_id=task_id,
                 status="success",
                 operation="read",
@@ -676,15 +682,15 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Failed to read emails: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Failed to read emails: {e}")
+            return ApiResult(
                 task_id=task_id,
                 status="failed",
                 operation="read",
                 error=str(e)
             )
     
-    async def extract_otp_codes(self, user_id: str, max_results: int = 5) -> EmailResult:
+    async def extract_otp_codes(self, user_id: str, max_results: int = 5) -> ApiResult:
         """Extract OTP codes from recent emails"""
         task_id = str(uuid.uuid4())
         
@@ -724,9 +730,9 @@ class EmailAgent:
                                 'timestamp': email.get('timestamp')
                             })
             
-            logger.info(f"✅ Extracted {len(otp_codes)} OTP codes for user {user_id}")
+            logger.info(f"âœ… Extracted {len(otp_codes)} OTP codes for user {user_id}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=task_id,
                 status="success",
                 operation="extract_otp",
@@ -735,15 +741,15 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Failed to extract OTP codes: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Failed to extract OTP codes: {e}")
+            return ApiResult(
                 task_id=task_id,
                 status="failed",
                 operation="extract_otp",
                 error=str(e)
             )
     
-    async def extract_magic_links(self, user_id: str, max_results: int = 5) -> EmailResult:
+    async def extract_magic_links(self, user_id: str, max_results: int = 5) -> ApiResult:
         """Extract magic links from recent emails"""
         task_id = str(uuid.uuid4())
         
@@ -775,9 +781,9 @@ class EmailAgent:
                                 'timestamp': email.get('timestamp')
                             })
             
-            logger.info(f"✅ Extracted {len(magic_links)} magic links for user {user_id}")
+            logger.info(f"âœ… Extracted {len(magic_links)} magic links for user {user_id}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=task_id,
                 status="success",
                 operation="extract_links",
@@ -786,8 +792,8 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Failed to extract magic links: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Failed to extract magic links: {e}")
+            return ApiResult(
                 task_id=task_id,
                 status="failed",
                 operation="extract_links",
@@ -815,11 +821,11 @@ class EmailAgent:
             # Set TTL to 1 hour
             collection.create_index('timestamp', expireAfterSeconds=3600)
         except Exception as e:
-            logger.warning(f"⚠️ Failed to cache email: {e}")
+            logger.warning(f"âš ï¸ Failed to cache email: {e}")
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Google APIs: Browser Cookie Bridge
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
     async def get_browser_cookies(self, user_id: str) -> Dict[str, Any]:
         """
@@ -829,7 +835,7 @@ class EmailAgent:
         task_id = str(uuid.uuid4())
         
         try:
-            # Get credentials with full fallback resolution (direct → DB mapping → env fallback)
+            # Get credentials with full fallback resolution (direct â†’ DB mapping â†’ env fallback)
             creds, effective_user_id = await self._get_credentials_with_fallback(user_id)
             if not creds:
                 return {
@@ -838,12 +844,12 @@ class EmailAgent:
                     'cookies': []
                 }
             if effective_user_id != user_id:
-                logger.info(f"🔑 Browser cookies: resolved {user_id} → credential owner {effective_user_id}")
+                logger.info(f"ðŸ”‘ Browser cookies: resolved {user_id} â†’ credential owner {effective_user_id}")
             
             # Refresh access token if needed
             if not creds.valid and creds.refresh_token:
                 creds.refresh(Request())
-                logger.info(f"✅ Access token refreshed for cookie bridge")
+                logger.info(f"âœ… Access token refreshed for cookie bridge")
             
             access_token = creds.token
             if not access_token:
@@ -864,24 +870,24 @@ class EmailAgent:
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
                 })
                 
-                # Step 1: OAuthLogin — exchange access token for uberauth token
+                # Step 1: OAuthLogin â€” exchange access token for uberauth token
                 oauth_login_url = "https://accounts.google.com/OAuthLogin?source=ChromiumBrowser&issueuberauth=1"
                 response1 = session.get(
                     oauth_login_url,
                     headers={'Authorization': f'Bearer {access_token}'},
                     allow_redirects=False
                 )
-                logger.info(f"🔑 OAuthLogin response: status={response1.status_code}, body_len={len(response1.text)}, cookies={list(session.cookies.keys())}")
+                logger.info(f"ðŸ”‘ OAuthLogin response: status={response1.status_code}, body_len={len(response1.text)}, cookies={list(session.cookies.keys())}")
                 
                 uberauth_token = response1.text.strip()
                 
-                # Step 2: MergeSession — convert uberauth to real session cookies (SID, HSID, etc.)
+                # Step 2: MergeSession â€” convert uberauth to real session cookies (SID, HSID, etc.)
                 if uberauth_token and len(uberauth_token) < 500:
                     merge_url = f"https://accounts.google.com/MergeSession?uberauth={uberauth_token}&continue=https://www.google.com/"
                     response2 = session.get(merge_url, allow_redirects=True)
-                    logger.info(f"🔑 MergeSession response: status={response2.status_code}, cookies={list(session.cookies.keys())}")
+                    logger.info(f"ðŸ”‘ MergeSession response: status={response2.status_code}, cookies={list(session.cookies.keys())}")
                 else:
-                    logger.warning(f"⚠️ OAuthLogin did not return a valid uberauth token (len={len(uberauth_token)})")
+                    logger.warning(f"âš ï¸ OAuthLogin did not return a valid uberauth token (len={len(uberauth_token)})")
                 
                 # Step 3: Extract ALL session cookies from the requests session jar
                 # These are the real Google session cookies (SID, HSID, SSID, etc.)
@@ -901,7 +907,7 @@ class EmailAgent:
                         cookie_dict['secure'] = True
                     # Mark important auth cookies
                     if cookie.name in important_cookies:
-                        logger.info(f"  🍪 Got auth cookie: {cookie.name} (domain={cookie.domain})")
+                        logger.info(f"  ðŸª Got auth cookie: {cookie.name} (domain={cookie.domain})")
                     cookies_list.append(cookie_dict)
                 
                 # Also parse raw Set-Cookie headers for any we missed
@@ -914,9 +920,9 @@ class EmailAgent:
                                 cookies_list.append(pc)
                 
                 found_session = any(c['name'] in important_cookies for c in cookies_list)
-                logger.info(f"✅ Retrieved {len(cookies_list)} Google cookies for user {user_id} (has_session_cookies={found_session})")
+                logger.info(f"âœ… Retrieved {len(cookies_list)} Google cookies for user {user_id} (has_session_cookies={found_session})")
                 if not found_session:
-                    logger.warning(f"⚠️ No critical session cookies (SID/HSID/SSID) found — Google auth injection will likely not work")
+                    logger.warning(f"âš ï¸ No critical session cookies (SID/HSID/SSID) found â€” Google auth injection will likely not work")
                 
                 return {
                     'status': 'success',
@@ -927,7 +933,7 @@ class EmailAgent:
                 }
             
             except Exception as e:
-                logger.error(f"❌ Failed to exchange token for cookies: {e}")
+                logger.error(f"âŒ Failed to exchange token for cookies: {e}")
                 return {
                     'status': 'failed',
                     'error': str(e),
@@ -935,7 +941,7 @@ class EmailAgent:
                 }
         
         except Exception as e:
-            logger.error(f"❌ Failed to get browser cookies: {e}")
+            logger.error(f"âŒ Failed to get browser cookies: {e}")
             return {
                 'status': 'failed',
                 'error': str(e),
@@ -1002,16 +1008,16 @@ class EmailAgent:
         
         return cookies
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Google APIs: YouTube
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
-    async def youtube_search(self, user_id: str, query: str, max_results: int = 10) -> EmailResult:
+    async def youtube_search(self, user_id: str, query: str, max_results: int = 10) -> ApiResult:
         """Search YouTube videos"""
         try:
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="youtube_search",
@@ -1047,9 +1053,9 @@ class EmailAgent:
                     'url': f'https://www.youtube.com/watch?v={video_id}'
                 })
             
-            logger.info(f"✅ YouTube search returned {len(results)} results for '{query}'")
+            logger.info(f"âœ… YouTube search returned {len(results)} results for '{query}'")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="youtube_search",
@@ -1057,30 +1063,30 @@ class EmailAgent:
             )
         
         except HttpError as e:
-            logger.error(f"❌ YouTube API error: {e}")
-            return EmailResult(
+            logger.error(f"âŒ YouTube API error: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="youtube_search",
                 error=f"YouTube API error: {str(e)}"
             )
         except Exception as e:
-            logger.error(f"❌ YouTube search failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ YouTube search failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="youtube_search",
                 error=str(e)
             )
     
-    async def youtube_video_info(self, user_id: str, video_url: str) -> EmailResult:
+    async def youtube_video_info(self, user_id: str, video_url: str) -> ApiResult:
         """Get detailed info about a YouTube video"""
         try:
             # Extract video ID from URL
             import re
             video_id_match = re.search(r'(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)', video_url)
             if not video_id_match:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="youtube_video_info",
@@ -1091,7 +1097,7 @@ class EmailAgent:
             
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="youtube_video_info",
@@ -1109,7 +1115,7 @@ class EmailAgent:
             response = request.execute()
             
             if not response.get('items'):
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="youtube_video_info",
@@ -1134,9 +1140,9 @@ class EmailAgent:
                 'url': f'https://www.youtube.com/watch?v={video_id}'
             }
             
-            logger.info(f"✅ Retrieved info for video: {result['title']}")
+            logger.info(f"âœ… Retrieved info for video: {result['title']}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="youtube_video_info",
@@ -1144,25 +1150,26 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ YouTube video info failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ YouTube video info failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="youtube_video_info",
                 error=str(e)
             )
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Google APIs: Calendar
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
     async def calendar_create(self, user_id: str, title: str, start_time: str, 
-                             end_time: str, description: str = "") -> EmailResult:
+                             end_time: str, description: str = "",
+                             all_day: bool = False) -> ApiResult:
         """Create a Google Calendar event"""
         try:
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="calendar_create",
@@ -1174,24 +1181,33 @@ class EmailAgent:
             # Get timezone from environment, default to UTC
             timezone = os.getenv("CALENDAR_TIMEZONE", "UTC")
             
-            event = {
-                'summary': title,
-                'description': description,
-                'start': {
-                    'dateTime': start_time,
-                    'timeZone': timezone
-                },
-                'end': {
-                    'dateTime': end_time,
-                    'timeZone': timezone
-                },
-            }
+            # All-day events use 'date' (YYYY-MM-DD), timed events use 'dateTime'
+            if all_day or (len(start_time) == 10 and 'T' not in start_time):
+                event = {
+                    'summary': title,
+                    'description': description,
+                    'start': {'date': start_time[:10]},
+                    'end': {'date': end_time[:10]},
+                }
+            else:
+                event = {
+                    'summary': title,
+                    'description': description,
+                    'start': {
+                        'dateTime': start_time,
+                        'timeZone': timezone
+                    },
+                    'end': {
+                        'dateTime': end_time,
+                        'timeZone': timezone
+                    },
+                }
             
             result = calendar.events().insert(calendarId='primary', body=event).execute()
             
-            logger.info(f"✅ Calendar event created: {result['id']}")
+            logger.info(f"âœ… Calendar event created: {result['id']}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="calendar_create",
@@ -1207,28 +1223,28 @@ class EmailAgent:
             )
         
         except HttpError as e:
-            logger.error(f"❌ Calendar API error: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Calendar API error: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="calendar_create",
                 error=f"Calendar API error: {str(e)}"
             )
         except Exception as e:
-            logger.error(f"❌ Calendar event creation failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Calendar event creation failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="calendar_create",
                 error=str(e)
             )
     
-    async def calendar_list(self, user_id: str, max_results: int = 10) -> EmailResult:
+    async def calendar_list(self, user_id: str, max_results: int = 10) -> ApiResult:
         """List upcoming Google Calendar events"""
         try:
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="calendar_list",
@@ -1262,9 +1278,9 @@ class EmailAgent:
                     'description': event.get('description', '')
                 })
             
-            logger.info(f"✅ Retrieved {len(events)} calendar events for user {user_id}")
+            logger.info(f"âœ… Retrieved {len(events)} calendar events for user {user_id}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="calendar_list",
@@ -1272,25 +1288,25 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Calendar list failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Calendar list failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="calendar_list",
                 error=str(e)
             )
     
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Google APIs: Drive
-    # ────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
-    async def drive_upload(self, user_id: str, file_path: str, parent_folder_id: str = None) -> EmailResult:
+    async def drive_upload(self, user_id: str, file_path: str, parent_folder_id: str = None) -> ApiResult:
         """Upload a file to Google Drive"""
         
         try:
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="drive_upload",
@@ -1298,7 +1314,7 @@ class EmailAgent:
                 )
             
             if not os.path.isfile(file_path):
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="drive_upload",
@@ -1317,9 +1333,9 @@ class EmailAgent:
             
             file = drive.files().create(body=file_metadata, media_body=media, fields='id,webViewLink').execute()
             
-            logger.info(f"✅ File uploaded to Drive: {file['id']}")
+            logger.info(f"âœ… File uploaded to Drive: {file['id']}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="drive_upload",
@@ -1327,21 +1343,21 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Drive upload failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Drive upload failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="drive_upload",
                 error=str(e)
             )
     
-    async def drive_list(self, user_id: str, max_results: int = 10) -> EmailResult:
+    async def drive_list(self, user_id: str, max_results: int = 10) -> ApiResult:
         """List files in Google Drive"""
         
         try:
             creds = await self._get_credentials_mongodb(user_id)
             if not creds:
-                return EmailResult(
+                return ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation="drive_list",
@@ -1366,9 +1382,9 @@ class EmailAgent:
                     'link': file.get('webViewLink', '')
                 })
             
-            logger.info(f"✅ Retrieved {len(files)} files from Drive for user {user_id}")
+            logger.info(f"âœ… Retrieved {len(files)} files from Drive for user {user_id}")
             
-            return EmailResult(
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="success",
                 operation="drive_list",
@@ -1376,28 +1392,111 @@ class EmailAgent:
             )
         
         except Exception as e:
-            logger.error(f"❌ Drive list failed: {e}")
-            return EmailResult(
+            logger.error(f"âŒ Drive list failed: {e}")
+            return ApiResult(
                 task_id=str(uuid.uuid4()),
                 status="failed",
                 operation="drive_list",
                 error=str(e)
             )
 
+    async def drive_search(self, user_id: str, query: str, max_results: int = 50) -> ApiResult:
+        """Search files in Google Drive using Drive query syntax (q)."""
+
+        try:
+            creds = await self._get_credentials_mongodb(user_id)
+            if not creds:
+                return ApiResult(
+                    task_id=str(uuid.uuid4()),
+                    status="failed",
+                    operation="drive_search",
+                    error=f"No credentials for user {user_id}"
+                )
+
+            drive = build('drive', 'v3', credentials=creds)
+
+            effective_query = (query or "").strip() or "trashed = false"
+            starts_with_prefix = None
+
+            # Normalize natural-language patterns like:
+            # "name starts with 'I'" into a valid Drive query + local prefix filter.
+            starts_with_match = re.search(
+                r"name\s+starts\s+with\s+['\"]([^'\"]+)['\"]",
+                effective_query,
+                flags=re.IGNORECASE,
+            )
+            if starts_with_match:
+                starts_with_prefix = starts_with_match.group(1).strip()
+                escaped_prefix = starts_with_prefix.replace("'", "\\'")
+                effective_query = f"name contains '{escaped_prefix}'"
+
+            if "trashed" not in effective_query.lower():
+                effective_query = f"({effective_query}) and trashed = false"
+
+            results = drive.files().list(
+                q=effective_query,
+                pageSize=max_results,
+                fields='files(id,name,mimeType,modifiedTime,webViewLink)',
+                orderBy='name_natural',
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            ).execute()
+
+            files = []
+            for file in results.get('files', []):
+                files.append({
+                    'id': file.get('id', ''),
+                    'name': file.get('name', ''),
+                    'type': file.get('mimeType', ''),
+                    'modified': file.get('modifiedTime', ''),
+                    'link': file.get('webViewLink', ''),
+                })
+
+            if starts_with_prefix:
+                prefix_l = starts_with_prefix.lower()
+                files = [f for f in files if (f.get('name', '').lower().startswith(prefix_l))]
+
+            logger.info(f"âœ… Drive search returned {len(files)} files for user {user_id}")
+
+            return ApiResult(
+                task_id=str(uuid.uuid4()),
+                status="success",
+                operation="drive_search",
+                result={"files": files, "query": effective_query},
+                message_count=len(files)
+            )
+
+        except HttpError as e:
+            logger.error(f"âŒ Drive API search error: {e}")
+            return ApiResult(
+                task_id=str(uuid.uuid4()),
+                status="failed",
+                operation="drive_search",
+                error=f"Drive API error: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"âŒ Drive search failed: {e}")
+            return ApiResult(
+                task_id=str(uuid.uuid4()),
+                status="failed",
+                operation="drive_search",
+                error=str(e)
+            )
 
 
-async def start_email_agent(broker_instance=None):
-    """Start email agent and subscribe to broker channels"""
+
+async def start_api_agent(broker_instance=None):
+    """Start API agent and subscribe to broker channels"""
     
     if broker_instance is None:
         broker_instance = broker
     
     print("=" * 70)
-    print("📧 EMAIL AGENT - READY (GMAIL API)!")
+    print("ï¿½ API AGENT - READY (Google APIs: Gmail, YouTube, Calendar, Drive)!")
     print("=" * 70)
     print("Waiting for email tasks...\n")
     
-    agent = EmailAgent()
+    agent = ApiAgent()
     
     async def handle_email_task(message: dict):
         """Handle email task from coordinator"""
@@ -1406,16 +1505,26 @@ async def start_email_agent(broker_instance=None):
             message_receiver = getattr(message, 'receiver', payload.get('receiver'))
             operation = str(payload.get('operation', '')).strip().lower()
 
-            # Safety net: ignore anything that is not an explicit email-targeted operation.
+            # Safety net: only route known API operations handled by this agent.
             valid_ops = {
+                # Gmail
                 "send", "read", "extract_otp", "extract_links",
-                "youtube_search", "youtube_video_info",
-                "calendar_create", "calendar_list",
-                "drive_upload", "drive_list",
+                "list_emails", "read_email", "search_emails",
+                "delete_email", "mark_read", "reply_email",
+                # YouTube
+                "youtube_search", "youtube_video_info", "youtube_subscriptions",
+                # Calendar
+                "calendar_create", "calendar_list", "calendar_delete",
+                "calendar_update", "calendar_get",
+                # Drive
+                "drive_upload", "drive_list", "drive_search",
+                "drive_download", "drive_delete", "drive_share",
+                "drive_create_folder", "drive_rename", "drive_move",
+                # Auth
                 "get_browser_cookies"
             }
             if operation not in valid_ops:
-                logger.debug(f"⏭️ Ignoring non-email payload (operation='{operation}')")
+                logger.info(f"⏭️ Ignoring non-api payload (operation='{operation}')")
                 return
 
             if message_receiver is not None:
@@ -1423,21 +1532,21 @@ async def start_email_agent(broker_instance=None):
             else:
                 receiver_value = None
 
-            if receiver_value and receiver_value not in {AgentType.EMAIL.value, AgentType.EMAIL.name.lower(), "email"}:
-                logger.debug(f"⏭️ Ignoring payload not addressed to email agent (receiver='{message_receiver}')")
+            if receiver_value and receiver_value not in {"email", "api"}:
+                logger.info(f"⏭️ Ignoring payload not addressed to api agent (receiver='{message_receiver}')")
                 return
             
             session_id = message.session_id if hasattr(message, 'session_id') else payload.get('session_id')
             user_id = payload.get('user_id', 'unknown_user')
             incoming_task_id = getattr(message, 'task_id', None) or payload.get('task_id') or str(uuid.uuid4())
             
-            logger.info(f"📧 Email task received: {operation} for user {user_id}")
+            logger.info(f"📨 API task received: {operation} for user {user_id}")
             
             # Route to appropriate operation
             if operation == 'send':
                 result = await agent.send_email(
                     user_id=user_id,
-                    to=payload.get('to'),
+                    to=payload.get('to') or payload.get('recipient'),  # Accept both field names
                     subject=payload.get('subject'),
                     body=payload.get('body'),
                     attachments=payload.get('attachments')
@@ -1465,7 +1574,7 @@ async def start_email_agent(broker_instance=None):
             elif operation == 'youtube_search':
                 result = await agent.youtube_search(
                     user_id=user_id,
-                    query=payload.get('search_query', ''),
+                    query=payload.get('query', '') or payload.get('search_query', ''),
                     max_results=payload.get('max_results', 10)
                 )
             
@@ -1479,8 +1588,9 @@ async def start_email_agent(broker_instance=None):
                 result = await agent.calendar_create(
                     user_id=user_id,
                     title=payload.get('title', ''),
-                    start_time=payload.get('start_time', ''),
-                    end_time=payload.get('end_time', ''),
+                    start_time=payload.get('start_time', '') or payload.get('start_date', ''),
+                    end_time=payload.get('end_time', '') or payload.get('end_date', ''),
+                    all_day=payload.get('all_day', False),
                     description=payload.get('description', '')
                 )
             
@@ -1502,10 +1612,17 @@ async def start_email_agent(broker_instance=None):
                     user_id=user_id,
                     max_results=payload.get('max_results', 10)
                 )
+
+            elif operation == 'drive_search':
+                result = await agent.drive_search(
+                    user_id=user_id,
+                    query=payload.get('query', ''),
+                    max_results=payload.get('max_results', 50)
+                )
             
             elif operation == 'get_browser_cookies':
                 cookie_result = await agent.get_browser_cookies(user_id=user_id)
-                result = EmailResult(
+                result = ApiResult(
                     task_id=str(uuid.uuid4()),
                     status=cookie_result['status'],
                     operation='get_browser_cookies',
@@ -1514,7 +1631,7 @@ async def start_email_agent(broker_instance=None):
                 )
             
             else:
-                result = EmailResult(
+                result = ApiResult(
                     task_id=str(uuid.uuid4()),
                     status="failed",
                     operation=operation,
@@ -1542,36 +1659,20 @@ async def start_email_agent(broker_instance=None):
                     response_metadata["requires_oauth"] = True
                     response_metadata["oauth_redirect_uri"] = GMAIL_REDIRECT_URI
                     response_metadata["oauth_scopes"] = GMAIL_SCOPES
+                    oauth_authorize_url = f"{GMAIL_AUTHORIZE_ROUTE}?user_id={user_id}"
+                    response_metadata["oauth_authorize_url"] = oauth_authorize_url
+                    response_metadata["api_allow_url"] = oauth_authorize_url
 
-                    auth_url = None
-                    oauth_state = None
-                    try:
-                        auth_url, oauth_state = await agent.initiate_oauth_flow(user_id)
-                    except Exception as oauth_err:
-                        logger.error(f"❌ Failed to initiate OAuth flow for {user_id}: {oauth_err}")
-                        response_metadata["oauth_error"] = str(oauth_err)
-
-                    if auth_url:
-                        response_metadata["oauth_auth_url"] = auth_url
-                    if oauth_state:
-                        response_metadata["oauth_state"] = oauth_state
-
-                    if auth_url:
-                        clarification_question = (
-                            "I need Gmail authorization before I can use the Gmail API. "
-                            f"Please connect your account here: {auth_url} "
-                            "Then tell me to retry your email request."
-                        )
-                    else:
-                        clarification_question = (
-                            "I need Gmail authorization before I can use the Gmail API, but I could not create the OAuth link automatically. "
-                            "Please configure Gmail OAuth credentials and then tell me to retry your email request."
-                        )
+                    clarification_question = (
+                        "I need Gmail authorization before I can use the API. "
+                        f"Open the API allow page here: {oauth_authorize_url} "
+                        "Then come back and tell me to retry your email request."
+                    )
             
             # Publish result
             response = AgentMessage(
                 message_type=MessageType.EXECUTION_RESPONSE,
-                sender=AgentType.EMAIL,
+                sender=AgentType.API,
                 receiver=AgentType.COORDINATOR,
                 session_id=session_id,
                 task_id=incoming_task_id,
@@ -1589,19 +1690,28 @@ async def start_email_agent(broker_instance=None):
                 }
             )
             
-            await broker_instance.publish(Channels.EMAIL_TO_COORDINATOR, response)
-            logger.info(f"✅ Email result published: {result.status}")
+            await broker_instance.publish(Channels.API_TO_COORDINATOR, response)
+            logger.info(f"âœ… API result published: {result.status}")
         
         except Exception as e:
-            logger.error(f"❌ Email task handling failed: {e}", exc_info=True)
+            logger.error(f"âŒ Email task handling failed: {e}", exc_info=True)
     
-    # Subscribe only to dedicated coordinator->email channel.
-    broker_instance.subscribe(Channels.COORDINATOR_TO_EMAIL, handle_email_task)
-    logger.info("✅ Email agent subscribed to coordinator.to.email")
+    # Subscribe to coordinator->api channel
+    broker_instance.subscribe(Channels.COORDINATOR_TO_API, handle_email_task)
+    logger.info("✅ API agent subscribed to coordinator.to.api")
     
     # Keep agent running
     try:
         while True:
             await asyncio.sleep(60)
     except asyncio.CancelledError:
-        logger.info("📧 Email agent shutting down...")
+        logger.info("ï¿½ API agent shutting down...")
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases â€” existing imports won't break
+# ---------------------------------------------------------------------------
+EmailAgent = ApiAgent
+EmailTask = ApiTask
+EmailResult = ApiResult
+start_email_agent = start_api_agent

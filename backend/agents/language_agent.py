@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# hala 
 """
 language_agent.py - GROQ API VERSION
 Enhancements:
@@ -22,7 +23,7 @@ from dotenv import load_dotenv
 from ThinkingStepManager import ThinkingStepManager
 from agents.security.input_sanitiser import sanitise_input
 from core.mongo import get_database
-from routes.cross_platform_manager import detect_cross_platform_intent
+from routes.cross_platform_manager import detect_cross_platform_intent, get_cross_platform_manager
 from utils.semantic_intent import classify_draft_reading_intent, classify_polar_intent
 
 load_dotenv()
@@ -356,7 +357,7 @@ Before asking ANY question, verify:
 - **System actions** (screenshot/alarm/reminder): Action itself (parameters like time can be inferred from "tomorrow at 7am")
 
 ### OUTPUT SCHEMA (Strict JSON Only)
-Output ONLY valid JSON with this structure. NO BACKSLASHES IN STRINGS:
+Output ONLY valid JSON with this structure. Use standard JSON escaping: double quotes for strings, backslashes to escape quotes and backslashes.
 {
     "is_complete": boolean,
     "response_text": "Brief answer/confirmation/single clarification question in the USER's language",
@@ -713,7 +714,6 @@ class LanguageAgent:
                 if inner and inner[-1].strip() == "```":
                     inner = inner[:-1]
                 cleaned = "\n".join(inner).strip()
-            cleaned = cleaned.replace("\\\\", "/").replace("\\", "/")
             
             # Additional cleanup for literal string wrapping
             if cleaned.startswith('"') and cleaned.endswith('"'):
@@ -1046,107 +1046,113 @@ class LanguageAgent:
 
     def parse_response(self, response: str) -> Tuple[str, bool, Optional[str], str]:
         """
-        Parse LLM response — HARDENED after pentest.
-        F2: Extract first valid JSON only, type-check is_complete,
-        scan response_text for injection markers.
-        Also extracts personal_info and output_language from main branch schema.
+        Parse LLM response — HARDENED.
+        Extracts first valid JSON object, repairs common issues, and returns
+        (response_text, is_complete, personal_info, output_language).
         """
-
-        # F2: Injection markers that should never appear in response_text
         INJECTION_MARKERS = [
-            "ignore previous", "ignore all previous",
-            "forget everything", "disregard your",
-            "system note", "important system",
-            "you must also", "set response_text",
-            "set your response_text", "when forming your json",
-            "<|system|>", "<|user|>", "<|assistant|>",
-            "also add a second task", "add a task to",
+            "ignore previous", "ignore all previous", "forget everything", "disregard your",
+            "system note", "important system", "you must also", "set response_text",
+            "set your response_text", "when forming your json", "<|system|>", "<|user|>",
+            "<|assistant|>", "also add a second task", "add a task to",
             "using pathlib", "using shutil",
         ]
 
-        def _attempt_repair(raw: str):
-            s = raw.strip()
-            opens = s.count('{') - s.count('}')
-            quotes = s.count('"') % 2
-            suffix = ""
-            if quotes:
-                suffix += '"'
-            suffix += "}" * max(opens, 0)
-            repaired = s + suffix
-            try:
-                import json as _json
-                _json.loads(repaired)
-                return repaired
-            except Exception:
-                return None
-
-        def _extract_first_json_object(text: str) -> Optional[str]:
-            """Extract first balanced JSON object while respecting quoted strings."""
-            start = text.find("{")
+        def extract_first_json(raw: str) -> Optional[str]:
+            """Return the first balanced JSON object/array found in raw text."""
+            start = raw.find("{")
+            if start == -1:
+                start = raw.find("[")
             if start == -1:
                 return None
 
             depth = 0
             in_string = False
-            escape_next = False
-            for i in range(start, len(text)):
-                ch = text[i]
-
-                if escape_next:
-                    escape_next = False
+            escape = False
+            for i in range(start, len(raw)):
+                ch = raw[i]
+                if escape:
+                    escape = False
                     continue
-
-                if ch == "\\" and in_string:
-                    escape_next = True
+                if ch == '\\' and in_string:
+                    escape = True
                     continue
-
                 if ch == '"':
                     in_string = not in_string
                     continue
-
                 if in_string:
                     continue
-
-                if ch == "{":
+                if ch == '{' or ch == '[':
                     depth += 1
-                elif ch == "}":
+                elif ch == '}' or ch == ']':
                     depth -= 1
                     if depth == 0:
-                        return text[start:i + 1]
-
+                        return raw[start:i+1]
             return None
 
+        def repair_json(text: str) -> str:
+            """Fix common JSON errors: single quotes, trailing commas, unclosed strings."""
+            import re
+            # Replace single quotes around keys/values with double quotes
+            fixed = []
+            in_double = False
+            in_single = False
+            escape = False
+            i = 0
+            while i < len(text):
+                ch = text[i]
+                if escape:
+                    fixed.append(ch)
+                    escape = False
+                    i += 1
+                    continue
+                if ch == '\\':
+                    fixed.append(ch)
+                    escape = True
+                    i += 1
+                    continue
+                if ch == '"' and not in_single:
+                    in_double = not in_double
+                    fixed.append(ch)
+                    i += 1
+                    continue
+                if ch == "'" and not in_double:
+                    in_single = not in_single
+                    fixed.append('"')   # replace single quote with double
+                    i += 1
+                    continue
+                fixed.append(ch)
+                i += 1
+
+            text = ''.join(fixed)
+            # Remove trailing commas before } or ]
+            text = re.sub(r',\s*}', '}', text)
+            text = re.sub(r',\s*]', ']', text)
+            # Close unclosed strings: if odd number of quotes, add one at the end
+            if text.count('"') % 2 == 1:
+                text += '"'
+            return text
+
         try:
-            cleaned_response = str(response or "").strip()
+            raw_response = str(response or "").strip()
 
-            # F2: Extract FIRST valid JSON object only — ignore anything after it
-            json_obj = _extract_first_json_object(cleaned_response)
-            if not json_obj:
-                # Try repair
-                repaired = _attempt_repair(cleaned_response)
-                if repaired:
-                    import json as _json
-                    parsed = _json.loads(repaired)
-                else:
-                    return "I'm sorry, I didn't quite understand. Could you clarify?", False, None, self.preferred_language
-            else:
-                import json as _json
-                try:
-                    parsed = _json.loads(json_obj)
-                except _json.JSONDecodeError:
-                    repaired = _attempt_repair(json_obj)
-                    if repaired:
-                        parsed = _json.loads(repaired)
-                    else:
-                        return "I'm sorry, I didn't quite understand. Could you clarify?", False, None, self.preferred_language
+            # 1. Extract the first JSON object/array
+            json_chunk = extract_first_json(raw_response)
+            if not json_chunk:
+                logger.warning("No JSON object found in response")
+                return self._fallback_parse_response()
 
-            # F2: Type-check is_complete — must be a boolean, not a string
-            is_complete_raw = parsed.get("is_complete", False)
-            if not isinstance(is_complete_raw, bool):
-                logger.warning(f"⚠️ is_complete was not bool: {type(is_complete_raw)} — forcing False")
+            # 2. Repair common issues
+            repaired = repair_json(json_chunk)
+
+            # 3. Parse
+            parsed = json.loads(repaired)
+
+            # 4. Validate and extract fields
+            is_complete = parsed.get("is_complete", False)
+            if not isinstance(is_complete, bool):
+                logger.warning(f"is_complete is not bool: {type(is_complete)} -> forcing False")
                 is_complete = False
-            else:
-                is_complete = is_complete_raw
 
             response_text = parsed.get("response_text", "")
             personal_info = parsed.get("personal_info", None)
@@ -1157,31 +1163,30 @@ class LanguageAgent:
             if output_language not in ("en", "ar"):
                 output_language = self.preferred_language
 
-            # F2: Scan response_text for injection markers
-            response_text_lower = response_text.lower()
+            # 5. Injection detection
+            lower_text = response_text.lower()
             for marker in INJECTION_MARKERS:
-                if marker in response_text_lower:
-                    logger.warning(
-                        f"🚫 F2: Injection marker in response_text: '{marker}' — "
-                        f"blocking task completion"
-                    )
-                    return (
-                        "I'm not able to process that request. Blocked by security.",
-                        False,
-                        None,
-                        self.preferred_language,
-                    )
+                if marker in lower_text:
+                    logger.warning(f"🚫 Injection marker in response_text: '{marker}'")
+                    return self._fallback_parse_response(blocked=True)
 
             return response_text, is_complete, personal_info, output_language
 
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error: {e}\nResponse snippet: {response[:200]}")
+            return self._fallback_parse_response()
         except Exception as e:
-            logger.warning(f"⚠️ Failed to parse response: {e}")
-            fallback_text = (
-                "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟"
-                if self.preferred_language == "ar"
-                else "I'm sorry, I didn't quite understand. Could you clarify?"
-            )
-            return fallback_text, False, None, self.preferred_language
+            logger.warning(f"Unexpected parse error: {e}")
+            return self._fallback_parse_response()
+
+    def _fallback_parse_response(self, blocked=False) -> Tuple[str, bool, Optional[str], str]:
+        """Unified fallback when parsing fails or injection detected."""
+        lang = self.preferred_language
+        if blocked:
+            msg = "I'm not able to process that request. Blocked by security."
+            return msg, False, None, lang
+        msg = "عذرًا، لم أفهم ذلك جيداً. هل يمكنك التوضيح؟" if lang == "ar" else "I'm sorry, I didn't quite understand. Could you clarify?"
+        return msg, False, None, lang
         
 
     def user_turn(self, user_text: str) -> tuple:
@@ -1590,6 +1595,96 @@ async def start_language_agent(broker):
                 await broker.publish(Channels.LANGUAGE_OUTPUT, ws_resolve_msg)
                 return
 
+            if agent.awaiting_user_response.get("type") == "device_selection":
+                context = agent.awaiting_user_response
+                candidates = context.get("candidates") or []
+                pending_payload = dict(context.get("pending_payload") or {})
+                selection_text = normalize_arabic(input_text)
+                selected_device = None
+
+                if selection_text.isdigit():
+                    selection_index = int(selection_text) - 1
+                    if 0 <= selection_index < len(candidates):
+                        selected_device = candidates[selection_index]
+                if not selected_device:
+                    for candidate in candidates:
+                        label = str(candidate.get("label") or candidate.get("device_id") or "")
+                        device_id = str(candidate.get("device_id") or "")
+                        if label and label.lower() in selection_text:
+                            selected_device = candidate
+                            break
+                        if device_id and device_id.lower() in selection_text:
+                            selected_device = candidate
+                            break
+
+                if not selected_device:
+                    prompt = context.get("question") or (
+                        "I need you to choose one of the listed devices." if agent.preferred_language != "ar" else "أحتاج منك اختيار أحد الأجهزة المعروضة."
+                    )
+                    clarification_msg = AgentMessage(
+                        message_type=MessageType.CLARIFICATION_REQUEST,
+                        sender=AgentType.LANGUAGE,
+                        receiver=AgentType.LANGUAGE,
+                        session_id=session_id,
+                        response_to=http_request_id,
+                        payload={
+                            "question": prompt,
+                            "context": "multiple_target_devices",
+                            "device_type": context.get("device_type", device_type),
+                        }
+                    )
+                    await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+                    return
+
+                agent.awaiting_user_response = None
+                agent.save_memory()
+
+                selected_device_id = str(selected_device.get("device_id") or "")
+                selected_platform = str(selected_device.get("platform") or pending_payload.get("target_device") or device_type)
+                pending_payload["target_device_id"] = selected_device_id
+                pending_payload["target_device"] = selected_platform
+                pending_payload["cross_device_target"] = {
+                    **(pending_payload.get("cross_device_target") or {}),
+                    "selected_device_id": selected_device_id,
+                    "selected_device_label": selected_device.get("label") or selected_device_id,
+                    "target_platform": selected_platform,
+                }
+
+                await ThinkingStepManager.update_step(
+                    session_id, "preparing_for_coordinator", http_request_id,
+                    language=agent.preferred_language
+                )
+
+                task_msg = AgentMessage(
+                    message_type=MessageType.TASK_REQUEST,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.COORDINATOR,
+                    session_id=session_id,
+                    response_to=context.get("response_to") or http_request_id,
+                    payload=pending_payload,
+                )
+                await broker.publish(Channels.LANGUAGE_TO_COORDINATOR, task_msg)
+
+                ack_text = (
+                    f"تم اختيار {selected_device.get('label') or selected_device_id}. سأتابع الآن."
+                    if agent.preferred_language == "ar"
+                    else f"Selected {selected_device.get('label') or selected_device_id}. Continuing now."
+                )
+                ws_msg = AgentMessage(
+                    message_type=MessageType.TASK_RESPONSE,
+                    sender=AgentType.LANGUAGE,
+                    receiver=AgentType.LANGUAGE,
+                    session_id=session_id,
+                    response_to=http_request_id,
+                    payload={
+                        "status": "processing",
+                        "response": ack_text,
+                        "user_language": agent.preferred_language,
+                    }
+                )
+                await broker.publish(Channels.LANGUAGE_OUTPUT, ws_msg)
+                return
+
         # ── Resolve contextual follow-ups (e.g. "yes" after "read it?") ───────
         contextual_follow_up = agent.resolve_contextual_follow_up(input_text)
         if contextual_follow_up:
@@ -1846,6 +1941,76 @@ async def start_language_agent(broker):
             cross_platform_intent = detect_cross_platform_intent(input_text, source_platform=device_type)
             if cross_platform_intent:
                 device_type = "mixed"
+
+                mgr = get_cross_platform_manager()
+                if mgr:
+                    candidates = await mgr._registry.get_matching_devices(  # noqa: SLF001 - language agent needs registry lookup
+                        user_id=user_id,
+                        target_platform=cross_platform_intent.get("target_platform"),
+                        exclude_device_id=(message.payload or {}).get("device_id") or session_id,
+                    )
+                    if len(candidates) > 1:
+                        candidate_lines = []
+                        for idx, candidate in enumerate(candidates, start=1):
+                            label = candidate.get("label") or candidate.get("device_id") or f"Device {idx}"
+                            candidate_lines.append(f"{idx}. {label}")
+                        candidate_text = "\n".join(candidate_lines)
+                        prompt_lang = agent.preferred_language or "en"
+                        if prompt_lang == "ar":
+                            clarification_text = (
+                                f"وجدت أكثر من جهاز {cross_platform_intent.get('target_platform') or 'مناسب'}:\n"
+                                f"{candidate_text}\n\n"
+                                "أي جهاز تريدني أن أستخدم؟ أرسل الرقم أو اسم الجهاز."
+                            )
+                        else:
+                            clarification_text = (
+                                f"I found multiple {cross_platform_intent.get('target_platform') or 'matching'} devices:\n"
+                                f"{candidate_text}\n\n"
+                                "Which one should I use? Reply with the number or device name."
+                            )
+
+                        pending_payload = {
+                            "confirmation": response,
+                            "original_input": input_text,
+                            "user_language": agent.preferred_language,
+                            "output_language": output_language,
+                            "device_type": device_type,
+                            "target_device": cross_platform_intent.get("target_platform"),
+                            "cross_device_target": cross_platform_intent,
+                            "user_id": user_id,
+                            "chat_title": generate_chat_title(input_text, response),
+                            "first_input": input_text,
+                            "user_profile": agent.user_profile,
+                        }
+                        agent.awaiting_user_response = {
+                            "type": "device_selection",
+                            "question": clarification_text,
+                            "original_request": input_text,
+                            "response_to": http_request_id,
+                            "pending_payload": pending_payload,
+                            "candidates": candidates,
+                            "user_language": agent.preferred_language,
+                            "output_language": output_language,
+                            "user_profile": agent.user_profile,
+                            "device_type": device_type,
+                            "cross_device_target": cross_platform_intent,
+                        }
+                        agent.save_memory()
+
+                        clarification_msg = AgentMessage(
+                            message_type=MessageType.CLARIFICATION_REQUEST,
+                            sender=AgentType.LANGUAGE,
+                            receiver=AgentType.LANGUAGE,
+                            session_id=session_id,
+                            response_to=http_request_id,
+                            payload={
+                                "question": clarification_text,
+                                "context": "multiple_target_devices",
+                                "device_type": device_type,
+                            }
+                        )
+                        await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+                        return
 
             await ThinkingStepManager.update_step(
                 session_id, "preparing_for_coordinator", http_request_id,

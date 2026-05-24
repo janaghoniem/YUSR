@@ -6,12 +6,12 @@
   height: 100vh;
   z-index: 0;
   background: 
-    radial-gradient(ellipse at 100% 0%, rgba(255, 61, 154, 0.08) 0%, transparent 50%),
-    radial-gradient(ellipse at 0% 100%, rgba(255, 61, 154, 0.05) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(255, 61, 154, 0.03) 0%, transparent 60%);
+    radial-gradient(ellipse at 100% 0%, rgba(255, 61, 154, 0.045) 0%, transparent 54%),
+    radial-gradient(ellipse at 0% 100%, rgba(255, 61, 154, 0.028) 0%, transparent 54%),
+    radial-gradient(ellipse at 50% 50%, rgba(255, 61, 154, 0.015) 0%, transparent 64%);
   animation: aurora-shift 15s ease-in-out infinite alternate;
   pointer-events: none;
-  opacity: 0.6;
+  opacity: 0.38;
   mix-blend-mode: screen;
 }
 

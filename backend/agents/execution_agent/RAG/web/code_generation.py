@@ -34,7 +34,7 @@ class PlaywrightRAGConfig:
     llm_provider: str = "groq"
     llm_model: str = "llama-3.3-70b-versatile"  # ✅ Same as desktop RAG
     temperature: float = 0.4  # ✅ Same as desktop RAG
-    max_tokens: int = 1024  # ✅ Same as desktop RAG
+    max_tokens: int = 2048  # ✅ Increased from 1024 to prevent truncation of multi-function code
     
     # Code generation settings
     max_context_length: int = 4000  # ✅ FIXED: Increased context
@@ -249,7 +249,7 @@ class PlaywrightLLM:
             return self._generate_openai(prompt, system_prompt)
     
     def _generate_groq(self, prompt: str, system_prompt: str = None) -> str:
-        """Generate using Groq"""
+        """Generate using Groq with Mistral fallback"""
         messages = []
         
         if system_prompt:
@@ -266,7 +266,7 @@ class PlaywrightLLM:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"❌ Groq API call failed: {e}")
+            print(f"⚠️ Groq API call failed: {e}")
             if "401" in str(e) or "Unauthorized" in str(e):
                 print("⚠️  API key issue, reinitializing...")
                 self._initialize_client()
@@ -277,7 +277,46 @@ class PlaywrightLLM:
                     max_tokens=self.config.max_tokens,
                 )
                 return response.choices[0].message.content
-            raise
+            # Fallback to Mistral on rate limit or other errors
+            print("🔄 Falling back to Mistral for code generation...")
+            return self._generate_mistral_fallback(prompt, system_prompt)
+    
+    def _generate_mistral_fallback(self, prompt: str, system_prompt: str = None) -> str:
+        """Fallback to Mistral REST API when Groq is unavailable"""
+        import requests
+        
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            raise ValueError("MISTRAL_API_KEY not found for fallback")
+        
+        messages = []
+        if system_prompt:
+            mistral_guard = (
+                "\n\nCRITICAL: If the AVAILABLE INTERACTIVE ELEMENTS section already lists the target "
+                "button/link/input, interact with it directly using locator(...).first or .nth(...). "
+                "Do NOT add wait_for_selector() for elements that are already present in the DOM."
+            )
+            messages.append({"role": "system", "content": system_prompt + mistral_guard})
+        messages.append({"role": "user", "content": prompt})
+        
+        url = "https://api.mistral.ai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "codestral-latest",
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        result = data["choices"][0]["message"]["content"]
+        print("✅ Mistral fallback succeeded for code generation")
+        return result
     
     def _generate_openai(self, prompt: str, system_prompt: str = None) -> str:
         """Generate using OpenAI"""
@@ -339,7 +378,7 @@ class PlaywrightRAGSystem:
         
         # ✅ FIX 2: Add debug call on first run
         if not hasattr(self, '_debugged'):
-            self.vectordb.debug_search(user_query)
+            self.vectordb.debug_search(cache_key or user_query)
             self._debugged = True  # Only debug once
         
         # Step 1: Retrieve relevant context
@@ -432,13 +471,16 @@ class PlaywrightRAGSystem:
         
         # Add instructions
         prompt_parts.append("## Requirements:")
-        prompt_parts.append("Generate complete Playwright Python code that:")
-        prompt_parts.append("1. Uses async/await pattern (async def main, await page.goto, etc.)")
-        prompt_parts.append("2. Launches browser with headless=False")
-        prompt_parts.append("3. Handles errors with try/except")
-        prompt_parts.append("4. Prints 'EXECUTION_SUCCESS' on success")
-        prompt_parts.append("5. Prints 'FAILED: {error}' on failure")
-        prompt_parts.append("6. Always closes browser in finally block")
+        prompt_parts.append("Generate Playwright Python code that:")
+        prompt_parts.append("1. Uses async/await pattern with the existing 'page' variable (do NOT create browser/page)")
+        prompt_parts.append("1b. ALWAYS await async Playwright actions (locator.click(), locator.scroll_into_view_if_needed(), page.keyboard.press(), page.wait_for_*), never call them without await")
+        prompt_parts.append("2. Handles errors with try/except")
+        prompt_parts.append("3. Prints 'EXECUTION_SUCCESS' on success")
+        prompt_parts.append("4. Prints 'FAILED: {error}' on failure")
+        prompt_parts.append("5. Waits for elements before interacting: await page.wait_for_selector(sel, state='visible', timeout=10000)")
+        prompt_parts.append("6. After click-triggered navigation: await page.wait_for_load_state('domcontentloaded', timeout=10000)")
+        prompt_parts.append("7. If browser is already on the correct domain, interact with page elements instead of calling page.goto()")
+        prompt_parts.append("8. If the page is a PDF viewer (document.contentType includes 'pdf'), do NOT look for DOM download buttons; prefer direct PDF URL or keyboard save (Ctrl+S / Cmd+S)")
         prompt_parts.append("")
         prompt_parts.append("Format:")
         prompt_parts.append("```python")
@@ -485,6 +527,34 @@ You are generating code for a MULTI-AGENT SYSTEM where:
 - await page.keyboard.press('Control+Enter')
 - text = await page.text_content(selector)
 - print("EXECUTION_SUCCESS")
+
+⚠️ NEVER await a bare locator — page.locator() is SYNCHRONOUS:
+❌ WRONG: await page.locator('a:has-text("X")')   ← TypeError!
+❌ WRONG: link = await page.locator('a')            ← TypeError!
+✅ CORRECT: await page.locator('a:has-text("X")').first.click()
+✅ CORRECT: link = page.locator('a')  # no await
+✅ CORRECT: count = await page.locator('a').count()  # await the ACTION
+
+⚠️ ALWAYS await async Playwright actions (otherwise they do NOTHING):
+❌ WRONG: page.locator('a:has-text("X")').first.click()
+❌ WRONG: page.locator('a').first.scroll_into_view_if_needed()
+✅ CORRECT: await page.locator('a:has-text("X")').first.click()
+✅ CORRECT: await page.locator('a').first.scroll_into_view_if_needed()
+✅ CORRECT: await page.keyboard.press('Enter')
+
+⚠️ SELECTOR DISAMBIGUATION RULE (MANDATORY):
+If the page inspector lists inputs or fields with an index hint like [nth=N], you MUST target that exact element using `.nth(N)` on the locator to avoid ambiguous unnamed inputs. Example:
+
+✅ Correct: await page.locator('input[type="text"]').nth(2).fill('value')
+❌ Incorrect: await page.locator('input[type="text"]').first.fill('value')
+
+When a visible label is present in the inspector (label='...'), prefer selectors that match label/aria-label first; if none exist, use the provided [nth=N] index.
+If the inspector already lists the target under BUTTONS, click it directly with a union locator (button/a/[role="button"]) instead of waiting for it to appear with wait_for_selector().
+
+📄 PDF VIEWER RULE:
+- Browser PDF toolbars are NOT in the DOM.
+- If document.contentType includes "pdf", do NOT search for "Download" buttons.
+- Prefer direct PDF URL requests or Ctrl+S / Cmd+S.
 
 ================================================================
 ❗ MANDATORY PATTERN: GOOGLE SEARCHES
@@ -626,6 +696,9 @@ FINDING ELEMENTS BY VISUAL APPEARANCE (FIX 2)
 ================================================================
 When elements lack text or standard attributes, use visual/color-based locators.
 Page semantics now includes: color, backgroundColor, title, data-test-id, data-qa.
+
+For visible BUTTONS labels, prefer a union locator across real buttons, links, and role-based buttons, e.g.:
+    await page.locator('button:has-text("LABEL"), a:has-text("LABEL"), [role="button"]:has-text("LABEL")').first.click()
 
 COLOR-BASED FINDING:
   # Find red button by inline style
@@ -841,6 +914,82 @@ CRITICAL RULES:
 13. For visual element finding — use color/title/data-* attributes per FIX 2
 14. For text extraction — return text directly; it will be captured as 'text_extracted' per FIX 3
 15. Avoid rapid navigation; add small waits to evade bot detection (FIX 4)
+
+================================================================
+CLICKING SEARCH RESULTS & LINKS — MANDATORY PATTERN
+================================================================
+When clicking a search result, link, video thumbnail, or any interactive element:
+
+The LINKS section in the prompt shows ALL clickable links with their text.
+Use a:has-text("EXACT_LINK_TEXT") to click a specific link.
+
+EXAMPLE — Click a named link from the LINKS section (e.g. 'Cybernaut: Towards Reliable Web Automation'):
+  try:
+      link = page.locator('a:has-text("Cybernaut")')
+      await link.first.scroll_into_view_if_needed()
+      await page.wait_for_timeout(300)
+      await link.first.click()
+      await page.wait_for_load_state('domcontentloaded', timeout=10000)
+      print("EXECUTION_SUCCESS")
+  except Exception as e:
+      # Fallback: JS click by partial text
+      try:
+          js_code = 'const links=[...document.querySelectorAll("a")];const link=links.find(a=>a.textContent.includes("Cybernaut"));if(link)link.click();else throw new Error("Link not found");'
+          await page.evaluate(js_code)
+          await page.wait_for_load_state('domcontentloaded', timeout=10000)
+          print("EXECUTION_SUCCESS")
+      except Exception as e2:
+          print(f"FAILED: {e2}")
+
+1. ALWAYS wait for the element to be visible BEFORE clicking:
+     await page.wait_for_selector('h3 a', state='visible', timeout=10000)
+
+2. Use page.locator() with human-readable text/role locators as primary strategy:
+     await page.locator('h3 a').first.click()
+   NOT brittle CSS selectors that break on dynamic pages.
+
+3. After any click that triggers navigation, ALWAYS wait for load:
+     await page.wait_for_load_state('domcontentloaded', timeout=10000)
+
+4. If locator click times out, fall back to JavaScript DOM click:
+     await page.evaluate('document.querySelector("h3 a").click()')
+
+EXAMPLE — Click first Google search result:
+  try:
+      await page.wait_for_selector('h3', state='visible', timeout=10000)
+      await page.locator('h3').first.scroll_into_view_if_needed()
+      await page.wait_for_timeout(300)
+      await page.locator('h3').first.click()
+      await page.wait_for_load_state('domcontentloaded', timeout=10000)
+      print("EXECUTION_SUCCESS")
+  except Exception as e:
+      # Fallback: JS click
+      try:
+          await page.evaluate('document.querySelector("h3 a").click()')
+          await page.wait_for_load_state('domcontentloaded', timeout=10000)
+          print("EXECUTION_SUCCESS")
+      except Exception as e2:
+          print(f"FAILED: {e2}")
+
+================================================================
+IN-PAGE NAVIGATION — DO NOT CONSTRUCT URLs
+================================================================
+If the browser is ALREADY on the correct domain, do NOT call page.goto().
+Instead, interact with the existing page elements:
+  - Type in search boxes and press Enter
+  - Click links and buttons
+  - Use page.go_back() for back-navigation (NOT page.goto(previous_url))
+
+WRONG:
+  await page.goto("https://www.google.com/search?q=test")  # constructs URL
+
+CORRECT:
+  await page.fill('input[name="q"]', 'test')
+  await page.keyboard.press('Enter')
+  await page.wait_for_load_state('domcontentloaded')
+
+The same tab MUST be reused across all steps of a single task plan.
+Never open a new tab mid-task unless the task explicitly says "open in new tab".
 """
 
     def _parse_response(self, response: str, contexts: List[Dict]) -> Dict:

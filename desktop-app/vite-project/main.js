@@ -3,7 +3,7 @@
 
 /* eslint-env node */
 // Add Menu and screen here
-import { app, BrowserWindow, ipcMain, Menu, screen } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, screen, shell } from "electron";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 import path from "path";
@@ -182,8 +182,8 @@ function stopAuraProcess() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width:     900,
-    height:    700,
+    width:     1100,
+    height:    800,
     minWidth:  480,
     minHeight: 400,
     frame:     false,
@@ -230,6 +230,18 @@ ipcMain.handle("window:maximize", () => {
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
 });
 
+ipcMain.handle("shell:openExternal", async (_event, url) => {
+  if (!url || typeof url !== "string") {
+    return { ok: false, error: "Missing URL" };
+  }
+  try {
+    await shell.openExternal(url, { activate: true });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) };
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // IPC — Widget mode (compact execution overlay)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +274,18 @@ ipcMain.handle("widget:exit", () => {
   } else {
     mainWindow.setBounds({ width: 900, height: 700 }, true);
     mainWindow.center();
+  }
+});
+
+// Allow renderer to ask main to open external URLs
+ipcMain.handle('open-external', async (_event, url) => {
+  try {
+    if (!url) return { ok: false, error: 'No URL provided' };
+    await shell.openExternal(url);
+    return { ok: true };
+  } catch (err) {
+    console.error('[open-external] failed to open', url, err);
+    return { ok: false, error: String(err) };
   }
 });
 

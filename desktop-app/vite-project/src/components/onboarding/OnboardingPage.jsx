@@ -83,13 +83,17 @@ const OnboardingPage = ({ userId, onComplete }) => {
         throw new Error(data.detail || "Account creation failed");
       }
 
+      const data = await res.json();
+      const serverUserId = (data?.user_id || currentUserId || "").toString();
+
       localStorage.setItem("onboardingComplete", "true");
+      localStorage.setItem("userId", serverUserId);
       localStorage.setItem("userName",  formData.username);
       localStorage.setItem("ttsVoice",  formData.preferences.voice);
       localStorage.setItem("userLanguage", lang);
 
       onComplete({
-        userId:      currentUserId,
+        userId:      serverUserId,
         username:    formData.username,
         preferences: formData.preferences,
       });

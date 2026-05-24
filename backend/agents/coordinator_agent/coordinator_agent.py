@@ -214,6 +214,34 @@ def extract_json_payload(text: str, default):
             continue
     return default
 
+
+def _coerce_task_dict_list(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize an LLM decomposition payload into a list of task dicts."""
+    if not isinstance(payload, list):
+        return []
+
+    task_dicts: List[Dict[str, Any]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            task_dicts.append(item)
+            continue
+
+        if isinstance(item, str):
+            parsed_item = extract_json_payload(item, None)
+            if isinstance(parsed_item, dict):
+                task_dicts.append(parsed_item)
+                continue
+            try:
+                stripped_item = item.strip()
+                if stripped_item.startswith("{") and stripped_item.endswith("}"):
+                    parsed_item = json.loads(stripped_item)
+                    if isinstance(parsed_item, dict):
+                        task_dicts.append(parsed_item)
+            except Exception:
+                continue
+
+    return task_dicts
+
 async def save_checkpoint_compat(session_id: Optional[str], checkpoint_value, metadata: Optional[Dict[str, Any]] = None) -> bool:
     """
     Save checkpoint via MongoDBSaver.
@@ -1252,54 +1280,247 @@ IMPORTANT:
 Generate the task decomposition now:"""
 
 
-def _get_mixed_decomposition_prompt_sop() -> str:
-        return """
-============================
-MIXED COORDINATOR SOP (DESKTOP + MOBILE)
-============================
+# def _get_mixed_decomposition_prompt_sop() -> str:
+#     return """
+# ============================
+# MIXED COORDINATOR SOP (DESKTOP + MOBILE)
+# ============================
 
-You are decomposing tasks for MIXED cross-platform execution.
+# You decompose a user request into a **single dependency graph** where each task is explicitly assigned to either `desktop` or `mobile`.  
+# You must respect the capabilities and constraints of each platform.
 
-GOAL:
-- Produce a single dependency graph where each task is explicitly assigned to either desktop or mobile.
-- Use desktop for browser/API-heavy tasks when appropriate.
-- Use mobile for app-local tasks and phone-native operations.
+# ────────────────────────────────────────────────────────────────
+# HARD ROUTING RULES
+# ────────────────────────────────────────────────────────────────
+# 1. Every task MUST set `device` to either "desktop" or "mobile" (never "mixed").
+# 2. For `device="mobile"`:
+#    - `context` MUST be "local".
+#    - `target_agent` MUST be one of: `action`, `reasoning`, `language`.
+#    - `target_agent` MUST NOT be `api` (the API agent is desktop‑only).
+# 3. For `device="desktop"`:
+#    - `context` MAY be "web" (browser automation) or "local" (native OS/app).
+#    - `target_agent` MAY be `action`, `reasoning`, `language`, or `api`.
+# 4. Keep **one action per task** – never combine multiple UI steps.
+# 5. Use explicit `depends_on` whenever a task needs the output of a previous task.
+# 6. Every task MUST include **both** `success_message` and `failure_message` (short, user‑friendly sentences).
 
-HARD ROUTING RULES:
-1. Every task MUST set device to either "desktop" or "mobile" (never "mixed").
-2. For device="mobile", context MUST be "local" and target_agent MUST NOT be "email".
-3. For device="desktop", context may be "web" or "local".
-4. Keep one action per task with strict dependencies.
-5. If a task on one device needs output from another device, set explicit depends_on and include handoff metadata in extra_params.
+# ────────────────────────────────────────────────────────────────
+# CROSS‑DEVICE DATA FLOW (HANDOFF)
+# ────────────────────────────────────────────────────────────────
+# When a task on one device needs the **output** of a task on a different device:
+# - **Do NOT** generate a handoff task – the system will insert it automatically.
+# - Instead, set:
+#   - `depends_on` = `["<task_id_of_producer>"]`
+#   - `extra_params["input_from"] = "<task_id_of_producer>"`
+# - The system will route the produced content to the consuming task.
 
-TARGET AGENTS:
-- action
-- reasoning
-- language
-- api (desktop-only)
+# **Confirmation tasks (`target_agent: "language"`) MUST run on the user’s current (source) device** – they require user interaction.  
+# If a confirmation task depends on output from another device, set `input_from` as above; the handoff will happen automatically.
 
-HANDOFF RULES (for cross-device control):
-- When cross-device control/session transfer is required, add an explicit preparation task first.
-- Use target_agent: "language" for confirmation before sensitive cross-device operations.
-- For cross-device steps, include extra_params fields:
-  - handoff_required: true
-  - handoff_from: "desktop" | "mobile"
-  - handoff_to: "desktop" | "mobile"
-  - handoff_reason: short sentence
-- Never include raw secrets or tokens in output.
+# ────────────────────────────────────────────────────────────────
+# CONTENT GENERATION + CONFIRMATION (CRITICAL)
+# ────────────────────────────────────────────────────────────────
+# When a task **generates content** that will later be sent, saved, or committed (e.g., drafting an email, writing a story, composing a message):
+# 1. Use `target_agent: "reasoning"` to generate the content. Its `ai_prompt` must request a JSON object (e.g., `{"SUBJECT": "...", "BODY": "..."}`).
+# 2. **Immediately after generation**, add a **confirmation task** (`target_agent: "language"`) that reads the generated content aloud and asks for user approval/critique.
+#    - The confirmation task MUST have:
+#      - `extra_params["input_from"] = "<generation_task_id>"`
+#      - `depends_on = ["<generation_task_id>"]`
+#    - The confirmation task runs on the **source device** (the one the user is currently using).
+# 3. Only after the user confirms, add the final action task that sends/saves the content.
+#    - That final action task MUST also have `input_from = "<generation_task_id>"` (not the confirmation task ID).
+# 4. If the user gives a critique (e.g., “make it shorter”), you must generate a **new revision pipeline** (reasoning → language confirmation → send). The system will loop automatically.
 
-CONTEXT RULES:
-- device="desktop" and browser automation -> context="web"
-- device="desktop" and native app/OS action -> context="local"
-- device="mobile" -> context="local"
+# **Exceptions:** Pure action tasks (e.g., “set alarm for 7 AM”) do **not** need confirmation – they contain no generated content.
 
-OUTPUT RULES:
-- Return ONLY a JSON array.
-- Every task must include: task_id, goal, ai_prompt, device, context, target_agent, extra_params, web_params, depends_on, success_message, failure_message.
-- Keep the same non-empty goal across all tasks in the plan.
+# ────────────────────────────────────────────────────────────────
+# RESEARCH / INFORMATIONAL QUERIES
+# ────────────────────────────────────────────────────────────────
+# If the user asks for information (e.g., “check the weather”, “latest news”, “nearest pharmacy”):
+# - First use `target_agent: "action"` with appropriate `context` to extract the raw data.
+# - Then add a **final `reasoning` task** that depends on the extraction task and formats the data into a natural, helpful conversation. This reasoning task MUST run on the source device.
 
-Generate the task decomposition now:"""
+# ────────────────────────────────────────────────────────────────
+# DEVICE‑SPECIFIC RULES
+# ────────────────────────────────────────────────────────────────
+# **DESKTOP**
+# - Browser automation → `context: "web"`.
+# - Native apps / OS → `context: "local"`.
+# - API operations (YouTube search, Calendar, Drive, Gmail send) → `target_agent: "api"`.
+# - For search workflows: open homepage → type query → submit → (if results page) click first result → extract. Construct URLs for well‑known homepages only.
 
+# **MOBILE**
+# - Everything is `context: "local"` – even web browsing.
+# - No `api` agent – use `action` for UI automation (tap, type, navigate).
+# - Email on mobile: use local app steps (open mail app → compose → fill fields → send). If the user does not provide subject/body, generate them with a `reasoning` task first.
+# - Mobile action tasks are given a longer timeout (≥120 seconds) automatically.
+
+# ────────────────────────────────────────────────────────────────
+# EXAMPLES
+# ────────────────────────────────────────────────────────────────
+
+# ### Example 1: Cross‑device search + set alarm
+
+# **User:** “Search YouTube on my desktop for ‘study music’, then set an alarm on my phone for 7 AM.”
+
+# - **task_1** (desktop, web, action)  
+#   goal: Search YouTube and set phone alarm  
+#   ai_prompt: Navigate to YouTube and search for “study music”  
+#   extra_params: {"action": "navigate", "url": "https://www.youtube.com/results?search_query=study+music"}  
+#   web_params: {"action": "navigate", "url": "https://www.youtube.com/results?search_query=study+music"}  
+#   success_message: “YouTube search results loaded.”  
+#   failure_message: “Could not reach YouTube.”  
+#   depends_on: null
+
+# - **task_2** (mobile, local, action)  
+#   goal: Search YouTube and set phone alarm  
+#   ai_prompt: Open the Clock app on the phone  
+#   extra_params: {"app_name": "clock"}  
+#   web_params: {}  
+#   success_message: “Clock app opened.”  
+#   failure_message: “Failed to open Clock app.”  
+#   depends_on: null   (no dependency – both start in parallel)
+
+# - **task_3** (mobile, local, action)  
+#   goal: Search YouTube and set phone alarm  
+#   ai_prompt: Set alarm time to 7:00 AM  
+#   extra_params: {"time": "7:00"}  
+#   web_params: {}  
+#   success_message: “Alarm set for 7 AM.”  
+#   failure_message: “Could not set alarm.”  
+#   depends_on: ["task_2"]
+
+# **Note:** Desktop and mobile tasks run concurrently where dependencies allow. The system handles device routing.
+
+# ### Example 2: Desktop reasoning → mobile action (with confirmation)
+
+# **User:** “Write a short story on my desktop, then send it as a WhatsApp message from my phone.”
+
+# - **task_1** (desktop, local, reasoning)  
+#   goal: Write a short story and send via WhatsApp  
+#   ai_prompt: Write a very short story (2–3 paragraphs). Return ONLY the story text, no extra commentary.  
+#   extra_params: {}  
+#   web_params: {}  
+#   success_message: “Story written.”  
+#   failure_message: “Failed to write story.”  
+#   depends_on: null
+
+# - **task_2** (source device = desktop, local, language)  
+#   goal: Write a short story and send via WhatsApp  
+#   ai_prompt: Read the generated story aloud to the user and ask: “Should I send this story via WhatsApp on your phone?” Wait for confirmation or critique.  
+#   extra_params: {"input_from": "task_1"}  
+#   web_params: {}  
+#   success_message: “User confirmed.”  
+#   failure_message: “User rejected the story.”  
+#   depends_on: ["task_1"]
+
+# - **task_3** (mobile, local, action)  
+#   goal: Write a short story and send via WhatsApp  
+#   ai_prompt: Open WhatsApp and navigate to a recent chat  
+#   extra_params: {"app_name": "whatsapp"}  
+#   web_params: {}  
+#   success_message: “WhatsApp opened.”  
+#   failure_message: “Could not open WhatsApp.”  
+#   depends_on: ["task_2"]
+
+# - **task_4** (mobile, local, action)  
+#   goal: Write a short story and send via WhatsApp  
+#   ai_prompt: Paste the story text into the message input field and send it.  
+#   extra_params: {"input_from": "task_1"}  # uses the original story, not the confirmation output  
+#   web_params: {}  
+#   success_message: “Story sent via WhatsApp.”  
+#   failure_message: “Failed to send story.”  
+#   depends_on: ["task_3", "task_1"]
+
+# ### Example 3: Mobile email composition (no desktop involvement)
+
+# **User:** “Draft an email on my phone to Sara about tomorrow’s meeting.”
+
+# - **task_1** (mobile, local, reasoning)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Compose an email for: “Reschedule tomorrow’s meeting with Sara”. Return a JSON object with keys SUBJECT and BODY.  
+#   extra_params: {}  
+#   web_params: {}  
+#   success_message: “Email content generated.”  
+#   failure_message: “Could not generate email.”  
+#   depends_on: null
+
+# - **task_2** (mobile, local, language)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Read the generated email subject and body to the user and ask for confirmation before opening the email app.  
+#   extra_params: {"input_from": "task_1"}  
+#   web_params: {}  
+#   success_message: “User approved.”  
+#   failure_message: “User rejected the email.”  
+#   depends_on: ["task_1"]
+
+# - **task_3** (mobile, local, action)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Open Gmail app  
+#   extra_params: {"app_name": "gmail"}  
+#   web_params: {}  
+#   success_message: “Gmail opened.”  
+#   failure_message: “Could not open Gmail.”  
+#   depends_on: ["task_2"]
+
+# - **task_4** (mobile, local, action)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Fill recipient with sara@gmail.com  
+#   extra_params: {"recipient": "sara@gmail.com"}  
+#   web_params: {}  
+#   success_message: “Recipient added.”  
+#   failure_message: “Could not add recipient.”  
+#   depends_on: ["task_3"]
+
+# - **task_5** (mobile, local, action)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Fill subject field with the SUBJECT value from task_1  
+#   extra_params: {"input_from": "task_1"}  
+#   web_params: {}  
+#   success_message: “Subject filled.”  
+#   failure_message: “Could not fill subject.”  
+#   depends_on: ["task_1", "task_4"]
+
+# - **task_6** (mobile, local, action)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Fill body with the BODY value from task_1  
+#   extra_params: {"input_from": "task_1"}  
+#   web_params: {}  
+#   success_message: “Body filled.”  
+#   failure_message: “Could not fill body.”  
+#   depends_on: ["task_1", "task_5"]
+
+# - **task_7** (mobile, local, action)  
+#   goal: Draft and send email to Sara  
+#   ai_prompt: Click the Send button  
+#   extra_params: {}  
+#   web_params: {}  
+#   success_message: “Email sent to Sara.”  
+#   failure_message: “Failed to send email.”  
+#   depends_on: ["task_6"]
+
+# ────────────────────────────────────────────────────────────────
+# OUTPUT FORMAT
+# ────────────────────────────────────────────────────────────────
+# Return ONLY a valid JSON array of tasks. No markdown, no explanations, no extra text.
+
+# Schema for each task object:
+# {
+#   "task_id": "string (unique)",
+#   "goal": "string (identical for all tasks in this decomposition)",
+#   "ai_prompt": "string",
+#   "device": "desktop" | "mobile",
+#   "context": "local" | "web",
+#   "target_agent": "action" | "reasoning" | "language" | "api",
+#   "extra_params": { ... },
+#   "web_params": { ... },
+#   "depends_on": ["task_id"] | null,
+#   "success_message": "string (short, user‑friendly)",
+#   "failure_message": "string (short, user‑friendly)"
+# }
+
+# Generate the task decomposition now:
+# """
 
 def _get_decomposition_prompt_sop(device_type: Literal["desktop", "mobile", "mixed"]) -> str:
     """Return the device-specific SOP for task decomposition."""
@@ -3467,10 +3688,30 @@ Do NOT repeat the same task prompt, same approach, or same tool sequence.
         if not isinstance(parsed, list):
             raise ValueError(f"Expected a JSON array of tasks, got: {type(parsed)}")
 
-        # Step E: filter out non-dict entries (safety)
-        task_dicts = [t for t in parsed if isinstance(t, dict)]
+        # Step E: normalize the parsed array into task dictionaries.
+        task_dicts = _coerce_task_dict_list(parsed)
         if not task_dicts:
-            raise ValueError("JSON array contained no task objects")
+            repair_prompt = f"""You are repairing a malformed task decomposition response.
+
+USER REQUEST:
+{json.dumps(_clean_request, indent=2)}
+
+BROKEN RESPONSE:
+{response_text}
+
+Return ONLY a valid JSON array where every element is a task object with at least:
+- task_id
+- goal
+- ai_prompt
+- device
+- context
+- target_agent
+Do not return strings, markdown, or explanation text."""
+            repair_text = (await llm_invoke_with_fallback(repair_prompt)).strip()
+            repaired = extract_json_payload(repair_text, None)
+            task_dicts = _coerce_task_dict_list(repaired)
+            if not task_dicts:
+                raise ValueError("JSON array contained no task objects")
 
         # Step E.5: sanitize task dicts to ensure string task_ids and depends_on
         _sanitize_task_dicts(task_dicts)
@@ -3610,7 +3851,7 @@ Return ONLY a valid JSON array of tasks (same format as input). Do not include m
                     val_parsed = val_parsed["decomposition"]
 
             if isinstance(val_parsed, list) and len(val_parsed) > 0:
-                validated_tasks_dicts = [t for t in val_parsed if isinstance(t, dict)]
+                validated_tasks_dicts = _coerce_task_dict_list(val_parsed)
                 for t in validated_tasks_dicts:
                     t["goal"] = shared_goal  # Enforce shared goal
                 action_tasks = [ActionTask(**t) for t in validated_tasks_dicts]

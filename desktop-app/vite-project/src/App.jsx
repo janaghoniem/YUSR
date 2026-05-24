@@ -289,26 +289,42 @@ function App() {
       return;
     }
 
+    const fetchFromEndpoint = async (url) => {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      return response.json();
+    };
+
     const fetchSessionTasks = async () => {
       try {
-        const response = await fetch(
-          `http://localhost:8000/device/cross-platform-tasks?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`,
-          {
-            method: "GET",
-            headers: { "Content-Type": "application/json" },
-          }
-        );
-        if (response.ok) {
-          const data = await response.json();
-          const tasks = data.tasks || [];
-          // Filter to only session-scoped tasks (already filtered by backend)
-          setSessionScopedTasks(tasks.map((task, idx) => ({
-            id: task.task_id || `xp-${idx}`,
-            name: task.task_payload?.description || task.original_request || `Cross-platform task ${idx + 1}`,
-            info: task.status || "pending",
-            status: task.status,
-            device: task.source_platform || "unknown",
-          })));
+        const crossPlatformUrl = `http://localhost:8000/device/cross-platform-tasks?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`;
+        const fallbackUrl = `http://localhost:8000/device/${encodeURIComponent(deviceId)}/pending-actions`;
+
+        let data = await fetchFromEndpoint(crossPlatformUrl);
+        let tasks = data?.tasks || data?.actions || [];
+
+        if (!data) {
+          data = await fetchFromEndpoint(fallbackUrl);
+          tasks = data?.actions || data?.tasks || [];
+        }
+
+        // Filter to only session-scoped tasks (already filtered by backend)
+        setSessionScopedTasks(tasks.map((task, idx) => ({
+          id: task.task_id || `xp-${idx}`,
+          name: task.task_payload?.description || task.original_request || `Cross-platform task ${idx + 1}`,
+          info: task.status || "pending",
+          status: task.status,
+          device: task.source_platform || "unknown",
+        })));
+
+        if (data) {
           console.log(`[SessionTasks] Fetched ${tasks.length} session-scoped tasks`);
         }
       } catch (err) {

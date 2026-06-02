@@ -96,12 +96,13 @@ COPYING FILE CONTENT (NON-PDF):
 import pyautogui
 import pyperclip
 import time
+import sys
 
 try:
     # Select all and copy
-    pyautogui.hotkey('ctrl', 'a')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'a')
     time.sleep(0.2)
-    pyautogui.hotkey('ctrl', 'c')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'c')
     time.sleep(0.2)
 
     # Get the copied content
@@ -121,7 +122,7 @@ READING A FILE:
 import os
 
 try:
-    filepath = "D:/Downloads/file.txt"
+    filepath = os.path.expanduser("~/Downloads/file.txt")
 
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {{filepath}}")
@@ -143,14 +144,15 @@ EXTRACTING TEXT FROM UI:
 import pyautogui
 import pyperclip
 import time
+import sys
 
 try:
     # Select text
-    pyautogui.hotkey('ctrl', 'a')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'a')
     time.sleep(0.1)
 
     # Copy to clipboard
-    pyautogui.hotkey('ctrl', 'c')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'c')
     time.sleep(0.2)
 
     # Extract from clipboard
@@ -219,12 +221,12 @@ def get_agent_folder(subfolder: str) -> str:
         if os.path.exists(os.path.dirname(base_path)) or os.path.exists(base_path):
             agent_folder = os.path.join(base_path, subfolder)
             os.makedirs(agent_folder, exist_ok=True)
-            return agent_folder.replace("\\", "\\\\")
+            return agent_folder
 
     # Final fallback - create in user's home directory
     fallback_path = os.path.join(os.path.expanduser("~"), "agent", subfolder)
     os.makedirs(fallback_path, exist_ok=True)
-    return fallback_path.replace("\\", "\\\\")
+    return fallback_path
 
 
 # ============================================================================

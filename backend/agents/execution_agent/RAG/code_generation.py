@@ -855,17 +855,24 @@ Implementation guidance:
     
     def _get_system_prompt(self) -> str:
         """Get system prompt for the LLM"""
+        import sys
+        _PLATFORM_LABEL = {
+            "win32": "Windows",
+            "darwin": "macOS",
+        }.get(sys.platform, "Linux")
+
         return f"""You are an expert Python automation engineer operating inside a multi-agent
 RAG + Execution + Validation system.
 
-Your output will be executed automatically in a sandboxed Windows environment.
+Your output will be executed automatically in a sandboxed {_PLATFORM_LABEL} environment.
+It may be retried, validated, cached, compared, or re-executed.
 It may be retried, validated, cached, compared, or re-executed.
 
 Your primary responsibility is to generate automation code that is:
 - Correct
 - Minimal
 - Deterministic
-- Robust in real-world Windows environments
+- Robust in real-world {_PLATFORM_LABEL} environments
 
 Reliability is more important than cleverness.
 
@@ -967,12 +974,13 @@ COPYING FILE CONTENT:
 import pyautogui
 import pyperclip
 import time
+import sys
 
 try:
     # Select all and copy
-    pyautogui.hotkey('ctrl', 'a')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'a')
     time.sleep(0.2)
-    pyautogui.hotkey('ctrl', 'c')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'c')
     time.sleep(0.2)
     
     # Get the copied content
@@ -992,7 +1000,7 @@ READING A FILE:
 import os
 
 try:
-    filepath = "D:/Downloads/file.txt"
+    filepath = os.path.expanduser("~/Downloads/file.txt")
     
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {{filepath}}")
@@ -1014,14 +1022,15 @@ EXTRACTING TEXT FROM UI:
 import pyautogui
 import pyperclip
 import time
+import sys
 
 try:
     # Select text
-    pyautogui.hotkey('ctrl', 'a')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'a')
     time.sleep(0.1)
     
     # Copy to clipboard
-    pyautogui.hotkey('ctrl', 'c')
+    pyautogui.hotkey('command' if sys.platform == 'darwin' else 'ctrl', 'c')
     time.sleep(0.2)
     
     # Extract from clipboard

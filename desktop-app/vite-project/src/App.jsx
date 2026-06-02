@@ -23,7 +23,8 @@ import { Mic, Pause, Square, X, ArrowUpRight, Sparkles, Cpu, Waves } from "lucid
 // --- Device ID helpers ---
 const getOS = () => {
   if (typeof navigator === "undefined") return "desktop";
-  const platform = navigator.platform.toLowerCase();
+  // Use userAgentData if available (modern), fall back to navigator.platform
+  const platform = (navigator.userAgentData?.platform || navigator.platform || "").toLowerCase();
   if (platform.includes("win")) return "windows";
   if (platform.includes("mac")) return "mac";
   if (platform.includes("linux")) return "linux";

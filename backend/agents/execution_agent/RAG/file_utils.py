@@ -14,14 +14,44 @@ import subprocess
 import string
 import os
 import logging
+import sys
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 def get_drives() -> List[str]:
-    """Get all accessible drives on the system."""
-    return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+    """Get all accessible roots on the system."""
+    if sys.platform == "win32":
+        return [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+    if sys.platform == "darwin":
+        roots = ["/"]
+        if os.path.isdir("/Volumes"):
+            roots.extend([os.path.join("/Volumes", entry) for entry in os.listdir("/Volumes")])
+        return roots
+    return ["/", os.path.expanduser("~")]
+
+
+def _find_command(path: str, filename: str) -> List[str]:
+    """Build a platform-appropriate search command."""
+    if sys.platform == "win32":
+        return ["where", "/r", path, filename]
+    return ["find", path, "-name", filename]
+
+
+def _open_path(path: str) -> bool:
+    """Open a file with the default application."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=True)
+        else:
+            subprocess.run(["xdg-open", path], check=True)
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to open: {e}")
+        return False
 
 
 def find_file(filename: str, search_scope: str = "fast") -> Optional[str]:
@@ -57,7 +87,7 @@ def find_file(filename: str, search_scope: str = "fast") -> Optional[str]:
 
         try:
             result = subprocess.run(
-                ["where", "/r", path, filename],
+                _find_command(path, filename),
                 capture_output=True,
                 text=True,
                 timeout=30  # Increased timeout for large directory trees
@@ -123,7 +153,7 @@ def find_all_files(filename: str, search_scope: str = "fast") -> List[str]:
 
         try:
             result = subprocess.run(
-                ["where", "/r", path, filename],
+                _find_command(path, filename),
                 capture_output=True,
                 text=True,
                 timeout=30  # Increased for large directory searches
@@ -183,15 +213,12 @@ def open_file(filename: str) -> bool:
             logger.error(f"Path is not a file: {path}")
             return False
 
-        try:
-            os.startfile(path)
+        if _open_path(path):
             # Output the path for downstream tasks
             print(f"[FILE]: {path}")
             logger.info(f"✅ Opened: {path}")
             return True
-        except Exception as e:
-            logger.error(f"❌ Failed to open file: {e}")
-            return False
+        return False
 
     except Exception as e:
         logger.error(f"❌ Error opening file: {e}")

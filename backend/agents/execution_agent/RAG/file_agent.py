@@ -63,6 +63,9 @@ SKIP_DIRS = {
     # Windows system
     "Windows", "System32", "SysWOW64", "Program Files", "Program Files (x86)",
     "AppData", "ProgramData", "$Recycle.Bin", "Recovery",
+    # macOS system
+    "Library", "System", "private", "cores", "dev", "net",
+    ".Spotlight-V100", ".fseventsd", ".Trashes", ".TemporaryItems",
 }
 
 # Prefix-based skip — any directory whose name STARTS WITH one of these is skipped.
@@ -79,9 +82,14 @@ USER_PRIORITY_DIRS = {"Desktop", "Downloads", "Documents", "OneDrive", "Google D
 
 # Where we persist the index cache
 def _cache_path() -> str:
-    """Cache path under %LOCALAPPDATA%\\yusr\\."""
-    base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
-    return os.path.join(base, "yusr", "file_index_cache.json")
+    """Cache path under the platform-appropriate cache directory."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+    return os.path.join(base, "aura", "file_index_cache.json")
 
 CACHE_PATH    = _cache_path()
 CACHE_VERSION = 3          # Bump when index schema changes
@@ -192,11 +200,9 @@ def _get_scan_roots() -> List[str]:
     Return prioritised list of directories to index.
 
     Priority:
-      1. User common folders: Desktop, Downloads, Documents (direct in home)
-      2. All OneDrive roots (registry + filesystem + env var detection)
-         and their Desktop/Downloads/Documents subfolders
-      3. Same common folders on every mounted drive letter
-      4. User profile root on each drive (shallow — catches edge cases)
+            1. User common folders in the home directory
+            2. Platform-specific mirrors such as OneDrive/iCloud and mounted volumes
+            3. Drive letters on Windows or the home directory on Linux
     """
     import string
     roots: List[str] = []
@@ -214,26 +220,48 @@ def _get_scan_roots() -> List[str]:
     for folder in common:
         add(os.path.join(home, folder))
 
-    # 2. All OneDrive roots + their subfolders
-    for onedrive_root in _get_onedrive_roots():
-        add(onedrive_root)                              # root itself
-        for folder in common:
-            add(os.path.join(onedrive_root, folder))   # subfolders inside
+    if sys.platform == "win32":
+        # 2. All OneDrive roots + their subfolders
+        for onedrive_root in _get_onedrive_roots():
+            add(onedrive_root)
+            for folder in common:
+                add(os.path.join(onedrive_root, folder))
 
-    # 3. Common folders on every drive letter
-    drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-    for drive in drives:
+        # 3. Common folders on every drive letter
+        drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        for drive in drives:
+            for folder in common:
+                add(os.path.join(drive, folder))
+            add(os.path.join(drive, "Users", username))
+
+    elif sys.platform == "darwin":
+        icloud = os.path.expanduser("~/Library/Mobile Documents/com~apple~CloudDocs")
+        add(icloud)
         for folder in common:
-            add(os.path.join(drive, folder))
-        add(os.path.join(drive, "Users", username))
+            add(os.path.join(icloud, folder))
+
+        if os.path.isdir("/Volumes"):
+            for volume in os.listdir("/Volumes"):
+                volume_root = os.path.join("/Volumes", volume)
+                add(volume_root)
+                for folder in common:
+                    add(os.path.join(volume_root, "Users", username, folder))
+
+    else:
+        add(home)
 
     return roots
 
 
 def _open_file(path: str) -> bool:
-    """Open a file with the default Windows application."""
+    """Open a file with the platform's default application."""
     try:
-        os.startfile(path)
+        if sys.platform == "win32":
+            os.startfile(path)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=True)
+        else:
+            subprocess.run(["xdg-open", path], check=True)
         return True
     except Exception as e:
         logger.error(f"Failed to open file: {e}")
@@ -241,15 +269,16 @@ def _open_file(path: str) -> bool:
 
 
 def _system_search_fallback(query: str, roots: List[str]) -> Optional[str]:
-    """Last-resort system search using Windows `where /r`."""
+    """Last-resort system search using the platform's native tools."""
     try:
         for root in roots:
             if not os.path.isdir(root):
                 continue
-            res = subprocess.run(
-                ["where", "/r", root, query],
-                capture_output=True, text=True, timeout=10
-            )
+            if sys.platform == "win32":
+                cmd = ["where", "/r", root, query]
+            else:
+                cmd = ["find", root, "-name", query]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if res.stdout.strip():
                 found = res.stdout.strip().splitlines()[0]
                 if os.path.isfile(found):
@@ -261,31 +290,39 @@ def _system_search_fallback(query: str, roots: List[str]) -> Optional[str]:
 
 def _full_drive_search(query: str) -> Optional[str]:
     """
-    Nuclear fallback — runs `where /r` from every drive root (C:\\, D:\\, …).
-    Slow (5-30s per drive) but finds anything on the machine.
+    Nuclear fallback — searches all available roots on the current platform.
+    Slow (5-30s per root) but finds anything on the machine.
     Only called when the index AND common-folder search both fail.
-    Each drive gets its own 60s timeout so one huge drive can't block others.
+    Each root gets its own 60s timeout so one huge root can't block others.
     """
     import string
-    drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-    logger.info(f"[FullDriveSearch] Scanning {len(drives)} drive(s) for '{query}'…")
+    if sys.platform == "win32":
+        roots = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        make_cmd = lambda root: ["where", "/r", root, query]
+    elif sys.platform == "darwin":
+        roots = ["/"]
+        if os.path.isdir("/Volumes"):
+            roots.extend([os.path.join("/Volumes", volume) for volume in os.listdir("/Volumes")])
+        make_cmd = lambda root: ["find", root, "-name", query]
+    else:
+        roots = ["/home", "/"]
+        make_cmd = lambda root: ["find", root, "-name", query]
 
-    for drive in drives:
+    logger.info(f"[FullDriveSearch] Scanning {len(roots)} root(s) for '{query}'…")
+
+    for root in roots:
         try:
-            logger.debug(f"  where /r {drive} {query}")
-            res = subprocess.run(
-                ["where", "/r", drive, query],
-                capture_output=True, text=True, timeout=60
-            )
+            logger.debug(f"  searching {root} for {query}")
+            res = subprocess.run(make_cmd(root), capture_output=True, text=True, timeout=60)
             if res.stdout.strip():
                 found = res.stdout.strip().splitlines()[0]
                 if os.path.isfile(found):
                     logger.info(f"  ✅ Found on full-drive search: {found}")
                     return found
         except subprocess.TimeoutExpired:
-            logger.warning(f"  ⚠ Timeout scanning drive {drive}, skipping")
+            logger.warning(f"  ⚠ Timeout scanning root {root}, skipping")
         except Exception as e:
-            logger.debug(f"  ✗ Error on {drive}: {e}")
+            logger.debug(f"  ✗ Error on {root}: {e}")
 
     return None
 
@@ -1078,7 +1115,7 @@ def stop_periodic_refresh() -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    print(f"File Agent  |  platform=Windows  fuzzy={FUZZY_BACKEND}")
+    print(f"File Agent  |  platform={sys.platform}  fuzzy={FUZZY_BACKEND}")
     print(f"Cache path: {CACHE_PATH}")
     print("=" * 60)
 

@@ -1424,6 +1424,16 @@ async def start_execution_agent_with_rag(broker_instance, desktop_rag, sandbox_p
                 if task.context == "web":
                     logger.info(f"🌐 WEB TASK - Using Playwright pipeline")
                     result = await web_bridge.execute_web_action_task(task, session_id)
+                elif (task.device or "").lower() == "ios":
+                    logger.warning(f"🍎 IOS TASK - Not implemented yet")
+                    result = TaskResult(
+                        task_id=task.task_id,
+                        status="failed",
+                        error="iOS mobile execution is not yet implemented",
+                    )
+                elif (task.device or "").lower() == "macos":
+                    logger.info(f"🖥️ MACOS TASK - Using RAG + pyautogui pipeline")
+                    result = await desktop_bridge.execute_action_task(task)
                 else:
                     logger.info(f"🖥️ DESKTOP TASK - Using RAG + pyautogui pipeline")
                     result = await desktop_bridge.execute_action_task(task)

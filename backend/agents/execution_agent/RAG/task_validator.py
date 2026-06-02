@@ -34,6 +34,8 @@ class WindowState:
     def capture() -> 'WindowState':
         """Capture current active window state"""
         try:
+            import sys
+
             if gw is None:
                 return WindowState(title="Unknown", process="Unknown", timestamp=time.time())
 
@@ -45,7 +47,8 @@ class WindowState:
                 process = title.split(' - ')[-1] if ' - ' in title else title
                 return WindowState(title=title, process=process, timestamp=time.time())
             else:
-                return WindowState(title="Desktop", process="explorer", timestamp=time.time())
+                desktop_process = "Finder" if sys.platform == "darwin" else "explorer"
+                return WindowState(title="Desktop", process=desktop_process, timestamp=time.time())
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to capture window state: {e}")

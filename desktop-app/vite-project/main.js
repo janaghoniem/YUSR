@@ -36,31 +36,28 @@ function sendAuraPayload(channel, payload) {
 function getAuraSpawnConfig(options = {}) {
   const isPackaged = app.isPackaged;
   const lang = normalizeLang(options.lang || currentAuraConfig.lang || "en");
-  
+
   if (isPackaged) {
+    // Packaged: platform‑specific binary name (no .exe on macOS/Linux)
+    const binaryName = process.platform === "win32" ? "aura_engine.exe" : "aura_engine";
     return {
-      command: path.join(process.resourcesPath, "aura_engine.exe"),
+      command: path.join(process.resourcesPath, binaryName),
       args: ["--lang", lang].concat(options.once ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)] : []),
       cwd: process.resourcesPath
     };
   } else {
-    // Navigate from vite-project/src/main up to AURA root, then to backend/.venv
-    const pythonPath = path.join(
-      __dirname, 
-      '..', '..', // Up to AURA/
-      'backend', 
-      '.venv', 
-      'Scripts', 
-      'python.exe'
-    );
-    
-    // The script is in your vite-project root (adjust if it's elsewhere)
-    const scriptPath = path.join(__dirname, 'aura_engine.py');
-    
+    // Development: resolve venv Python cross‑platform
+    const isWin = process.platform === "win32";
+    const binDir = isWin ? "Scripts" : "bin";
+    const pyExe = isWin ? "python.exe" : "python3";
+
+    const pythonPath = path.join(__dirname, "..", "..", "backend", ".venv", binDir, pyExe);
+    const scriptPath = path.join(__dirname, "aura_engine.py");
+
     return {
       command: pythonPath,
-      args: ["-u", scriptPath, "--lang", lang].concat(options.once ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)] : []), // -u for unbuffered I/O (critical for real-time)
-      cwd: path.join(__dirname, '..', '..')
+      args: ["-u", scriptPath, "--lang", lang].concat(options.once ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)] : []),
+      cwd: path.join(__dirname, "..", "..")
     };
   }
 }

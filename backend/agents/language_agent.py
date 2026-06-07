@@ -563,39 +563,70 @@ class LanguageAgent:
             logger.warning("⚠️ MongoDB not available, falling back to in-memory storage")
 
         self.memory = self._load_conversation()
+        self._needs_async_load = True  # will be replaced by async Redis/MongoDB load on first use
 
         logger.info(f"✅ Language Agent initialized for session {session_id}, user {user_id}")
-        logger.info(f"📚 Loaded {len(self.memory) - 1} previous messages")
-
+        logger.info(f"📚 Loaded {len(self.memory) - 1} previous messages (async load pending)")
     def touch(self) -> None:
         self.last_used = time.time()
 
     def _load_conversation(self) -> List[Dict[str, str]]:
-        """Load conversation history from MongoDB"""
-        if self.conversations is None:
-            logger.warning("⚠️ MongoDB not available, starting fresh conversation")
-            return [self.system_prompt]
+        """Sync stub — real load happens via _load_conversation_async() on first handler call."""
+        return [self.system_prompt]
+
+    async def _load_conversation_async(self) -> List[Dict[str, str]]:
+        """
+        Load conversation from Redis (< 1ms) or MongoDB fallback (async, non-blocking).
+        Call this instead of _load_conversation() from any async context.
+        """
         try:
-            doc = self.conversations.find_one(
-                {"session_id": self.session_id, "user_id": self.user_id},
-                sort=[("timestamp", -1)]
+            from memory_layer import get_memory_layer
+            ml = await get_memory_layer()
+
+            # Check Redis first for the full payload including metadata
+            _conv_key = f"conv:{self.user_id}:{self.session_id}"
+            _cached_raw = await ml.cache.get(_conv_key)
+            if _cached_raw:
+                try:
+                    import json as _json
+                    _cached = _json.loads(_cached_raw)
+                    messages = _cached.get("messages", [])
+                    if messages and len(messages) > 1:
+                        # Restore metadata from Redis — no MongoDB round-trip needed
+                        self.preferred_language = _cached.get("preferred_language") or "en"
+                        self.output_language = _cached.get("output_language") or self.preferred_language
+                        self.awaiting_user_response = _cached.get("awaiting_user_response")
+                        self.user_profile = _cached.get("user_profile") or {}
+                        logger.info(f"✅ Loaded {len(messages)} messages from session {self.session_id}")
+                        return messages
+                except Exception:
+                    pass
+
+            # Redis miss — load from MongoDB (async)
+            messages = await ml.load_conversation(
+                self.session_id,
+                self.user_id,
+                system_prompt=self.system_prompt,
             )
-            if doc and "messages" in doc:
-                messages = doc["messages"]
-                self.preferred_language = doc.get("preferred_language") or "en"
-                self.output_language = doc.get("output_language") or self.preferred_language
-                self.awaiting_user_response = doc.get("awaiting_user_response")
-                self.user_profile = doc.get("user_profile") or {}
+            if messages and len(messages) > 1:
+                try:
+                    col = ml.mongo.collection("language_agent_conversations")
+                    doc = await col.find_one(
+                        {"session_id": self.session_id, "user_id": self.user_id},
+                        sort=[("timestamp", -1)],
+                    )
+                    if doc:
+                        self.preferred_language = doc.get("preferred_language") or "en"
+                        self.output_language = doc.get("output_language") or self.preferred_language
+                        self.awaiting_user_response = doc.get("awaiting_user_response")
+                        self.user_profile = doc.get("user_profile") or {}
+                except Exception:
+                    pass
                 logger.info(f"✅ Loaded {len(messages)} messages from session {self.session_id}")
-                if not messages or messages[0].get("role") != "system":
-                    messages.insert(0, self.system_prompt)
                 return messages
-            else:
-                logger.info(f"ℹ️ No previous conversation found for session {self.session_id}")
-                return [self.system_prompt]
         except Exception as e:
-            logger.error(f"❌ Failed to load conversation: {e}")
-            return [self.system_prompt]
+            logger.error(f"❌ _load_conversation_async failed: {e}")
+        return [self.system_prompt]
 
     def set_preferred_language(self, lang: Optional[str], input_text: Optional[str] = None):
         """
@@ -923,57 +954,75 @@ class LanguageAgent:
         self.save_memory()
 
     def _save_conversation(self):
-        """Save conversation to MongoDB"""
-        if self.conversations is None:
-            logger.debug("⚠️ MongoDB not available, skipping save")
-            return
+        """Sync stub — real save goes through save_memory() -> MemoryLayer."""
+        pass
+
+    async def _save_conversation_async(self) -> None:
+        """
+        Save conversation to Redis immediately (< 1ms) + background MongoDB persist.
+        """
         try:
-            self.conversations.update_one(
-                {"session_id": self.session_id, "user_id": self.user_id},
-                {
-                    "$set": {
-                        "messages": self.memory,
-                        "preferred_language": self.preferred_language,
-                        "output_language": self.output_language,
-                        "awaiting_user_response": self.awaiting_user_response,
-                        "user_profile": self.user_profile,
-                        "timestamp": time.time(),
-                        "last_updated": int(time.time())
-                    }
+            from memory_layer import get_memory_layer
+            ml = await get_memory_layer()
+            await ml.save_conversation(
+                self.session_id,
+                self.user_id,
+                self.memory,
+                extra={
+                    "preferred_language":     self.preferred_language,
+                    "output_language":        self.output_language,
+                    "awaiting_user_response": self.awaiting_user_response,
+                    "user_profile":           self.user_profile,
                 },
-                upsert=True
             )
-            logger.debug(f"💾 Saved conversation to MongoDB (session: {self.session_id})")
+            logger.debug(f"💾 Saved conversation to Redis (session: {self.session_id})")
         except Exception as e:
-            logger.error(f"❌ Failed to save conversation: {e}")
+            logger.error(f"❌ _save_conversation_async failed: {e}")
 
     def save_memory(self):
-        """Save to both JSONL (backup) and MongoDB (persistence).
-        Both writes are dispatched as background tasks so they never block
-        the asyncio event loop when called from an async handler.
+        """
+        Save memory state. Redis write (< 1ms) + background MongoDB + background JSONL.
+        Safe to call from both sync and async contexts — never blocks the event loop.
         """
         self.touch()
-        record = {
-            "id": uuid.uuid4().hex,
-            "timestamp": int(time.time()),
-            "memory": self.memory,
-            "session_id": self.session_id,
-            "user_id": self.user_id,
-            "preferred_language": self.preferred_language,
-            "output_language": self.output_language,
-            "awaiting_user_response": self.awaiting_user_response,
-            "user_profile": self.user_profile,
-        }
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # Non-blocking: fire-and-forget both I/O operations
-                asyncio.create_task(asyncio.to_thread(append_jsonl, self.save_path, record))
-                asyncio.create_task(asyncio.to_thread(self._save_conversation))
+                # Primary: Redis-first async save
+                asyncio.create_task(
+                    self._save_conversation_async(),
+                    name=f"save_conv_{self.session_id}",
+                )
+                # JSONL backup in a thread (non-blocking)
+                record = {
+                    "id": uuid.uuid4().hex,
+                    "timestamp": int(time.time()),
+                    "memory": self.memory,
+                    "session_id": self.session_id,
+                    "user_id": self.user_id,
+                    "preferred_language": self.preferred_language,
+                    "output_language": self.output_language,
+                    "awaiting_user_response": self.awaiting_user_response,
+                    "user_profile": self.user_profile,
+                }
+                asyncio.create_task(
+                    asyncio.to_thread(append_jsonl, self.save_path, record),
+                    name=f"jsonl_backup_{self.session_id}",
+                )
             else:
                 # Fallback for sync contexts (e.g. tests)
+                record = {
+                    "id": uuid.uuid4().hex,
+                    "timestamp": int(time.time()),
+                    "memory": self.memory,
+                    "session_id": self.session_id,
+                    "user_id": self.user_id,
+                    "preferred_language": self.preferred_language,
+                    "output_language": self.output_language,
+                    "awaiting_user_response": self.awaiting_user_response,
+                    "user_profile": self.user_profile,
+                }
                 append_jsonl(self.save_path, record)
-                self._save_conversation()
         except Exception as e:
             logger.warning(f"⚠️ Failed to schedule memory save: {e}")
 
@@ -1296,15 +1345,19 @@ class LanguageAgent:
     def clear_conversation(self):
         """Clear conversation history (for new chat)"""
         self.memory = [self.system_prompt]
+        self._needs_async_load = False  # don't reload old history after explicit clear
         self.touch()
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.create_task(asyncio.to_thread(self._save_conversation))
+                asyncio.create_task(
+                    self._save_conversation_async(),
+                    name=f"clear_conv_{self.session_id}",
+                )
             else:
-                self._save_conversation()
-        except Exception:
-            self._save_conversation()
+                pass  # sync context: cleared in-memory, will persist on next save_memory
+        except Exception as e:
+            logger.warning(f"⚠️ clear_conversation async save failed: {e}")
         logger.info(f"🔄 Cleared conversation for session {self.session_id}")
 
 
@@ -1531,6 +1584,11 @@ async def start_language_agent(broker):
         # agent = get_or_create_agent(session_id, user_id)
         # Always pass the actual input text so language is detected from what the
         # user said, not from a potentially stale session value.
+        # Load full conversation history from Redis/MongoDB on first use
+        if getattr(agent, '_needs_async_load', False):
+            agent.memory = await agent._load_conversation_async()
+            agent._needs_async_load = False
+
         agent.set_preferred_language(payload_data.get("user_language"), input_text=input_text)
 
         # ── Single thinking step before the LLM call ─────────────────────────
@@ -1742,10 +1800,12 @@ async def start_language_agent(broker):
 
         # ── Fetch Mem0 preferences & inject user profile ──────────────────────
         try:
-            # No separate "checking preferences" step — already covered by "analyzing_request"
+            # Use mem0_manager for the full hybrid search (identity detection,
+            # direct MongoDB gap-fill, personal_info injection, dedup, recency tiebreak).
+            # memory_layer Redis caches the coordinator-formatted string — the language
+            # agent needs the raw list, so we use the manager directly here.
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
             pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
-
             all_memories = await asyncio.to_thread(pref_mgr.get_relevant_preferences, input_text, 5)
 
             if not all_memories or not isinstance(all_memories, list):

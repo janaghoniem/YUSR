@@ -4151,9 +4151,6 @@ def create_coordinator_graph():
         previous_execution_state = None
 
         try:
-            from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
-            
             if checkpointer and session_id:
                 try:
                     checkpoint_data = await checkpointer.aget(
@@ -4172,11 +4169,22 @@ def create_coordinator_graph():
                 logger.info("⚡ Using pre-fetched preferences from Language Agent (skipping duplicate Mem0 search)")
                 preferences_context = _prefetched
             else:
-                preferences_context = await asyncio.to_thread(
-                    pref_mgr.get_relevant_preferences,
-                    str(raw_task.get("original_input", raw_task.get("confirmation", ""))),
-                    5
-                )
+                try:
+                    from memory_layer import get_memory_layer
+                    _ml = await get_memory_layer()
+                    preferences_context = await _ml.get_relevant_preferences(
+                        user_id,
+                        str(raw_task.get("original_input", raw_task.get("confirmation", ""))),
+                    )
+                except Exception as _pref_err:
+                    logger.warning(f"⚠️ MemoryLayer preference fetch failed, falling back: {_pref_err}")
+                    from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
+                    pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
+                    preferences_context = await asyncio.to_thread(
+                        pref_mgr.get_relevant_preferences,
+                        str(raw_task.get("original_input", raw_task.get("confirmation", ""))),
+                        5
+                    )
 
             # ── Memory Fix 3: Strip credentials and conversation_history from coordinator context ──
             # T-M3/T-M4: Coordinator was embedding stored passwords into task
@@ -5761,9 +5769,14 @@ Extract now:"""
                                     "confidence": pref_obj.get("confidence", "medium"),
                                     "extracted_from": task_summary["original_request"]
                                 }
-                                asyncio.create_task(
-                                    asyncio.to_thread(pref_mgr.add_preference, _pref_text, _pref_meta),
-                                )
+                                try:
+                                    from memory_layer import get_memory_layer as _get_ml
+                                    _ml = await _get_ml()
+                                    _ml.add_preference_background(user_id, _pref_text, _pref_meta)
+                                except Exception:
+                                    asyncio.create_task(
+                                        asyncio.to_thread(pref_mgr.add_preference, _pref_text, _pref_meta),
+                                    )
                                 logger.info(f"💾 Queued background preference write: {pref_obj['preference']}")
                             except Exception as pref_err:
                                 logger.debug(f"⚠️ Could not queue preference: {pref_err}")
@@ -6048,12 +6061,11 @@ Extract now:"""
             original_message_id = current_state.get("original_message_id")
 
             try:
-                from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
-                preferences_context = await asyncio.to_thread(
-                    pref_mgr.get_relevant_preferences,
+                from memory_layer import get_memory_layer
+                _ml = await get_memory_layer()
+                preferences_context = await _ml.get_relevant_preferences(
+                    user_id,
                     str(current_state.get("input", {}).get("original_input", "")),
-                    5
                 )
             except Exception:
                 preferences_context = current_state.get("preferences_context", "No preferences available")

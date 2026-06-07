@@ -7,11 +7,14 @@ from fastapi import APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
+import asyncio
 import logging
 from datetime import datetime
 from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
+
+from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -141,11 +144,10 @@ async def get_preferences(user_id: str = "test_user", limit: int = 100):
         logger.info(f"✅ Successfully imported mem0_manager")
         from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
         
-        pref_mgr = get_preference_manager(user_id)
+        pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
         logger.info(f"✅ Got preference manager for {user_id}")
         
-        # Get ALL preferences (already formatted)
-        all_prefs = pref_mgr.get_all_preferences()
+        all_prefs = await asyncio.to_thread(pref_mgr.get_all_preferences)
         logger.info(f"✅ Retrieved {len(all_prefs)} preferences")
         
         # Format for frontend
@@ -280,8 +282,8 @@ async def clear_user_preferences(user_id: str):
         # get_all_preferences() only returns these — zero-token docs are invisible to it.
         try:
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = get_preference_manager(user_id)
-            all_prefs = pref_mgr.get_all_preferences()  # returns List[Dict]
+            pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
+            all_prefs = await asyncio.to_thread(pref_mgr.get_all_preferences) # returns List[Dict]
 
             for pref in all_prefs:
                 if not isinstance(pref, dict):
@@ -293,7 +295,7 @@ async def clear_user_preferences(user_id: str):
                 mem_id = pref.get("id") or pref.get("memory_id")
                 if mem_id:
                     try:
-                        pref_mgr.delete_preference(mem_id)
+                        await asyncio.to_thread(pref_mgr.delete_preference, mem_id)
                         mem0_deleted += 1
                         logger.info(f"🗑️ Deleted via Mem0: [{category}] {mem_id}")
                     except Exception as del_err:
@@ -312,14 +314,15 @@ async def clear_user_preferences(user_id: str):
         # Mem0's get_all() cannot see these. We must query MongoDB directly using
         # the correct nested path "payload.user_id".
         try:
-            client = MongoClient(MONGODB_URI)
-            collection = client["yusr_db"]["mem0_preferences"]
+            collection = await asyncio.to_thread(_get_stats_collection)
 
             # Find all zero-token docs for this user (payload.user_id is the correct path)
-            raw_docs = list(collection.find(
-                {"payload.user_id": user_id},
-                {"_id": 1, "payload.metadata.category": 1, "payload.data": 1}
-            ))
+            raw_docs = await asyncio.to_thread(
+                lambda: list(collection.find(
+                    {"payload.user_id": user_id},
+                    {"_id": 1, "payload.metadata.category": 1, "payload.data": 1}
+                ))
+            )
 
             ids_to_delete = []
             for doc in raw_docs:
@@ -334,13 +337,13 @@ async def clear_user_preferences(user_id: str):
                 ids_to_delete.append(doc["_id"])
 
             if ids_to_delete:
-                result = collection.delete_many({"_id": {"$in": ids_to_delete}})
+                result = await asyncio.to_thread(
+                    collection.delete_many, {"_id": {"$in": ids_to_delete}}
+                )
                 raw_deleted = result.deleted_count
                 logger.warning(f"✅ Raw MongoDB path: deleted {raw_deleted} zero-token documents")
             else:
                 logger.info("ℹ️ No zero-token documents found to delete")
-
-            client.close()
 
         except Exception as raw_err:
             errors.append(f"Raw MongoDB path error: {raw_err}")
@@ -393,13 +396,13 @@ async def update_preference(
         logger.info(f"📝 Updating preference {preference_id} for user {user_id}")
         
         from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-        pref_mgr = get_preference_manager(user_id)
+        pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
         
-        # Mem0's update_preference method
-        success = pref_mgr.update_preference(
-            old_memory_id=preference_id,
-            new_preference=new_text,
-            metadata={"category": category} if category else None
+        success = await asyncio.to_thread(
+            pref_mgr.update_preference,
+            preference_id,
+            new_text,
+            {"category": category} if category else None
         )
         
         if success:
@@ -436,9 +439,9 @@ async def delete_single_preference(
         logger.info(f"🗑️ Deleting preference {preference_id} for user {user_id}")
         
         from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-        pref_mgr = get_preference_manager(user_id)
+        pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
         
-        success = pref_mgr.delete_preference(preference_id)
+        success = await asyncio.to_thread(pref_mgr.delete_preference, preference_id)
         
         if success:
             logger.info(f"✅ Preference deleted: {preference_id}")
@@ -463,52 +466,58 @@ async def delete_single_preference(
         )
     
     
+# Module-level shared client — created once, reused for every request.
+# This eliminates the 400–800ms cold-connection cost per /stats call.
+_stats_mongo_client: Optional[MongoClient] = None
+
+def _get_stats_collection():
+    global _stats_mongo_client
+    if _stats_mongo_client is None:
+        _stats_mongo_client = MongoClient(MONGODB_URI)
+    return _stats_mongo_client["yusr_db"]["mem0_preferences"]
+
+
 @router.get("/stats")
 async def get_memory_stats(user_id: str):
-    """Get preference statistics with REAL MongoDB storage calculation"""
+    """
+    Get preference statistics.
+    Uses a shared MongoClient (created once at module load) and count_documents()
+    instead of loading all documents into RAM.
+    """
     try:
         logger.info(f"📊 Fetching memory stats for user: {user_id}")
-        
-        client = MongoClient(MONGODB_URI)
-        db = client["yusr_db"]
-        preferences = db["mem0_preferences"]
-        
-        # ✅ Use direct MongoDB query (Mem0's get_all() is broken)
-        user_docs = list(preferences.find({"user_id": user_id}))
-        total_prefs = len(user_docs)
-        
-        # Calculate storage size from actual documents
-        storage_bytes = 0
-        personal_info = 0
-        app_usage = 0
-        
-        for doc in user_docs:
-            # Calculate BSON size (approximate)
-            import json
-            doc_json = json.dumps(doc, default=str)
-            storage_bytes += len(doc_json.encode('utf-8'))
-            
-            # Count by category
-            category = doc.get('metadata', {}).get('category', 'general')
-            if category == 'personal_info':
-                personal_info += 1
-            elif category == 'app_usage':
-                app_usage += 1
-        
-        storage_size_mb = storage_bytes / (1024 * 1024)
-        
+
+        col = await asyncio.to_thread(_get_stats_collection)
+
+        # count_documents uses an index scan — no full collection load
+        total_prefs = await asyncio.to_thread(
+            col.count_documents, {"user_id": user_id}
+        )
+        personal_info = await asyncio.to_thread(
+            col.count_documents,
+            {"user_id": user_id, "metadata.category": "personal_info"}
+        )
+        app_usage = await asyncio.to_thread(
+            col.count_documents,
+            {"user_id": user_id, "metadata.category": "app_usage"}
+        )
+
+        # Rough storage estimate: avg BSON doc ~500 bytes (avoids loading all docs)
+        estimated_storage_bytes = total_prefs * 500
+        storage_size_mb = round(estimated_storage_bytes / (1024 * 1024), 4)
+
         stats = {
             "total_preferences": total_prefs,
             "personal_info_count": personal_info,
             "app_preferences_count": app_usage,
-            "storage_size_mb": round(storage_size_mb, 2),
-            "storage_bytes": storage_bytes,  # ✅ NEW: Raw bytes for frontend
+            "storage_size_mb": storage_size_mb,
+            "storage_bytes": estimated_storage_bytes,
             "status": "success"
         }
-        
+
         logger.info(f"✅ Stats: {stats}")
         return stats
-        
+
     except Exception as e:
         logger.error(f"❌ Failed to get stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))

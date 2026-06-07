@@ -4152,7 +4152,7 @@ def create_coordinator_graph():
 
         try:
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = get_preference_manager(user_id)
+            pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
             
             if checkpointer and session_id:
                 try:
@@ -4172,8 +4172,10 @@ def create_coordinator_graph():
                 logger.info("⚡ Using pre-fetched preferences from Language Agent (skipping duplicate Mem0 search)")
                 preferences_context = _prefetched
             else:
-                preferences_context = pref_mgr.get_relevant_preferences(
-                    str(raw_task.get("original_input", raw_task.get("confirmation", ""))), limit=5
+                preferences_context = await asyncio.to_thread(
+                    pref_mgr.get_relevant_preferences,
+                    str(raw_task.get("original_input", raw_task.get("confirmation", ""))),
+                    5
                 )
 
             # ── Memory Fix 3: Strip credentials and conversation_history from coordinator context ──
@@ -5645,7 +5647,7 @@ def create_coordinator_graph():
                 if not (success_count == total_count and total_count > 0):
                     return
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                pref_mgr = get_preference_manager(user_id)
+                pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
 
                 # TC48: Skip extraction for pure task-only commands that contain
                 # no personal signal. These commands open apps or perform generic
@@ -5753,17 +5755,18 @@ Extract now:"""
                                     )
                                     continue
                             try:
-                                pref_mgr.add_preference(
-                                    pref_obj["preference"],
-                                    metadata={
-                                        "category": pref_obj.get("category", "general"),
-                                        "confidence": pref_obj.get("confidence", "medium"),
-                                        "extracted_from": task_summary["original_request"]
-                                    }
+                                _pref_text = pref_obj["preference"]
+                                _pref_meta = {
+                                    "category": pref_obj.get("category", "general"),
+                                    "confidence": pref_obj.get("confidence", "medium"),
+                                    "extracted_from": task_summary["original_request"]
+                                }
+                                asyncio.create_task(
+                                    asyncio.to_thread(pref_mgr.add_preference, _pref_text, _pref_meta),
                                 )
-                                logger.info(f"💾 Stored preference: {pref_obj['preference']}")
+                                logger.info(f"💾 Queued background preference write: {pref_obj['preference']}")
                             except Exception as pref_err:
-                                logger.debug(f"⚠️ Could not store preference: {pref_err}")
+                                logger.debug(f"⚠️ Could not queue preference: {pref_err}")
                 
                 apps_used = list(set(
                     t.extra_params.get("app_name", "")
@@ -5831,12 +5834,19 @@ Extract now:"""
             try:
                 from agents.coordinator_agent.memory.pattern_learner import run_pattern_learning
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                _pl_mgr = get_preference_manager(user_id)
-                _new_patterns = run_pattern_learning(user_id, _pl_mgr)
-                if _new_patterns:
-                    logger.info(f"🧠 Pattern learner stored {_new_patterns} new/updated patterns for {user_id}")
+
+                async def _bg_pattern_learning():
+                    try:
+                        _pl_mgr = await asyncio.to_thread(get_preference_manager, user_id)
+                        _new_patterns = await asyncio.to_thread(run_pattern_learning, user_id, _pl_mgr)
+                        if _new_patterns:
+                            logger.info(f"🧠 Pattern learner stored {_new_patterns} new/updated patterns for {user_id}")
+                    except Exception as _pl_err:
+                        logger.debug(f"⚠️ Pattern learning failed (non-fatal): {_pl_err}")
+
+                asyncio.create_task(_bg_pattern_learning())
             except Exception as _pl_err:
-                logger.debug(f"⚠️ Pattern learning failed (non-fatal): {_pl_err}")
+                logger.debug(f"⚠️ Pattern learning task creation failed (non-fatal): {_pl_err}")
         # ─────────────────────────────────────────────────────────────────────
 
         if task_queue.global_queue:
@@ -6039,9 +6049,11 @@ Extract now:"""
 
             try:
                 from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                pref_mgr = get_preference_manager(user_id)
-                preferences_context = pref_mgr.get_relevant_preferences(
-                    str(current_state.get("input", {}).get("original_input", "")), limit=5
+                pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
+                preferences_context = await asyncio.to_thread(
+                    pref_mgr.get_relevant_preferences,
+                    str(current_state.get("input", {}).get("original_input", "")),
+                    5
                 )
             except Exception:
                 preferences_context = current_state.get("preferences_context", "No preferences available")
@@ -7270,4 +7282,4 @@ async def start_coordinator_agent(broker_instance):
     logger.info("✅ Coordinator Agent started with RAG action layer support")
     
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)

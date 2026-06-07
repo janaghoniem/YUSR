@@ -948,23 +948,34 @@ class LanguageAgent:
             logger.error(f"❌ Failed to save conversation: {e}")
 
     def save_memory(self):
-        """Save to both JSONL (backup) and MongoDB (persistence)"""
+        """Save to both JSONL (backup) and MongoDB (persistence).
+        Both writes are dispatched as background tasks so they never block
+        the asyncio event loop when called from an async handler.
+        """
         self.touch()
+        record = {
+            "id": uuid.uuid4().hex,
+            "timestamp": int(time.time()),
+            "memory": self.memory,
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "preferred_language": self.preferred_language,
+            "output_language": self.output_language,
+            "awaiting_user_response": self.awaiting_user_response,
+            "user_profile": self.user_profile,
+        }
         try:
-            append_jsonl(self.save_path, {
-                "id": uuid.uuid4().hex,
-                "timestamp": int(time.time()),
-                "memory": self.memory,
-                "session_id": self.session_id,
-                "user_id": self.user_id,
-                "preferred_language": self.preferred_language,
-                "output_language": self.output_language,
-                "awaiting_user_response": self.awaiting_user_response,
-                "user_profile": self.user_profile,
-            })
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Non-blocking: fire-and-forget both I/O operations
+                asyncio.create_task(asyncio.to_thread(append_jsonl, self.save_path, record))
+                asyncio.create_task(asyncio.to_thread(self._save_conversation))
+            else:
+                # Fallback for sync contexts (e.g. tests)
+                append_jsonl(self.save_path, record)
+                self._save_conversation()
         except Exception as e:
-            logger.warning(f"⚠️ Failed to save to JSONL: {e}")
-        self._save_conversation()
+            logger.warning(f"⚠️ Failed to schedule memory save: {e}")
 
     # def parse_response(self, response: str) -> Tuple[str, bool, Optional[str], str]:
     #     """
@@ -1286,7 +1297,14 @@ class LanguageAgent:
         """Clear conversation history (for new chat)"""
         self.memory = [self.system_prompt]
         self.touch()
-        self._save_conversation()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(asyncio.to_thread(self._save_conversation))
+            else:
+                self._save_conversation()
+        except Exception:
+            self._save_conversation()
         logger.info(f"🔄 Cleared conversation for session {self.session_id}")
 
 
@@ -1726,9 +1744,9 @@ async def start_language_agent(broker):
         try:
             # No separate "checking preferences" step — already covered by "analyzing_request"
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-            pref_mgr = get_preference_manager(user_id)
+            pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
 
-            all_memories = pref_mgr.get_relevant_preferences(input_text, limit=5)
+            all_memories = await asyncio.to_thread(pref_mgr.get_relevant_preferences, input_text, 5)
 
             if not all_memories or not isinstance(all_memories, list):
                 all_memories = []
@@ -1851,7 +1869,7 @@ async def start_language_agent(broker):
             else:
                 try:
                     from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
-                    _pmgr = get_preference_manager(user_id)
+                    _pmgr = await asyncio.to_thread(get_preference_manager, user_id)
 
                     # TC59: Reject facts that conflict with existing identity data.
                     # An attacker saying "my name is Admin" after onboarding as Sara
@@ -1864,7 +1882,7 @@ async def start_language_agent(broker):
 
                     if _is_identity_claim:
                         try:
-                            _existing = _pmgr.get_all_preferences()
+                            _existing = await asyncio.to_thread(_pmgr.get_all_preferences)
                             for _mem in _existing:
                                 if not isinstance(_mem, dict):
                                     continue
@@ -1922,13 +1940,14 @@ async def start_language_agent(broker):
                             logger.debug(f"Conflict check failed (non-fatal): {_conf_err}")
 
                     if not _conflict_detected:
-                        _pmgr.add_preference(
-                            str(personal_info),
-                            metadata={
-                                "category": "personal_info",
-                                "source": "language_agent",
-                                "session_id": session_id
-                            }
+                        _pi_text = str(personal_info)
+                        _pi_meta = {
+                            "category": "personal_info",
+                            "source": "language_agent",
+                            "session_id": session_id
+                        }
+                        asyncio.create_task(
+                            asyncio.to_thread(_pmgr.add_preference, _pi_text, _pi_meta)
                         )
                         print(f"💾 Stored personal info: {personal_info}")
                     else:
@@ -2173,4 +2192,4 @@ async def start_language_agent(broker):
     logger.info("✅ Language Agent started")
 
     while True:
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)

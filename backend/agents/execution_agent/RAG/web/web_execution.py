@@ -3512,44 +3512,58 @@ class WebExecutionPipeline:
             # This avoids generating defensive wait_for_selector code for visible buttons like Moodle's "Log in".
             if action_type == 'click':
                 direct_target = None
-                quoted_target = re.search(r'["\']([^"\']+)["\']', clean_prompt)
-                if quoted_target:
-                    direct_target = quoted_target.group(1).strip()
-                else:
-                    action_target = re.search(
-                        r'(?:click\s+on|click|open|press|tap|select)\s+(?:the\s+)?(.+?)(?:\s+(?:button|link|result)\b|\s*[,\.;:]|$)',
-                        clean_prompt,
-                        re.IGNORECASE,
-                    )
+                target_patterns = [
+                    r'(?:click\s+on|click|open|press|tap|select|locate\s+and\s+click|find)\s+(?:the\s+)?(?:first\s+)?(?:link|button|result|item)?(?:\s+with(?:\s+the)?(?:\s+exact(?:\s+or\s+closest)?\s+matching)?\s+text)?\s*["\']([^"\']+)["\']',
+                    r'(?:click\s+on|click|open|press|tap|select|locate\s+and\s+click|find)\s+(?:the\s+)?(.+?)(?:\s+(?:button|link|result|item)\b|\s*[,\.;:]|$)',
+                ]
+                for pattern in target_patterns:
+                    action_target = re.search(pattern, clean_prompt, re.IGNORECASE)
                     if action_target:
                         direct_target = action_target.group(1).strip()
+                        break
+
+                if not direct_target:
+                    quoted_targets = re.findall(r'["\']([^"\']+)["\']', clean_prompt)
+                    if quoted_targets:
+                        direct_target = quoted_targets[-1].strip()
 
                 if direct_target:
                     try:
-                        target_pattern = re.compile(re.escape(direct_target), re.IGNORECASE)
-                        candidate_locators = [
-                            page.get_by_role('button', name=target_pattern).first,
-                            page.get_by_role('link', name=target_pattern).first,
-                            page.locator('button').filter(has_text=direct_target).first,
-                            page.locator('a').filter(has_text=direct_target).first,
-                            page.locator('[role="button"]').filter(has_text=direct_target).first,
+                        normalized_target = direct_target.strip()
+                        target_variants = [normalized_target]
+                        if normalized_target.lower().replace('.', '').strip() in ('log in', 'login'):
+                            target_variants = ['Log in', 'log in', 'LOGIN', 'login']
+
+                        locator_templates = [
+                            lambda text: page.get_by_role('button', name=re.compile(rf'^\s*{re.escape(text)}\s*$', re.IGNORECASE)),
+                            lambda text: page.get_by_role('link', name=re.compile(rf'^\s*{re.escape(text)}\s*$', re.IGNORECASE)),
+                            lambda text: page.locator('button').filter(has_text=re.compile(rf'^\s*{re.escape(text)}\s*$', re.IGNORECASE)),
+                            lambda text: page.locator('a').filter(has_text=re.compile(rf'^\s*{re.escape(text)}\s*$', re.IGNORECASE)),
+                            lambda text: page.locator('[role="button"]').filter(has_text=re.compile(rf'^\s*{re.escape(text)}\s*$', re.IGNORECASE)),
                         ]
-                        for locator in candidate_locators:
-                            if await locator.count() > 0:
-                                await locator.scroll_into_view_if_needed()
-                                await page.wait_for_timeout(300)
-                                await locator.click()
-                                await page.wait_for_load_state('domcontentloaded', timeout=10000)
-                                logger.info(f"✅ FAST-PATH click succeeded for visible target: {direct_target}")
-                                return WebExecutionResult(
-                                    validation_passed=True,
-                                    security_passed=True,
-                                    output=f"EXECUTION_SUCCESS: Clicked {direct_target}" + (f"\nPAGE_URL:{page.url}" if page.url and page.url != 'about:blank' else ''),
-                                    page_url=page.url,
-                                    page_title=await page.title(),
-                                    page_state_before=page_state_before,
-                                    execution_time=(datetime.now() - start_time).total_seconds()
-                                )
+
+                        for target_text in target_variants:
+                            for build_locator in locator_templates:
+                                locator = build_locator(target_text)
+                                locator_count = await locator.count()
+                                for index in range(min(locator_count, 5)):
+                                    candidate = locator.nth(index)
+                                    if await candidate.is_visible():
+                                        await candidate.scroll_into_view_if_needed()
+                                        await page.wait_for_timeout(300)
+                                        await candidate.click()
+                                        await page.wait_for_load_state('domcontentloaded', timeout=10000)
+                                        logger.info(f"✅ FAST-PATH click succeeded for visible target: {target_text}")
+                                        return WebExecutionResult(
+                                            validation_passed=True,
+                                            security_passed=True,
+                                            output=f"EXECUTION_SUCCESS: Clicked {target_text}" + (f"\nPAGE_URL:{page.url}" if page.url and page.url != 'about:blank' else ''),
+                                            page_url=page.url,
+                                            page_title=await page.title(),
+                                            page_state_before=page_state_before,
+                                            execution_time=(datetime.now() - start_time).total_seconds()
+                                        )
+                        logger.debug(f"FAST-PATH click found no visible match for target: {direct_target}")
                     except Exception as fast_click_err:
                         logger.debug(f"FAST-PATH click skipped/failed for '{direct_target}': {fast_click_err}")
             

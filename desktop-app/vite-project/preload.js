@@ -9,10 +9,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exitWidgetMode: () => ipcRenderer.invoke('widget:exit'),
   initAura: (options) => ipcRenderer.invoke('aura:init', options),
   transcribeAudio: (payload) => ipcRenderer.invoke('stt:transcribe', payload),
+  disarmAura: () => ipcRenderer.invoke('aura:disarm'),
   onAuraWakeWord: (callback) => {
+    console.log("[PRELOAD] aura-wake-word event received");
     const handler = (_event, payload) => callback?.(payload);
     ipcRenderer.on('aura-wake-word', handler);
     return () => ipcRenderer.removeListener('aura-wake-word', handler);
+  },
+  // In preload.js, after existing exposures
+  onAppWake: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('app-wake', handler);
+    return () => ipcRenderer.removeListener('app-wake', handler);
   },
   onAuraLog: (callback) => {
     const handler = (_event, payload) => callback?.(payload);

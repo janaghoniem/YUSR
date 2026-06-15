@@ -190,6 +190,14 @@ function App() {
   const draftDecisionTimerRef = useRef(null);
   const draftFlowRef = useRef(draftFlow);
 
+  // Stable refs for the once-mounted IPC wake-word listener.
+  // Because startRecording is a plain function (recreated each render) and
+  // isRecording / orbState are plain state, the IPC listener reads them
+  // through refs rather than capturing stale closure values.
+  const isRecordingRef    = useRef(false);
+  const orbStateRef       = useRef("idle");
+  const startRecordingRef = useRef(null);   // populated by a no-dep useEffect below
+
   // Track completed tasks from queue changes
   useEffect(() => {
     const prev = prevQueueSnapshotRef.current;
@@ -603,91 +611,9 @@ function App() {
     }, 10000);
   }, [clearDraftDecisionTimer, speakAssistantResponse, t]);
 
-  // Speech recognition (wake-word)
-  const [listening,          setListening]           = useState(false);
-  const useElectronWakeWord = false;
-
-  const wakeStoppedRef      = useRef(false); // true = we deliberately stopped
- 
-  // Start one STT session for wake-word detection
-  const startWakeWordListening = useCallback(() => {
-    // Vosk wake-word sidecar disabled: Google/Web Speech only for now.
-    setListening(false);
-  }, [
-    useElectronWakeWord,
-  ]);
-
-  useEffect(() => {
-    if (!useElectronWakeWord || authState !== "app") return;
-
-    const offWake = window.electronAPI.onAuraWakeWord((payload) => {
-      const wakeText = String(payload?.text || "")
-        .toLowerCase()
-        .replace(/[^a-z\s]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!(wakeText === "hey aura" || wakeText.startsWith("hey aura "))) {
-        return;
-      }
-
-      const detectedLang = payload?.lang === "ar" ? "ar" : "en";
-      setAuraStatus("armed");
-      setOrbState("listening");
-      setIsThinking(false);
-      setWakePulse(true);
-      playWakePing();
-      if (wakePulseTimerRef.current) {
-        clearTimeout(wakePulseTimerRef.current);
-      }
-      wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
-
-      // Capture the command with Google Web Speech (en-US / ar-EG), not Vosk.
-      if (orbState !== "processing" && orbState !== "speaking" && !isRecording) {
-        void startRecording({ fromWake: true });
-      }
-    });
-
-    const offPartial = window.electronAPI.onAuraPartialText((partial) => {
-      if (typeof partial === "string" && partial.trim()) {
-        setUserMessage(partial.trim());
-      }
-    });
-
-    const offStatus = window.electronAPI.onAuraStatus((status) => {
-      const state = typeof status === "string" ? status : status?.state;
-      if (status?.lang) {
-        const lang = status.lang === "ar" ? "ar" : "en";
-        setPreferredLanguage(lang);
-        preferredLanguageRef.current = lang;
-      }
-      if (state) {
-        setAuraStatus(state);
-      }
-      if (state === "error" || state === "stopped") {
-        setListening(false);
-      }
-      if (state === "idle" || state === "ready" || state === "started" || state === "listening" || state === "armed") {
-        setListening(true);
-        if (orbState !== "processing" && orbState !== "speaking") {
-          setOrbState("idle");
-        }
-      } else if (state === "listening") {
-        setListening(true);
-        setOrbState("listening");
-      }
-    });
-
-    return () => {
-      try { offWake?.(); } catch { /* no-op */ }
-      try { offPartial?.(); } catch { /* no-op */ }
-      try { offStatus?.(); } catch { /* no-op */ }
-    };
-  }, [authState, useElectronWakeWord, orbState, playWakePing, isRecording]);
-
-  useEffect(() => {
-    if (!useElectronWakeWord || authState !== "app") return;
-    // Vosk wake-word sidecar disabled: no init call.
-  }, [authState, useElectronWakeWord]);
+  // Wake-word state
+  const [listening, setListening] = useState(false);
+  const wakeStoppedRef = useRef(false); // true = we deliberately stopped
 
   useEffect(() => {
     return () => {
@@ -958,7 +884,13 @@ function App() {
             // Language-agent processing acknowledgements should not trigger coordinator visuals.
             setOrbState("idle");
             setIsThinking(false);
-            if (msg.text) setAssistantMessage(msg.text);
+            if (msg.text) {
+                setAssistantMessage(msg.text);
+                // Speak the message if it's not empty and not a thinking step
+                if (msg.text && !msg.text.includes("On it") && !msg.text.includes("حاضر")) {
+                    speakAssistantResponse(msg.text, msg.user_language || userLanguage);
+                }
+            }
             break;
 
           case 'completion':
@@ -1579,6 +1511,11 @@ function App() {
     }
   };
 
+  // Keep the stable ref in sync so the once-mounted IPC wake listener always
+  // calls the latest version of startRecording (which is a plain function and
+  // is recreated on every render).
+  useEffect(() => { startRecordingRef.current = startRecording; });
+
   const stopRecording = ({ cancel = false } = {}) => {
     if (!recordingActiveRef.current) {
       if (cancel) {
@@ -2033,6 +1970,10 @@ function App() {
           payload.text = text;
         }
         wsRef.current.send(JSON.stringify(payload));
+        // After sending the command, disarm the sidecar
+        if (window.electronAPI?.disarmAura) {
+          window.electronAPI.disarmAura();
+        }
         console.log(`[WS] Sent ${msgType}:`, text);
       } else {
         // HTTP fallback
@@ -2140,6 +2081,79 @@ function App() {
       setExecutionMode("normal");
     }
   };
+
+  // ── Sidecar event wiring (mounted once – uses refs to avoid stale closures) ──
+  //
+  // IMPORTANT: startRecording is a plain async function redeclared on every render.
+  // Putting it in a dependency array would re-subscribe the IPC listener on every
+  // render, causing an infinite loop.  Instead we read the latest values through
+  // refs (isRecordingRef, orbStateRef, startRecordingRef – declared near the other
+  // refs above) inside a stable callback that is registered only once on mount.
+
+  // Sync the live-state refs on every render so the once-mounted listener always
+  // sees current values.
+  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  useEffect(() => { orbStateRef.current    = orbState;    }, [orbState]);
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+
+    // ── wake_word event (fired by Python sidecar via main.js) ──
+    const triggerWakeRecording = () => {
+      setWakePulse(true);
+      playWakePing();
+      if (wakePulseTimerRef.current) clearTimeout(wakePulseTimerRef.current);
+      wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
+      setAuraStatus("armed");
+
+      // Only start recording if the app is in a receptive state.
+      const canRecord =
+        document.visibilityState === "visible" &&
+        !isRecordingRef.current &&
+        orbStateRef.current !== "processing" &&
+        orbStateRef.current !== "speaking";
+
+      if (canRecord && startRecordingRef.current) {
+        startRecordingRef.current({ fromWake: true });
+      }
+    };
+
+    const offWake = window.electronAPI.onAuraWakeWord?.((payload) => {
+      console.log("[App] Wake word received:", payload);
+      triggerWakeRecording();
+    });
+
+    // ── app-wake (restore + start-listening from main process) ──
+    const offAppWake = window.electronAPI.onAppWake?.((payload) => {
+      console.log("[App] app-wake received:", payload?.action);
+      if (payload?.action === "start-listening" || payload?.action === "restore") {
+        triggerWakeRecording();
+      }
+    });
+
+    // ── aura-status (armed / listening / stopped …) ──
+    const offStatus = window.electronAPI.onAuraStatus?.((status) => {
+      const state = typeof status === "string" ? status : status?.state;
+      if (status?.lang) {
+        const lang = status.lang === "ar" ? "ar" : "en";
+        setPreferredLanguage(lang);
+        preferredLanguageRef.current = lang;
+      }
+      if (state) setAuraStatus(state);
+      if (state === "armed") {
+        setWakePulse(true);
+        if (wakePulseTimerRef.current) clearTimeout(wakePulseTimerRef.current);
+        wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
+      }
+    });
+
+    return () => {
+      try { offWake?.();    } catch { /* no-op */ }
+      try { offAppWake?.(); } catch { /* no-op */ }
+      try { offStatus?.();  } catch { /* no-op */ }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // ← empty: register once, read live state through refs
 
   /* ---------- STOP SEQUENCE ---------- */
   const handleStopSequence = () => {
@@ -2256,21 +2270,17 @@ function App() {
 
   const handleHeaderContentReady = useCallback(({ greeting, headline, currentDate }) => {
     if (authState !== "app" || hasSpokenHeaderWelcomeRef.current) return;
-
     const safeGreeting = (greeting || "Welcome back")
       .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
       .trim();
     const safeHeadline = (headline || "How can I help you today?").trim();
     const safeDate = (currentDate || "today").trim();
-
     hasSpokenHeaderWelcomeRef.current = true;
     setOrbState("speaking");
-
     screenReader.speak(`${safeGreeting}. Today is ${safeDate}. ${safeHeadline}`, {
       onComplete: () => setOrbState("idle"),
     });
-  }, [authState]);
-
+  }, [authState]); // authState is the only dependency that matters
   
 /* ---------- RENDER ---------- */
   // const isExecuting = orbState === "processing" || isThinking;
@@ -2666,15 +2676,11 @@ function App() {
               </div>
 
               <div style={{ justifyContent: 'center', alignItems: 'center', display: 'flex', flexDirection: 'column', height: '100%' }}>
-              <HeaderContent userName={userName} chatTitle={chatTitle} onContentReady={({ greeting, headline, currentDate }) => {
-                if (authState !== "app" || hasSpokenHeaderWelcomeRef.current) return;
-                const safeGreeting = (greeting || "Welcome back").replace(/[\u{1F300}-\u{1FAFF}]/gu, "").trim();
-                const safeHeadline = (headline || "How can I help you today?").trim();
-                const safeDate = (currentDate || "today").trim();
-                hasSpokenHeaderWelcomeRef.current = true;
-                setOrbState("speaking");
-                screenReader.speak(`${safeGreeting}. Today is ${safeDate}. ${safeHeadline}`, { onComplete: () => setOrbState("idle") });
-              }} />
+              <HeaderContent
+                userName={userName}
+                chatTitle={chatTitle}
+                onContentReady={handleHeaderContentReady}
+              />
 
               <section className="workspace-caption-stage" role="status" aria-live="polite" aria-atomic="true" aria-label="Live conversation text" tabIndex={0}>
                 <div className="workspace-caption-scroll">

@@ -132,6 +132,18 @@ class DeviceRegistry:
 
     def __init__(self, db):
         self._col = db["user_devices"]
+        
+    @staticmethod
+    def _normalize_platform(platform: Optional[str]) -> Optional[str]:
+        if not platform:
+            return None
+        plat = platform.strip().lower()
+        if plat in {"mobile", "android", "ios", "iphone", "ipad", "phone", "tablet"}:
+            return "mobile"
+        if plat in {"desktop", "windows", "mac", "linux", "pc", "laptop"}:
+            return "desktop"
+        return platform  # fallback
+
 
     async def register_device(
         self,
@@ -145,7 +157,7 @@ class DeviceRegistry:
         resolved_label = label or f"{platform.capitalize()} device"
         device_doc = {
             "device_id": device_id,
-            "platform": platform,
+            "platform": self._normalize_platform(platform),
             "label": resolved_label,
             "session_id": session_id,
             "online": True,
@@ -156,7 +168,7 @@ class DeviceRegistry:
             {"user_id": user_id, "devices.device_id": device_id},
             {
                 "$set": {
-                    "devices.$.platform": platform,
+                    "devices.$.platform": self._normalize_platform(platform),
                     "devices.$.label": resolved_label,
                     "devices.$.session_id": session_id,
                     "devices.$.online": True,
@@ -200,12 +212,12 @@ class DeviceRegistry:
         devices = await self.get_user_devices(user_id)
         candidates = [
             d for d in devices
-            if (target_platform is None or d.get("platform") == target_platform)
+            if (target_platform is None or self._normalize_platform(d.get("platform")) == self._normalize_platform(target_platform))
             and d.get("device_id") != exclude_device_id
         ]
         candidates.sort(
             key=lambda d: (
-                not bool(d.get("online", False)),
+                bool(d.get("online", False)),
                 d.get("last_seen") or datetime.min.replace(tzinfo=timezone.utc),
             ),
             reverse=True,
@@ -235,7 +247,7 @@ class DeviceRegistry:
         devices = await self.get_user_devices(user_id)
         candidates = [
             d for d in devices
-            if (target_platform is None or d.get("platform") == target_platform)
+            if (target_platform is None or self._normalize_platform(d.get("platform")) == self._normalize_platform(target_platform))
             and d.get("device_id") != exclude_device_id
         ]
         if not candidates:
@@ -273,7 +285,7 @@ class CrossPlatformTaskManager:
 
     def _ensure_ttl_index(self):
         try:
-            self._col.create_index("expires_at", expireAfterSeconds=0)
+            asyncio.get_event_loop().run_in_executor(None, lambda: self._col.create_index("expires_at", expireAfterSeconds=0))
             logger.info("✅ TTL index ensured on cross_platform_tasks.expires_at")
         except Exception as e:
             logger.warning(f"⚠️ Could not create TTL index: {e}")

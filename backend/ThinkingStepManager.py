@@ -22,24 +22,10 @@ class ThinkingStepManager:
     #   • Steps map to real milestones only — no fake "received your request" noise
     THINKING_STEPS = {
         "en": {
-            # Shown at the very start — one line only
-            "processing_input":        "On it...",
             # When the LLM is classifying the request
             "analyzing_request":       "Thinking about what you need...",
-            # When fetching user preferences/memory
-            "checking_preferences":    "Checking what I know about you...",
-            # When the request is being processed by the LLM
-            "processing_request":      "Working on it...",
             # When handing off to the Coordinator
             "preparing_for_coordinator": "Planning the steps...",
-            # When decomposing into sub-tasks
-            "preparing_tasks":         "Breaking it down...",
-            # Coordinator received — shown briefly
-            "received_request":        "Got it, starting now...",
-            # When blocked behind another task
-            "queued_request":          "Finishing up something else first...",
-            # When building the execution plan
-            "creating_execution_plan": "Figuring out how to do this...",
             # Document-specific steps
             "analyzing_document":      "Reading through the document...",
             "generating_summary":      "Putting together the summary...",
@@ -49,15 +35,8 @@ class ThinkingStepManager:
         },
         "ar": {
             # Egyptian Arabic — colloquial, warm, first-person
-            "processing_input":        "حاضر...",
             "analyzing_request":       "بفكر في طلبك...",
-            "checking_preferences":    "بشوف اللي بعرفه عنك...",
-            "processing_request":      "شغال عليه...",
             "preparing_for_coordinator": "بخطط الخطوات...",
-            "preparing_tasks":         "بقسّمها...",
-            "received_request":        "تمام، بابدأ دلوقتي...",
-            "queued_request":          "في حاجة تانية خلصت الأول...",
-            "creating_execution_plan": "بفكر في أحسن طريقة...",
             "analyzing_document":      "بقرأ الملف...",
             "generating_summary":      "بعمل الملخص...",
             "executing_task":          "بعمله دلوقتي...",

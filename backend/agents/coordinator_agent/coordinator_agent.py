@@ -4763,6 +4763,13 @@ def create_coordinator_graph():
             if current_task.target_agent == "language":
                 task_device = current_device
                 logger.info(f"🔧 Language task {current_task.task_id} forced to source device ({current_device}) for user interaction")
+                extra_params = current_task.extra_params or {}
+                if not extra_params.get("input_from") and not extra_params.get("draft_content"):
+                    extra_params["requires_confirmation"] = False
+                else:
+                    extra_params["requires_confirmation"] = True
+                current_task.extra_params = extra_params
+                
             
             if task_device and task_device != current_device:
                 result = await route_single_task(
@@ -6590,10 +6597,11 @@ async def route_single_task(
         )
     if not target_device:
         _pending_remote_tasks.pop(task.task_id, None)
+        logger.error(f"❌ No target device found for user={user_id}, platform={_normalize_device_type(task.device)}")
         return TaskResult(
             task_id=task.task_id,
             status="failed",
-            error="No matching target device available",
+            error=f"No matching target device available (platform={task.device}). Ensure the other device is online and registered.",
         )
 
     target_device_id = target_device.get("device_id")
@@ -6622,7 +6630,7 @@ async def route_single_task(
         await mgr.create_remote_task(
             user_id=user_id,
             target_device_id=target_device_id,
-            target_session_id=target_session_id,
+            target_session_id=target_session_id,   # ← this must be the target’s session_id
             task=task,
             source_server_url="",
         )

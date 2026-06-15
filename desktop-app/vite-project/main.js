@@ -1,8 +1,6 @@
 /* eslint-env node */
 // main.js — Electron entry point
 
-/* eslint-env node */
-// Add Menu and screen here
 import { app, BrowserWindow, ipcMain, Menu, screen, shell } from "electron";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
@@ -11,12 +9,12 @@ import { fileURLToPath } from "url";
 import process from "node:process";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+const __dirname = path.dirname(__filename);
 
 app.setName("AURA");
-let mainWindow  = null;
+let mainWindow = null;
 let auraProcess = null;
-let savedBounds = null; // Add this line
+let savedBounds = null;
 let currentAuraConfig = { lang: "en", once: false };
 const BACKEND_BASE_URL = process.env.AURA_BACKEND_URL || "http://localhost:8000";
 
@@ -29,45 +27,52 @@ function sendAuraPayload(channel, payload) {
   mainWindow.webContents.send(channel, payload);
 }
 
-/**
- * PATH RESOLUTION
- * Dynamic resolution for development (.venv) vs Production (bundled exe)
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// PATH RESOLUTION
+// Dynamic resolution for development (.venv) vs Production (bundled exe)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function getAuraSpawnConfig(options = {}) {
   const isPackaged = app.isPackaged;
   const lang = normalizeLang(options.lang || currentAuraConfig.lang || "en");
-  
+
   if (isPackaged) {
     return {
       command: path.join(process.resourcesPath, "aura_engine.exe"),
-      args: ["--lang", lang].concat(options.once ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)] : []),
-      cwd: process.resourcesPath
+      args: ["--lang", lang].concat(
+        options.once
+          ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)]
+          : []
+      ),
+      cwd: process.resourcesPath,
     };
   } else {
-    // Navigate from vite-project/src/main up to AURA root, then to backend/.venv
+    // Development: point to Python virtual environment
     const pythonPath = path.join(
-      __dirname, 
-      '..', '..', // Up to AURA/
-      'backend', 
-      '.venv', 
-      'Scripts', 
-      'python.exe'
+      __dirname,
+      "..", "..", // Up to AURA/
+      "backend",
+      ".venv",
+      "Scripts",
+      "python.exe"
     );
-    
-    // The script is in your vite-project root (adjust if it's elsewhere)
-    const scriptPath = path.join(__dirname, 'aura_engine.py');
-    
+    const scriptPath = path.join(__dirname, "aura_engine.py");
     return {
       command: pythonPath,
-      args: ["-u", scriptPath, "--lang", lang].concat(options.once ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)] : []), // -u for unbuffered I/O (critical for real-time)
-      cwd: path.join(__dirname, '..', '..')
+      args: ["-u", scriptPath, "--lang", lang].concat(
+        options.once
+          ? ["--once", "--timeout-ms", String(options.timeoutMs || 10000)]
+          : []
+      ),
+      cwd: path.join(__dirname, "..", ".."),
     };
   }
 }
 
-/**
- * SIDE CAR PROCESS MANAGEMENT
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// SIDE CAR PROCESS MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────────
+
 function startAuraProcess(options = {}) {
   const desiredLang = normalizeLang(options.lang);
 
@@ -86,27 +91,40 @@ function startAuraProcess(options = {}) {
   const { command, args, cwd } = getAuraSpawnConfig(options);
   console.log(`[AURA] Spawning: ${command} ${args.join(" ")} in ${cwd}`);
   sendAuraPayload("aura-status", { state: "starting", lang: desiredLang });
-  
+
   try {
     auraProcess = spawn(command, args, {
       cwd,
       windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, PYTHONUNBUFFERED: "1" },
     });
 
     const stdoutLines = readline.createInterface({ input: auraProcess.stdout });
-    
+
     stdoutLines.on("line", (line) => {
-      if (!line.trim()) return;
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      // Handle plain "wake" command (non-JSON) from sidecar
+      if (trimmed === "wake") {
+        console.log("[AURA] Plain wake command received from sidecar");
+        handleAppWake();
+        return;
+      }
+
+      // Otherwise treat as JSON
       sendAuraPayload("aura-log", { stream: "stdout", text: line });
       try {
-        const payload = JSON.parse(line);
-        // This routes to your existing UI logic
-        routeAuraMessage(payload); 
+        const payload = JSON.parse(trimmed);
+        routeAuraMessage(payload);
       } catch (error) {
         console.warn("[AURA] Raw Python Log:", line);
-        sendAuraPayload("aura-status", { state: "log", lang: desiredLang, message: line });
+        sendAuraPayload("aura-status", {
+          state: "log",
+          lang: desiredLang,
+          message: line,
+        });
       }
     });
 
@@ -128,7 +146,11 @@ function startAuraProcess(options = {}) {
       auraProcess = null;
     });
 
-    sendAuraPayload("aura-status", { state: "started", lang: desiredLang, pid: auraProcess.pid });
+    sendAuraPayload("aura-status", {
+      state: "started",
+      lang: desiredLang,
+      pid: auraProcess.pid,
+    });
     return { ok: true, lang: desiredLang, pid: auraProcess.pid };
   } catch (error) {
     console.error("[AURA] Failed to start sidecar:", error);
@@ -136,21 +158,64 @@ function startAuraProcess(options = {}) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WAKE ROUTING
+// Centralised so both the plain "wake" string and JSON wake_word messages
+// go through the same logic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function handleAppWake() {
+  if (!mainWindow) return;
+
+  const isVisible =
+    mainWindow.isVisible() && !mainWindow.isMinimized();
+
+  if (!isVisible) {
+    // App hidden/minimised → restore first, then tell the renderer to start
+    // listening.  We send app-wake with action "restore" and the renderer
+    // will call startRecording() once it becomes visible.
+    mainWindow.show();
+    mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.webContents.send("app-wake", { action: "restore" });
+    // Also fire aura-wake-word so the renderer immediately starts recording
+    // even before the window finishes animating.
+    mainWindow.webContents.send("aura-wake-word", {
+      type: "wake_word",
+      text: "hey aura",
+      lang: currentAuraConfig.lang,
+      action: "trigger",
+    });
+  } else {
+    // Already visible → start listening immediately.
+    mainWindow.webContents.send("app-wake", { action: "start-listening" });
+    mainWindow.webContents.send("aura-wake-word", {
+      type: "wake_word",
+      text: "hey aura",
+      lang: currentAuraConfig.lang,
+      action: "trigger",
+    });
+  }
+}
+
 function routeAuraMessage(message) {
   if (!mainWindow) return;
 
-  // Standardized routing for your Egyptian Arabic workflow
   if (message.type === "partial") {
     mainWindow.webContents.send("aura-partial-text", message.text);
   } else if (message.type === "final") {
     mainWindow.webContents.send("aura-final-command", message);
   } else if (message.type === "wake_word") {
+    // Forward the raw event to the renderer (for pulse animation etc.)
     mainWindow.webContents.send("aura-wake-word", message);
     mainWindow.webContents.send("aura-status", {
       state: "armed",
       lang: message.lang || currentAuraConfig.lang,
       text: message.text,
     });
+    console.log("[MAIN] wake_word received, sending to renderer");
+    // Also run the unified wake handler so recording starts
+    handleAppWake();
   } else if (message.type === "status") {
     mainWindow.webContents.send("aura-status", message);
   } else if (message.type === "error") {
@@ -162,15 +227,13 @@ function routeAuraMessage(message) {
   }
 }
 
-// main.js
 function stopAuraProcess() {
   if (auraProcess) {
     console.log(`[AURA] Terminating sidecar PID: ${auraProcess.pid}`);
     if (process.platform === "win32") {
-      // Force kill the whole process tree (/T)
       spawn("taskkill", ["/pid", auraProcess.pid, "/f", "/t"]);
     } else {
-      auraProcess.kill('SIGKILL');
+      auraProcess.kill("SIGKILL");
     }
     auraProcess = null;
   }
@@ -182,28 +245,25 @@ function stopAuraProcess() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width:     1100,
-    height:    800,
-    minWidth:  480,
+    width: 1100,
+    height: 800,
+    minWidth: 480,
     minHeight: 400,
-    frame:     false,
+    frame: false,
     transparent: false,
     alwaysOnTop: true,
-    show:      false,
+    show: false,
     icon: path.join(__dirname, "public/aura_icon_colored.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
-      // nodeIntegration MUST stay false for security — preload handles IPC
-      nodeIntegration:        false,
-      contextIsolation:       true,
+      nodeIntegration: false,
+      contextIsolation: true,
       sandbox: false,
     },
   });
 
   mainWindow.loadFile(path.join(__dirname, "loading.html"));
-
   mainWindow.once("ready-to-show", () => mainWindow.show());
-  // mainWindow.webContents.openDevTools();
 
   waitForDevServer(mainWindow);
 }
@@ -223,7 +283,7 @@ function waitForDevServer(win) {
 // IPC — Window controls
 // ─────────────────────────────────────────────────────────────────────────────
 
-ipcMain.handle("window:close",    () => mainWindow?.close());
+ipcMain.handle("window:close", () => mainWindow?.close());
 ipcMain.handle("window:minimize", () => mainWindow?.minimize());
 ipcMain.handle("window:maximize", () => {
   if (!mainWindow) return;
@@ -231,9 +291,7 @@ ipcMain.handle("window:maximize", () => {
 });
 
 ipcMain.handle("shell:openExternal", async (_event, url) => {
-  if (!url || typeof url !== "string") {
-    return { ok: false, error: "Missing URL" };
-  }
+  if (!url || typeof url !== "string") return { ok: false, error: "Missing URL" };
   try {
     await shell.openExternal(url, { activate: true });
     return { ok: true };
@@ -250,8 +308,8 @@ ipcMain.handle("widget:enter", () => {
   if (!mainWindow) return;
   savedBounds = mainWindow.getBounds();
 
-  const cursorPoint  = screen.getCursorScreenPoint();
-  const display      = screen.getDisplayNearestPoint(cursorPoint);
+  const cursorPoint = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursorPoint);
   const { width: sw, height: sh, x: sx, y: sy } = display.workArea;
   const wW = 480, wH = 72;
 
@@ -259,7 +317,10 @@ ipcMain.handle("widget:enter", () => {
   mainWindow.setSkipTaskbar(true);
   mainWindow.setResizable(false);
   mainWindow.setMinimumSize(wW, wH);
-  mainWindow.setBounds({ x: sx + sw - wW - 24, y: sy + sh - wH - 24, width: wW, height: wH }, true);
+  mainWindow.setBounds(
+    { x: sx + sw - wW - 24, y: sy + sh - wH - 24, width: wW, height: wH },
+    true
+  );
 });
 
 ipcMain.handle("widget:exit", () => {
@@ -277,28 +338,27 @@ ipcMain.handle("widget:exit", () => {
   }
 });
 
-// Allow renderer to ask main to open external URLs
-ipcMain.handle('open-external', async (_event, url) => {
+ipcMain.handle("open-external", async (_event, url) => {
   try {
-    if (!url) return { ok: false, error: 'No URL provided' };
+    if (!url) return { ok: false, error: "No URL provided" };
     await shell.openExternal(url);
     return { ok: true };
   } catch (err) {
-    console.error('[open-external] failed to open', url, err);
+    console.error("[open-external] failed to open", url, err);
     return { ok: false, error: String(err) };
   }
 });
 
-// main.js
-// main.js - Update your aura:init handler
+// ─────────────────────────────────────────────────────────────────────────────
+// IPC — Aura sidecar control
+// ─────────────────────────────────────────────────────────────────────────────
+
 ipcMain.handle("aura:init", (_event, options = {}) => {
-  // Keep continuous sidecar disabled by default; renderer can still request one-shot fallback.
-  return { ok: false, disabled: true, reason: "vosk-disabled" };
+  return startAuraProcess(options);
 });
 
 ipcMain.handle("stt:transcribe", async (_event, payload = {}) => {
   const timeoutMs = Number(payload?.timeoutMs || 20000);
-  // Build request body without the electron-only timeoutMs field
   const { timeoutMs: _dropped, ...requestBody } = payload;
   console.info("[STT][IPC] Forwarding transcription request to backend", {
     bytes: String(requestBody?.audio_data || "").length,
@@ -324,33 +384,30 @@ ipcMain.handle("stt:transcribe", async (_event, payload = {}) => {
       data = { detail: raw };
     }
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      data,
-    };
+    return { ok: response.ok, status: response.status, data };
   } catch (error) {
     console.warn("[STT][IPC] Proxy request failed", error?.message || error);
-    return {
-      ok: false,
-      status: 0,
-      error: error?.message || String(error),
-    };
+    return { ok: false, status: 0, error: error?.message || String(error) };
   } finally {
     clearTimeout(timer);
   }
 });
 
+ipcMain.handle("aura:disarm", async () => {
+  if (auraProcess?.stdin) {
+    auraProcess.stdin.write("disarm\n");
+  }
+  return { ok: true };
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // APP LIFECYCLE
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Update the bottom of main.js
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   createWindow();
-  // Vosk sidecar startup disabled: Google/Web Speech only.
+  startAuraProcess({ lang: "en" });
 });
 
 app.on("window-all-closed", () => {

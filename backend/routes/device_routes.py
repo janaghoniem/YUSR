@@ -298,6 +298,7 @@ async def get_cross_platform_tasks(
     user_id: Optional[str] = Query(None),
     device_id: Optional[str] = Query(None),
     session_id: Optional[str] = Query(None),
+    platform: Optional[str] = Query(None, description="Device platform: 'mobile' or 'desktop'"),
 ):
     """Get pending cross-platform tasks for desktop polling clients.
 
@@ -312,7 +313,23 @@ async def get_cross_platform_tasks(
         device_context = {**device_context, "user_id": user_id}
     if session_id:
         device_context = {**device_context, "session_id": session_id}
+    if platform:
+        device_context = {**device_context, "platform": platform}
     DEVICE_REGISTRY[device_id] = device_context
+
+    # Normalise platform for MongoDB registration
+    raw_platform = platform or device_context.get("platform") or "desktop"
+    normalized_platform = "mobile" if raw_platform.lower() in {"mobile", "android", "ios", "iphone", "ipad", "phone", "tablet"} else "desktop"
+
+    mgr = get_cross_platform_manager()
+    if mgr and user_id:
+        await mgr._registry.register_device(
+            user_id=user_id,
+            device_id=device_id,
+            platform=normalized_platform,
+            session_id=session_id or f"polling_{device_id}",
+            label=f"{normalized_platform.capitalize()} {device_id}",
+        )
 
     try:
         await _refresh_device_context(device_id, device_context)

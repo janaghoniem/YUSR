@@ -118,3 +118,9 @@ uiautomator2
 adbutils
 apkutils
 adb
+
+openwakeword
+sounddevice
+webrtcvad
+librosa
+psutil

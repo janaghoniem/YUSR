@@ -671,8 +671,9 @@ GMAIL / EMAIL OPERATIONS:
   "sedn email", "sned mail" (typos), "بعت ايميل", "ارسل رسالة", "اكتب ايميل"
     -> operation: "send" with to/subject/body in extra_params
 - Keywords: "read my emails", "check my inbox", "show unread emails", "inbox", "new emails",
-  "latest emails", "my messages", "what emails do I have", "اقرأ ايميلاتي", "شوف الإيميلات"
-    -> operation: "list_emails" with max_results/label_ids in extra_params
+  "latest emails", "most recent email", "get emails", "fetch emails", "get latest email", "fetch latest email",
+  "my messages", "what emails do I have", "اقرأ ايميلاتي", "شوف الإيميلات"
+    -> operation: "read" with max_results/query in extra_params
 - Keywords: "read email", "open email", "show email", "email content", "what does the email say",
   "اقرأ الإيميل ده", "افتح الرسالة"
     -> operation: "read_email" with message_id in extra_params
@@ -3040,6 +3041,25 @@ def _email_api_credentials_missing(result: TaskResult) -> bool:
     if "no credentials for user" in combined or "no credentials found for user" in combined:
         return True
     return False
+
+
+def _normalize_api_operation(operation: str) -> str:
+    """Normalize coordinator-generated API operation names to canonical values."""
+    normalized = str(operation or "").strip().lower()
+    operation_aliases = {
+        "fetch_email": "read",
+        "get_email": "read",
+        "fetch_latest_email": "read",
+        "get_latest_email": "read",
+        "fetch_recent_email": "read",
+        "get_recent_email": "read",
+        "fetch_most_recent_email": "read",
+        "get_most_recent_email": "read",
+        "gmail_fetch_latest": "read",
+        "gmail_fetch_recent": "read",
+        "gmail_latest_email": "read",
+    }
+    return operation_aliases.get(normalized, normalized)
 
 
 def _build_email_web_fallback_task(task: ActionTask) -> Optional[ActionTask]:
@@ -6392,6 +6412,7 @@ async def execute_single_task(
     extra_params = task_payload.get("extra_params") or {}
     if not isinstance(extra_params, dict):
         extra_params = {}
+    operation = _normalize_api_operation(extra_params.get("operation") or task_payload.get("operation") or "")
     if user_id:
         extra_params["user_id"] = user_id
         task_payload["user_id"] = user_id
@@ -6424,13 +6445,16 @@ async def execute_single_task(
         # Non-fatal - don't block task publishing on this heuristic
         pass
 
-    if task.target_agent == "email":
+    if task.target_agent in {"email", "api"}:
         for key in ["operation", "to", "subject", "body", "attachments", "max_results", "query",
                      "search_query", "video_url", "title", "start_time", "end_time",
                      "description", "file_path", "parent_folder_id"]:
             if key not in task_payload and key in extra_params:
                 task_payload[key] = extra_params[key]
-        if "operation" not in task_payload:
+        if operation:
+            task_payload["operation"] = operation
+            task_payload["extra_params"]["operation"] = operation
+        elif "operation" not in task_payload:
             task_payload["operation"] = "send"
 
     if task.target_agent == "reasoning":

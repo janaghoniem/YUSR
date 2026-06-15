@@ -44,6 +44,14 @@ async def lifespan(app):
         except Exception as exc:
             logger.warning(f"⚠️ Mongo ping failed during startup: {exc}")
 
+    # ── Initialize unified async MemoryLayer (Redis + async MongoDB + Mem0 queue) ──
+    try:
+        from memory_layer import memory_layer
+        await memory_layer.initialize()
+        logger.info("✅ MemoryLayer ready (Redis + async MongoDB + Mem0 queue)")
+    except Exception as exc:
+        logger.error(f"❌ MemoryLayer init failed — system will use fallback: {exc}")
+
     await broker.start()
     logger.info("✅ Broker started")
 
@@ -99,4 +107,10 @@ async def lifespan(app):
     await dispatcher.stop()
     await broker.stop()
     close_mongo_client()
+    try:
+        from memory_layer import memory_layer
+        await memory_layer.close()
+        logger.info("✅ MemoryLayer closed cleanly")
+    except Exception as exc:
+        logger.warning(f"⚠️ MemoryLayer shutdown error (non-fatal): {exc}")
     logger.info("✅ Broker stopped")

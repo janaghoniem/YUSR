@@ -17,6 +17,18 @@ from pymongo import MongoClient
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# Module-level shared MongoClient — created once, reused across all calls.
+# Eliminates the 400–800ms cold-connection cost on every _direct_mongo_search
+# and add_preference_zero_token call.
+_shared_mongo_client: MongoClient = None
+
+def _get_shared_mongo_client() -> MongoClient:
+    global _shared_mongo_client
+    if _shared_mongo_client is None:
+        _shared_mongo_client = MongoClient(os.getenv("MONGODB_URI"))
+    return _shared_mongo_client
+
+
 class Mem0PreferenceManager:
     """Manages long-term user preferences using Mem0 with MongoDB Atlas backend"""
     
@@ -28,6 +40,7 @@ class Mem0PreferenceManager:
         if not MONGODB_URI:
             raise ValueError("MONGODB_URI not found in environment variables")
         
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
         config = {
             "vector_store": {
                 "provider": "mongodb",
@@ -35,9 +48,8 @@ class Mem0PreferenceManager:
                     "mongo_uri": MONGODB_URI,
                     "db_name": "yusr_db",
                     "collection_name": "mem0_preferences",
-                    "embedding_model_dims": 384
-                    # ✅ index_name removed - not needed in latest Mem0
-                }
+                    "embedding_model_dims": 384,
+                },
             },
             "llm": {
                 "provider": "groq",
@@ -45,15 +57,15 @@ class Mem0PreferenceManager:
                     "model": "llama-3.3-70b-versatile",
                     "temperature": 0.1,
                     "max_tokens": 2000,
-                    "api_key": os.getenv("GROQ_API_KEY")
-                }
+                    "api_key": GROQ_API_KEY,
+                },
             },
             "embedder": {
                 "provider": "huggingface",
                 "config": {
-                    "model": "sentence-transformers/all-MiniLM-L6-v2"
-                }
-            }
+                    "model": "sentence-transformers/all-MiniLM-L6-v2",
+                },
+            },
         }
         
         try:
@@ -247,7 +259,8 @@ class Mem0PreferenceManager:
             result = self.memory.add(
                 messages=messages,
                 user_id=self.user_id,
-                metadata=metadata or {}
+                metadata=metadata or {},
+                infer=False  # Skip internal LLM inference to save tokens, since we're just storing a preference
             )
 
             # ── Detect silent Mem0 failure: daily token limit consumed ────────
@@ -391,14 +404,11 @@ class Mem0PreferenceManager:
             }
             
             # Direct MongoDB connection (bypass Mem0's internal client)
-            mongo_uri = os.getenv("MONGODB_URI")
-            client = MongoClient(mongo_uri)
+            client = _get_shared_mongo_client()
             db = client["yusr_db"]
             collection = db["mem0_preferences"]
-            
-            # Insert directly
+
             result = collection.insert_one(doc)
-            client.close()
 
             # Invalidate entire search cache so next retrieval hits MongoDB fresh
             self._search_cache.clear()
@@ -424,7 +434,7 @@ class Mem0PreferenceManager:
             from pymongo import MongoClient
             import re as _re
             uid = user_id or self.user_id
-            client = MongoClient(os.getenv("MONGODB_URI"))
+            client = _get_shared_mongo_client()
             db = client["yusr_db"]
             col = db["mem0_preferences"]
 
@@ -451,8 +461,6 @@ class Mem0PreferenceManager:
                     {"payload.payload.user_id": uid},
                 ]
             }, limit=200))
-            client.close()
-
             scored = []
             for doc in all_docs:
                 payload = doc.get("payload", {})
@@ -734,10 +742,9 @@ class Mem0PreferenceManager:
             # This works for both Mem0-managed docs and zero-token docs.
             if len(combined_results) > 1:
                 try:
-                    from pymongo import MongoClient as _MC
                     from bson import ObjectId as _ObjId
                     _uid = self.user_id
-                    _client2 = _MC(os.getenv("MONGODB_URI"))
+                    _client2 = _get_shared_mongo_client()
                     _col2 = _client2["yusr_db"]["mem0_preferences"]
                     # Build map: memory_text_lower → insertion_timestamp (from ObjectId)
                     _oid_ts_map: dict = {}
@@ -748,7 +755,6 @@ class Mem0PreferenceManager:
                         ]},
                         {"_id": 1, "payload": 1}
                     ))
-                    _client2.close()
                     for _doc in _raw_docs:
                         _p = _doc.get("payload", {})
                         _inner = _p.get("payload", _p) if isinstance(_p.get("payload"), dict) else _p

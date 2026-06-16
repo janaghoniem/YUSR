@@ -1,5 +1,21 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+// Early-event queue: capture aura-wake-word events that arrive before the
+// renderer's React useEffect has had a chance to register a callback.
+// The queue is drained as soon as onAuraWakeWord() is first called.
+let _pendingWakeEvents = [];
+let _wakeWordCallback = null;
+
+ipcRenderer.on('aura-wake-word', (_event, payload) => {
+  if (_wakeWordCallback) {
+    _wakeWordCallback(payload);
+  } else {
+    // Renderer not ready yet — queue it (keep only the most recent one)
+    _pendingWakeEvents = [payload];
+    console.log("[PRELOAD] aura-wake-word queued (renderer not ready yet):", payload);
+  }
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () => ipcRenderer.invoke('window:close'),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
@@ -11,12 +27,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   transcribeAudio: (payload) => ipcRenderer.invoke('stt:transcribe', payload),
   disarmAura: () => ipcRenderer.invoke('aura:disarm'),
   onAuraWakeWord: (callback) => {
-    console.log("[PRELOAD] aura-wake-word event received");
-    const handler = (_event, payload) => callback?.(payload);
-    ipcRenderer.on('aura-wake-word', handler);
-    return () => ipcRenderer.removeListener('aura-wake-word', handler);
+    _wakeWordCallback = callback;
+    // Drain any events that arrived before the renderer registered
+    if (_pendingWakeEvents.length > 0) {
+      console.log("[PRELOAD] Replaying", _pendingWakeEvents.length, "queued wake event(s)");
+      _pendingWakeEvents.forEach(payload => callback?.(payload));
+      _pendingWakeEvents = [];
+    }
+    // Return unsubscribe function
+    return () => {
+      if (_wakeWordCallback === callback) _wakeWordCallback = null;
+    };
   },
-  // In preload.js, after existing exposures
   onAppWake: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('app-wake', handler);

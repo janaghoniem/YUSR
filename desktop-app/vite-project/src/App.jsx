@@ -2123,10 +2123,12 @@ function App() {
       triggerWakeRecording();
     });
 
-    // ── app-wake (restore + start-listening from main process) ──
+    // ── app-wake (window restored from hidden/minimised state) ──
+    // main.js sends this when the window was not visible; it does NOT
+    // also send aura-wake-word in that branch, so we must trigger here.
     const offAppWake = window.electronAPI.onAppWake?.((payload) => {
       console.log("[App] app-wake received:", payload?.action);
-      if (payload?.action === "start-listening" || payload?.action === "restore") {
+      if (payload?.action === "restore" || payload?.action === "start-listening") {
         triggerWakeRecording();
       }
     });

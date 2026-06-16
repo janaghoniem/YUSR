@@ -170,25 +170,26 @@ function handleAppWake() {
   const isVisible =
     mainWindow.isVisible() && !mainWindow.isMinimized();
 
+  // Always send the armed status so the renderer orb reflects sidecar state.
+  mainWindow.webContents.send("aura-status", {
+    state: "armed",
+    lang: currentAuraConfig.lang,
+  });
+
   if (!isVisible) {
-    // App hidden/minimised → restore first, then tell the renderer to start
-    // listening.  We send app-wake with action "restore" and the renderer
-    // will call startRecording() once it becomes visible.
+    // App hidden/minimised → restore the window first.
+    // Send app-wake "restore" so the renderer knows to call
+    // triggerWakeRecording() via its onAppWake handler once visible.
+    // Do NOT also send aura-wake-word here — onAppWake already triggers
+    // recording, sending both would call triggerWakeRecording() twice.
     mainWindow.show();
     mainWindow.restore();
     mainWindow.focus();
     mainWindow.webContents.send("app-wake", { action: "restore" });
-    // Also fire aura-wake-word so the renderer immediately starts recording
-    // even before the window finishes animating.
-    mainWindow.webContents.send("aura-wake-word", {
-      type: "wake_word",
-      text: "hey aura",
-      lang: currentAuraConfig.lang,
-      action: "trigger",
-    });
   } else {
-    // Already visible → start listening immediately.
-    mainWindow.webContents.send("app-wake", { action: "start-listening" });
+    // Already visible → send aura-wake-word ONCE.
+    // The renderer's onAuraWakeWord handler calls triggerWakeRecording().
+    // Do NOT also send app-wake "start-listening" — that would be a second call.
     mainWindow.webContents.send("aura-wake-word", {
       type: "wake_word",
       text: "hey aura",
@@ -206,15 +207,10 @@ function routeAuraMessage(message) {
   } else if (message.type === "final") {
     mainWindow.webContents.send("aura-final-command", message);
   } else if (message.type === "wake_word") {
-    // Forward the raw event to the renderer (for pulse animation etc.)
-    mainWindow.webContents.send("aura-wake-word", message);
-    mainWindow.webContents.send("aura-status", {
-      state: "armed",
-      lang: message.lang || currentAuraConfig.lang,
-      text: message.text,
-    });
     console.log("[MAIN] wake_word received, sending to renderer");
-    // Also run the unified wake handler so recording starts
+    // handleAppWake() is the single path that emits aura-wake-word.
+    // Do NOT also send it directly here — that fires triggerWakeRecording()
+    // twice in App.jsx (once via onAuraWakeWord, once via onAppWake).
     handleAppWake();
   } else if (message.type === "status") {
     mainWindow.webContents.send("aura-status", message);

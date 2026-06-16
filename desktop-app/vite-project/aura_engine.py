@@ -30,7 +30,8 @@ WAKE_WORD_THRESHOLD    = 0.65
 WAKE_COOLDOWN_SECONDS  = 2.5
 # After a wake fires, ignore the microphone for this long so the
 # "hey aura" utterance itself cannot re-trigger a second wake.
-SUPPRESS_AFTER_WAKE_SECONDS = 2.5
+# Must be longer than the utterance duration + one full buffer window (~1s).
+SUPPRESS_AFTER_WAKE_SECONDS = 4.0
 ARMED_TIMEOUT_SECONDS  = 20.0
 
 N_MELS         = 16
@@ -78,7 +79,11 @@ class AuraEngine:
         # Rolling audio accumulator – capped at one inference window.
         self.audio_buffer    = collections.deque(maxlen=WINDOW_SAMPLES)
         self.last_wake_time  = 0.0
-        self.armed_start_time = 0.0
+        # Use float('inf') so check_armed_timeout never fires until a real
+        # wake sets this to time.monotonic().  A value of 0.0 would make the
+        # timeout fire instantly on every audio callback since
+        # time.monotonic() - 0.0 >> ARMED_TIMEOUT_SECONDS.
+        self.armed_start_time = float('inf')
         self.suppress_until  = 0.0
 
         # ── KEY FIX: inference runs on its own thread ──────────────────────
@@ -171,12 +176,22 @@ class AuraEngine:
 
     def check_armed_timeout(self):
         if self.armed and (time.monotonic() - self.armed_start_time) > ARMED_TIMEOUT_SECONDS:
-            self.armed = False
-            emit({"type": "status", "state": "listening", "lang": self.lang})
+            self.disarm()
 
     def disarm(self):
         if self.armed:
             self.armed = False
+            self.armed_start_time = float('inf')
+            # Extend suppression so the utterance still in the rolling buffer
+            # cannot immediately re-trigger the wake word detector.
+            self.suppress_until = time.monotonic() + SUPPRESS_AFTER_WAKE_SECONDS
+            # Flush audio buffer and inference queue so stale audio is gone.
+            self.audio_buffer.clear()
+            while not self._infer_queue.empty():
+                try:
+                    self._infer_queue.get_nowait()
+                except queue.Empty:
+                    break
             emit({"type": "status", "state": "listening", "lang": self.lang})
 
     # ── app lifecycle helpers ─────────────────────────────────────────────

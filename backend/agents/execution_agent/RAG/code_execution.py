@@ -334,7 +334,22 @@ class CoordinatorRAGBridge:
                     active_window.width,
                     active_window.height
                 ))
-                
+
+                # Downscale before saving so OmniParser works on a smaller image.
+                # Import the same helper used by inference_utils so the resize
+                # constants stay in one place.
+                try:
+                    from agents.execution_agent.fallback.utils.inference_utils import (
+                        _resize_for_omniparser,
+                    )
+                    screenshot, _sx, _sy = _resize_for_omniparser(screenshot)
+                    logger.info(
+                        f"📐 Window screenshot downscaled to {screenshot.size} "
+                        f"before OmniParser"
+                    )
+                except ImportError:
+                    pass  # fallback: use original size
+
                 # Save temporarily for debugging
                 import tempfile
                 import os
@@ -349,15 +364,40 @@ class CoordinatorRAGBridge:
                     screenshot_path=temp_path
                 )
                 
-                # Adjust coordinates to screen space (add window offset)
+                # Adjust coordinates to screen space.
+                # result.coordinates are in the RESIZED image space because
+                # detect_element_by_text reads the saved (downscaled) file.
+                # We must scale back to the original window space first,
+                # then add the window's on-screen offset.
                 if result.success and result.coordinates:
-                    screen_x = result.coordinates[0] + active_window.left
-                    screen_y = result.coordinates[1] + active_window.top
+                    try:
+                        from agents.execution_agent.fallback.utils.inference_utils import (
+                            OMNIPARSER_MAX_WIDTH,
+                            OMNIPARSER_MAX_HEIGHT,
+                        )
+                        orig_w = active_window.width
+                        orig_h = active_window.height
+                        used_scale = min(
+                            OMNIPARSER_MAX_WIDTH  / orig_w,
+                            OMNIPARSER_MAX_HEIGHT / orig_h,
+                            1.0,
+                        )
+                        inv_scale_x = 1.0 / used_scale if used_scale < 1.0 else 1.0
+                        inv_scale_y = 1.0 / used_scale if used_scale < 1.0 else 1.0
+                    except ImportError:
+                        inv_scale_x = inv_scale_y = 1.0
+
+                    window_x = int(result.coordinates[0] * inv_scale_x)
+                    window_y = int(result.coordinates[1] * inv_scale_y)
+                    screen_x = window_x + active_window.left
+                    screen_y = window_y + active_window.top
                     adjusted_coords = (screen_x, screen_y)
-                    
-                    logger.info(f"✅ Found at window coords: {result.coordinates}")
-                    logger.info(f"✅ Adjusted to screen coords: {adjusted_coords}")
-                    
+
+                    logger.info(
+                        f"✅ Found at resized coords: {result.coordinates} "
+                        f"→ window ({window_x},{window_y}) "
+                        f"→ screen {adjusted_coords}"
+                    )
                     return adjusted_coords
                 else:
                     logger.warning(f"❌ OmniParser couldn't find: '{element_description}'")

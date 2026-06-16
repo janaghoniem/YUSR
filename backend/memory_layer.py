@@ -533,13 +533,38 @@ class MemoryLayer:
             mgr = await self._get_pref_manager(user_id)
             results = await mgr.search(query, limit=limit)
 
+            # Categories that must never reach the coordinator decomposition prompt.
+            # personal_info causes the LLM to hallucinate task goals derived from
+            # stored facts (e.g. "Preparing study material about database roles")
+            # rather than the user's actual request.
+            # conversation_history accumulates unboundedly and floods the prompt.
+            _BLOCKED_CATEGORIES = {"conversation_history", "personal_info"}
+            _CRED_MARKERS = [
+                "password", "passwd", "pwd", "secret",
+                "api key", "apikey", "api_key", "token",
+                "private key", "passphrase",
+            ]
+
             lines: List[str] = []
-            for i, item in enumerate(results, 1):
+            for item in results:
                 if isinstance(item, dict):
+                    category = (item.get("metadata") or {}).get("category", "")
+                    if category in _BLOCKED_CATEGORIES:
+                        logger.debug(
+                            "🚫 MemoryLayer: Skipping %s memory from coordinator context",
+                            category,
+                        )
+                        continue
                     text = item.get("memory") or item.get("text") or str(item)
                 else:
                     text = str(item)
-                lines.append(f"{i}. {text.strip()}")
+
+                if not text.strip():
+                    continue
+                if any(m in text.lower() for m in _CRED_MARKERS):
+                    logger.debug("🚫 MemoryLayer: Skipping credential memory from coordinator context")
+                    continue
+                lines.append(f"- {text.strip()}")
 
             formatted = "\n".join(lines) if lines else "No user preferences available."
 

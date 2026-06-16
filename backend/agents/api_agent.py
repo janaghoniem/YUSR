@@ -413,17 +413,14 @@ class ApiAgent:
             return
         
         try:
-            collection.update_one(
-                {'user_id': user_id},
-                {'$set': {'revoked_at': datetime.now().isoformat()}}
-            )
+            collection.delete_one({'user_id': user_id})
             
             # Remove from cache
             self.credentials_cache.pop(user_id, None)
             
-            logger.info(f"âœ… Credentials revoked for {user_id}")
+            logger.info(f"âœ… Credentials deleted for {user_id}")
         except Exception as e:
-            logger.error(f"âŒ Failed to revoke credentials: {e}")
+            logger.error(f"âŒ Failed to delete credentials: {e}")
 
     async def _get_credentials_with_fallback(self, user_id: str) -> Tuple[Optional[Credentials], str]:
         """
@@ -1503,7 +1500,10 @@ async def start_api_agent(broker_instance=None):
         try:
             payload = message.payload if hasattr(message, 'payload') else message.get('payload', {})
             message_receiver = getattr(message, 'receiver', payload.get('receiver'))
-            operation = str(payload.get('operation', '')).strip().lower()
+            extra_params = payload.get('extra_params') or {}
+            if not isinstance(extra_params, dict):
+                extra_params = {}
+            operation = str(payload.get('operation') or extra_params.get('operation') or '').strip().lower()
 
             # Safety net: only route known API operations handled by this agent.
             valid_ops = {

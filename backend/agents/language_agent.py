@@ -51,6 +51,20 @@ MAX_TOKENS = 600
 # -----------------------
 # Utility helpers
 # -----------------------
+# Add this helper at the top (after imports)
+def get_os_from_device_id(device_id: str) -> str:
+    """Extract OS from device_id (e.g. 'windows-abc' -> 'Windows')"""
+    if not device_id:
+        return "Unknown"
+    device_id_lower = device_id.lower()
+    if device_id_lower.startswith("windows"):
+        return "Windows"
+    if device_id_lower.startswith("mac"):
+        return "macOS"
+    if device_id_lower.startswith("linux"):
+        return "Linux"
+    return "Desktop"
+
 def sanitize_text(t: str) -> str:
     if not t: return ""
     t = re.sub(r"\s+", " ", t).strip()
@@ -696,12 +710,13 @@ class LanguageAgent:
 
     def _build_turn_messages(self, current_lang: str) -> List[Dict[str, str]]:
         messages = list(self.memory)
+        os_hint = f" The user is currently on {getattr(self, 'current_os', 'Windows')}."
         turn_instruction = {
             "role": "system",
             "content": (
                 f"For this turn, respond strictly in {'Arabic' if current_lang == 'ar' else 'English'}. "
-                "Keep app names, brand names, and commands exactly as the user said them. "
-                "Return strict JSON only."
+                f"Keep app names, brand names, and commands exactly as the user said them. "
+                f"Return strict JSON only.{os_hint}"
             )
         }
         insert_at = 1 if messages and messages[0].get("role") == "system" else 0
@@ -709,6 +724,7 @@ class LanguageAgent:
         return messages
 
     def _repair_response_language(self, response: str, user_text: str, target_lang: str) -> str:
+        
         repair_messages = [
             {
                 "role": "system",
@@ -1516,6 +1532,8 @@ async def start_language_agent(broker):
         # Get or create agent early to manage state
         agent = get_or_create_agent(session_id, user_id)
         agent.touch()
+        device_id = payload_data.get("device_id", "")
+        agent.current_os = get_os_from_device_id(device_id)
 
         # ── Handle Security Confirmation ──────────────────────────────────────
         # ── Handle Security Confirmation ──────────────────────────────────────
@@ -1838,6 +1856,18 @@ async def start_language_agent(broker):
             from agents.coordinator_agent.memory.mem0_manager import get_preference_manager
             pref_mgr = await asyncio.to_thread(get_preference_manager, user_id)
             all_memories = await asyncio.to_thread(pref_mgr.get_relevant_preferences, input_text, 5)
+            # ── Filter out platform‑mismatched memories (Fix 4) ──
+            cross_platform_intent = detect_cross_platform_intent(input_text, source_platform=device_type)
+            if not cross_platform_intent:
+                platform_mismatch_keywords = ["mobile", "iphone", "android", "clock app", "alarm on mobile", "textedit on mac"]
+                filtered = []
+                for mem in all_memories:
+                    mem_text = str(mem).lower() if not isinstance(mem, str) else mem.lower()
+                    if any(kw in mem_text for kw in platform_mismatch_keywords):
+                        logger.debug(f"Filtering memory due to platform mismatch: {mem_text[:60]}")
+                        continue
+                    filtered.append(mem)
+                all_memories = filtered
 
             if not all_memories or not isinstance(all_memories, list):
                 all_memories = []

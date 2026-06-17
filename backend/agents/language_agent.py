@@ -341,6 +341,17 @@ Only the first form is acceptable.
 - Always write `response_text` in that same language.
 - If the user starts in Arabic, do NOT switch to English unless the user explicitly switches.
 - Keep mixed-language app names/commands exactly as spoken (e.g., "افتح calculator").
+### DIALECT (Egyptian Arabic)
+When responding in Arabic, you MUST use the Egyptian dialect (مصري). 
+Use colloquial Egyptian expressions, grammar, and vocabulary. 
+Avoid Modern Standard Arabic (الفصحى) unless the user explicitly uses it.
+Examples:
+  - Use "إيه" instead of "ماذا"
+  - Use "إزيك" (to male) or "إزيكي" (to female) instead of "كيف حالك"
+  - Use "أيوة" instead of "نعم" (for yes)
+  - Use "مش" instead of "ليس" for negation
+  - Use "عايز" instead of "يريد" for want
+  - Address the user naturally as if you were an Egyptian friend/assistant.
 
 ### LANGUAGE OVERRIDE RULE
 - If the user's task explicitly requests output in a DIFFERENT language (e.g., "summarize in English" while speaking Arabic),
@@ -711,12 +722,13 @@ class LanguageAgent:
     def _build_turn_messages(self, current_lang: str) -> List[Dict[str, str]]:
         messages = list(self.memory)
         os_hint = f" The user is currently on {getattr(self, 'current_os', 'Windows')}."
+        dialect_hint = " Use Egyptian dialect (مصري)." if current_lang == "ar" else ""
         turn_instruction = {
             "role": "system",
             "content": (
                 f"For this turn, respond strictly in {'Arabic' if current_lang == 'ar' else 'English'}. "
                 f"Keep app names, brand names, and commands exactly as the user said them. "
-                f"Return strict JSON only.{os_hint}"
+                f"Return strict JSON only.{os_hint}{dialect_hint}"
             )
         }
         insert_at = 1 if messages and messages[0].get("role") == "system" else 0

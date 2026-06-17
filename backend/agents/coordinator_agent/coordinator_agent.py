@@ -4216,17 +4216,23 @@ def create_coordinator_graph():
                 "api key", "apikey", "api_key", "token",
                 "private key", "passphrase",
             ]
+            # Categories that must NEVER reach the coordinator decomposition prompt.
+            # personal_info (name, email, current task description) causes the LLM
+            # to hallucinate task goals derived from stored facts rather than the
+            # user's actual request. conversation_history accumulates unboundedly
+            # and floods the prompt on long sessions.
+            _BLOCKED_CATEGORIES_COORD = {"conversation_history", "personal_info"}
             if isinstance(preferences_context, list):
                 _orig_count = len(preferences_context)
                 preferences_context = [
                     p for p in preferences_context
                     if not any(m in str(p).lower() for m in _CRED_MARKERS_COORD)
-                    and p.get("metadata", {}).get("category") != "conversation_history"
+                    and p.get("metadata", {}).get("category") not in _BLOCKED_CATEGORIES_COORD
                 ]
                 _blocked = _orig_count - len(preferences_context)
                 if _blocked > 0:
                     logger.warning(
-                        f"🚫 Memory Fix 3: Removed {_blocked} credential/history memory "
+                        f"🚫 Memory Fix 3: Removed {_blocked} credential/history/personal_info memory "
                         f"item(s) from coordinator context"
                     )
                 # Convert list of dicts to a readable numbered string for the LLM

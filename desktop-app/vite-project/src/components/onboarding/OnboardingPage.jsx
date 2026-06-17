@@ -3,19 +3,21 @@
 //  • Card uses glassmorphic style matching login page (req 6)
 //  • Overflow fixed: container uses flex + overflow-y:auto, no fixed minHeight (req 2)
 //  • screenReader.setLanguage updated when language preference changes
+//  • StepAPIConfig (BYOK) inserted between StepPreferences and StepVoiceCommands
 
 import React, { useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import StepIntro from "./StepIntro";
 import StepUserIntro from "./StepUserIntro";
 import StepPreferences from "./StepPreferences";
+import StepAPIConfig from "./StepAPIConfig";
 import StepVoiceCommands from "./Stepvoicecommands";
 import StepCreateAccount from "./StepCreateAccount";
 import SpotlightCard from "./SpotlightCard";
 import Aurora from "./Aurora";
 import screenReader from "../../utils/ScreenReader";
 
-const TOTAL_STEPS = 5;
+const TOTAL_STEPS = 6;
 
 const slideVariants = {
   enter: (dir) => ({ x: dir > 0 ? "100%" : "-100%", opacity: 0 }),
@@ -112,9 +114,17 @@ const OnboardingPage = ({ userId, onComplete }) => {
     <StepIntro            key={0} onNext={goNext}   {...sharedProps} />,
     <StepUserIntro        key={1} onNext={goNext}   data={formData} setData={setFormData} {...sharedProps} />,
     <StepPreferences      key={2} onNext={goNext}   data={formData} setData={setFormData} {...sharedProps} />,
-    <StepVoiceCommands    key={3} onNext={goNext}   {...sharedProps} />,
+    <StepAPIConfig
+      key={3}
+      onNext={goNext}
+      data={formData}
+      setData={setFormData}
+      userId={userId}
+      {...sharedProps}
+    />,
+    <StepVoiceCommands    key={4} onNext={goNext}   {...sharedProps} />,
     <StepCreateAccount
-      key={4}
+      key={5}
       onSubmit={goNext}
       data={formData}
       setData={setFormData}

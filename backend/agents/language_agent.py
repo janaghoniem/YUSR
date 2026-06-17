@@ -1937,10 +1937,11 @@ async def start_language_agent(broker):
             # ──────────────────────────────────────────────────────────────────────
 
             context_parts = []
-            if profile_snippets:
-                context_parts.append("# USER PROFILE")
-                for snippet in profile_snippets[:2]:
-                    context_parts.append(f"- {snippet}")
+            # NOTE: profile_snippets (personal_info) are intentionally excluded from
+            # context_parts / _last_context_parts. They are useful for the Language
+            # Agent's tone/greeting but must NOT reach the coordinator decomposition
+            # prompt, where they cause the LLM to hallucinate task goals derived from
+            # stored facts rather than the user's actual request.
             if preferences:
                 context_parts.append("# USER PREFERENCES")
                 for i, pref in enumerate(preferences[:3], 1):

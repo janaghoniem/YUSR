@@ -124,3 +124,6 @@ sounddevice
 webrtcvad
 librosa
 psutil
+
+# for BYOK
+#already mawgodin

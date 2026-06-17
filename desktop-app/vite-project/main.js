@@ -396,6 +396,20 @@ ipcMain.handle("aura:disarm", async () => {
   return { ok: true };
 });
 
+ipcMain.handle("aura:recordingStart", async () => {
+  if (auraProcess?.stdin) {
+    auraProcess.stdin.write("recording_start\n");
+  }
+  return { ok: true };
+});
+
+ipcMain.handle("aura:recordingEnd", async () => {
+  if (auraProcess?.stdin) {
+    auraProcess.stdin.write("recording_end\n");
+  }
+  return { ok: true };
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // APP LIFECYCLE
 // ─────────────────────────────────────────────────────────────────────────────

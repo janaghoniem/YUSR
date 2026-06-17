@@ -1424,6 +1424,9 @@ function App() {
     }
     if (isRecording || recordingActiveRef.current) return;
 
+    // Tell Python to suppress wake-word inference while JS has the mic open.
+    window.electronAPI?.notifyRecordingStart?.();
+
     manualCaptureCancelledRef.current = false;
     pcmChunksRef.current = [];
     speechDetectedRef.current = false;
@@ -1508,6 +1511,7 @@ function App() {
       setIsRecording(false);
       recordingActiveRef.current = false;
       cleanupRecorderResources();
+      window.electronAPI?.notifyRecordingEnd?.();
     }
   };
 
@@ -1540,6 +1544,7 @@ function App() {
       pcmChunksRef.current = [];
       speechDetectedRef.current = false;
       userSpokeRef.current = false;
+      window.electronAPI?.notifyRecordingEnd?.();
       return;
     }
 
@@ -1596,6 +1601,9 @@ function App() {
         pcmChunksRef.current = [];
         speechDetectedRef.current = false;
         userSpokeRef.current = false;
+        // Tell Python the recording is over so it disarms, flushes the audio
+        // buffer, and re-enables wake-word detection cleanly.
+        window.electronAPI?.notifyRecordingEnd?.();
       }
     };
 
@@ -2106,9 +2114,10 @@ function App() {
       wakePulseTimerRef.current = setTimeout(() => setWakePulse(false), 1400);
       setAuraStatus("armed");
 
-      // Only start recording if the app is in a receptive state.
+      // NOTE: Do NOT gate on document.visibilityState — in Electron the page
+      // reports "hidden" whenever the window doesn't have OS focus, which is
+      // the normal state when the user says the wake word in the background.
       const canRecord =
-        document.visibilityState === "visible" &&
         !isRecordingRef.current &&
         orbStateRef.current !== "processing" &&
         orbStateRef.current !== "speaking";

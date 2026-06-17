@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# aura_engine.py – openWakeWord, overflow-safe (inference on background thread)
+# aura_engine.py – Uses openwakeword library with automatic model download if missing
 
 import argparse
 import json
@@ -10,10 +10,15 @@ import threading
 import time
 import subprocess
 import numpy as np
-import onnxruntime as ort
-import collections
-import librosa
 import psutil
+
+try:
+    import openwakeword
+    from openwakeword.model import Model
+    from openwakeword.utils import download_models
+except ImportError:
+    print(json.dumps({"type": "error", "message": "openwakeword not installed. Run: pip install openwakeword"}), flush=True)
+    sys.exit(1)
 
 try:
     import sounddevice as sd
@@ -22,23 +27,19 @@ except Exception as exc:
     sys.stdout.flush()
     raise
 
-SAMPLE_RATE            = 16000
-# Large block = short callback = no overflow.
-# At 16 kHz mono int16, 8192 samples ≈ 512 ms per callback.
-CHUNK_SIZE             = 8192
-WAKE_WORD_THRESHOLD    = 0.65
-WAKE_COOLDOWN_SECONDS  = 2.5
-# After a wake fires, ignore the microphone for this long so the
-# "hey aura" utterance itself cannot re-trigger a second wake.
-# Must be longer than the utterance duration + one full buffer window (~1s).
-SUPPRESS_AFTER_WAKE_SECONDS = 4.0
-ARMED_TIMEOUT_SECONDS  = 20.0
+# ─── Configuration ──────────────────────────────────────────────────────────
+SAMPLE_RATE = 16000
+CHUNK_SIZE  = 1280                     # 80 ms at 16 kHz (optimal for openwakeword)
+WAKE_WORD_THRESHOLD = 0.7              # Default is 0.5; raise to reduce false positives
+WAKE_COOLDOWN_SECONDS = 3.0
+SUPPRESS_AFTER_WAKE_SECONDS = 5.0
+ARMED_TIMEOUT_SECONDS = 30.0
 
-N_MELS         = 16
-N_FRAMES       = 96
-HOP_LENGTH     = 160
-WINDOW_SAMPLES = N_FRAMES * HOP_LENGTH   # 15 360 samples ≈ 0.96 s
+# Energy gate – skip inference on silence
+RMS_THRESHOLD = 25.0
 
+_OWN_PID    = os.getpid()
+_PARENT_PID = os.getppid()
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,101 +50,90 @@ def get_model_path():
         os.path.join(base, "resources", "hey_aura.onnx"),
         os.path.join(base, "hey_mycroft.onnx"),
     ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
     raise FileNotFoundError("No openWakeWord model found. Put a .onnx file in resources/")
 
-
 def emit(payload: dict):
-    """Thread-safe JSON line to stdout (read by Electron main process)."""
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
-
-# ── engine ───────────────────────────────────────────────────────────────────
+# ── Engine ──────────────────────────────────────────────────────────────────
 
 class AuraEngine:
     def __init__(self, lang: str = "en"):
         self.lang = lang
-
-        print("[AURA] Loading openWakeWord ONNX model...", file=sys.stderr)
-        model_path = get_model_path()
-        self.ort_session = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
-        )
-        self.input_name = self.ort_session.get_inputs()[0].name
-        print(f"[AURA] Model input: {self.input_name}", file=sys.stderr)
-
-        self.armed           = False
-        self.stop_event      = threading.Event()
-        # Rolling audio accumulator – capped at one inference window.
-        self.audio_buffer    = collections.deque(maxlen=WINDOW_SAMPLES)
-        self.last_wake_time  = 0.0
-        # Use float('inf') so check_armed_timeout never fires until a real
-        # wake sets this to time.monotonic().  A value of 0.0 would make the
-        # timeout fire instantly on every audio callback since
-        # time.monotonic() - 0.0 >> ARMED_TIMEOUT_SECONDS.
+        self.armed = False
+        self.stop_event = threading.Event()
+        self.last_wake_time = 0.0
         self.armed_start_time = float('inf')
-        self.suppress_until  = 0.0
+        self.suppress_until = 0.0
+        self.js_recording = False
 
-        # ── KEY FIX: inference runs on its own thread ──────────────────────
-        # The audio callback just copies samples and enqueues a snapshot.
-        # maxsize=1 → if inference is still running when the next window
-        # arrives we drop the new window rather than queue it (avoids drift).
-        self._infer_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=1)
-        self._infer_thread = threading.Thread(
-            target=self._inference_worker, daemon=True, name="aura-infer"
+        # Diagnostic
+        self._cb_count = 0
+        self._last_diag_time = time.monotonic()
+
+        # ── Ensure the melspectrogram model exists; download if missing ──
+        base_dir = os.path.dirname(openwakeword.__file__)
+        mel_path = os.path.join(base_dir, "resources", "models", "melspectrogram.onnx")
+        if not os.path.exists(mel_path):
+            print("[AURA] Missing melspectrogram.onnx – downloading all default models...", file=sys.stderr)
+            try:
+                download_models()  # This downloads melspectrogram.onnx and other base models
+                print("[AURA] Default models downloaded successfully.", file=sys.stderr)
+            except Exception as e:
+                print(f"[AURA] Failed to download models: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        # ── Load wake‑word model using openwakeword ──
+        model_path = get_model_path()
+        print(f"[AURA] Loading openwakeword model from {model_path}", file=sys.stderr)
+        self.model = Model(wakeword_models=[model_path])
+        # Store the model key for safe access
+        self.model_key = list(self.model.models.keys())
+        if not self.model_key:
+            raise ValueError("No models loaded!")
+        print(f"[AURA] Model key: {self.model_key[0]}", file=sys.stderr)
+
+        # ── Audio queue for processing ──
+        self._audio_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=8)
+        self._worker_thread = threading.Thread(
+            target=self._process_worker, daemon=True, name="aura-process"
         )
-        self._infer_thread.start()
+        self._worker_thread.start()
 
-    # ── inference worker (runs on its own thread) ─────────────────────────
-
-    def _inference_worker(self):
-        """Consume audio windows from the queue and run ONNX inference."""
+    def _process_worker(self):
+        """Continuously process audio chunks with openwakeword."""
         while not self.stop_event.is_set():
             try:
-                window = self._infer_queue.get(timeout=0.5)
+                chunk = self._audio_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
-                self._run_wake_inference(window)
-            except Exception as exc:
-                print(f"[AURA] Inference error: {exc}", file=sys.stderr)
+                self._process_chunk(chunk)
+            except Exception as e:
+                print(f"[AURA] Process error: {e}", file=sys.stderr)
 
-    def _run_wake_inference(self, audio_chunk: np.ndarray):
-        """Full mel + ONNX inference – called only from _inference_worker."""
-        if len(audio_chunk) < WINDOW_SAMPLES:
-            return
-        audio_chunk = audio_chunk[-WINDOW_SAMPLES:]
-        audio_float = audio_chunk.astype(np.float32) / 32768.0
+    def _process_chunk(self, audio_chunk: np.ndarray):
+        """Run inference on a single chunk."""
+        # Energy gate
+        rms = float(np.sqrt(np.mean(audio_chunk.astype(np.float32) ** 2)))
+        if rms < RMS_THRESHOLD:
+            return  # too quiet – skip
 
-        mel = librosa.feature.melspectrogram(
-            y=audio_float, sr=SAMPLE_RATE,
-            n_mels=N_MELS, n_fft=512, hop_length=HOP_LENGTH, power=2.0,
-        )
-        log_mel = librosa.power_to_db(mel)
+        # Predict
+        prediction = self.model.predict(audio_chunk)
 
-        if log_mel.shape[1] < N_FRAMES:
-            pad = N_FRAMES - log_mel.shape[1]
-            log_mel = np.pad(log_mel, ((0, 0), (0, pad)), mode="constant")
-        else:
-            log_mel = log_mel[:, :N_FRAMES]
+        # Pull the score using the safe model_key we stored during __init__
+        score = prediction.get(self.model_key[0], 0.0)
 
-        input_tensor = log_mel.reshape(1, N_MELS, N_FRAMES).astype(np.float32)
-        outputs = self.ort_session.run(None, {self.input_name: input_tensor})
-        out = outputs[0]
-
-        if out.ndim == 0:
-            score = float(out)
-        elif out.ndim == 1:
-            score = float(out[0])
-        else:
-            score = float(out[0][0])
+        # Log active scores over 0.05 to see how well it hears you
+        if score > 0.05:
+            print(f"[AURA-DBG] score={score:.3f} rms={rms:.1f}", file=sys.stderr)
 
         if score >= WAKE_WORD_THRESHOLD:
             self.handle_wake_detected()
-
-    # ── wake detection ────────────────────────────────────────────────────
 
     def handle_wake_detected(self):
         now = time.monotonic()
@@ -153,18 +143,14 @@ class AuraEngine:
             return
         if now < self.suppress_until:
             return
+        if self.js_recording:
+            return
 
         self.last_wake_time = now
         self.suppress_until = now + SUPPRESS_AFTER_WAKE_SECONDS
+        self._flush_audio()
 
-        # Clear buffer and inference queue
-        self.audio_buffer.clear()
-        while not self._infer_queue.empty():
-            try:
-                self._infer_queue.get_nowait()
-            except queue.Empty:
-                break
-
+        # Check if the main app is already running
         if not self.is_app_running():
             self.launch_app()
             return
@@ -174,6 +160,17 @@ class AuraEngine:
         self.armed_start_time = now
         emit({"type": "status", "state": "armed", "lang": self.lang})
 
+        # ── Reset the model's internal buffer to avoid immediate re‑trigger ──
+        self.model.reset()
+
+    def _flush_audio(self):
+        """Clear the audio queue."""
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
     def check_armed_timeout(self):
         if self.armed and (time.monotonic() - self.armed_start_time) > ARMED_TIMEOUT_SECONDS:
             self.disarm()
@@ -182,28 +179,24 @@ class AuraEngine:
         if self.armed:
             self.armed = False
             self.armed_start_time = float('inf')
-            # Extend suppression so the utterance still in the rolling buffer
-            # cannot immediately re-trigger the wake word detector.
             self.suppress_until = time.monotonic() + SUPPRESS_AFTER_WAKE_SECONDS
-            # Flush audio buffer and inference queue so stale audio is gone.
-            self.audio_buffer.clear()
-            while not self._infer_queue.empty():
-                try:
-                    self._infer_queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._flush_audio()
             emit({"type": "status", "state": "listening", "lang": self.lang})
 
-    # ── app lifecycle helpers ─────────────────────────────────────────────
+    # ── App lifecycle ──────────────────────────────────────────────────────────
 
     def is_app_running(self):
+        excluded = {_OWN_PID, _PARENT_PID}
         try:
             for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-                name = (proc.info["name"] or "").lower()
+                pid = proc.info.get("pid")
+                if pid in excluded:
+                    continue
+                name = (proc.info.get("name") or "").lower()
                 cmdline = " ".join(proc.info.get("cmdline") or []).lower()
-                if ("aura" in name or "electron" in name) and (
-                    "aura" in cmdline or "electron" in cmdline
-                ):
+                if ("electron" in name or "aura" in name) and (
+                    "electron" in cmdline or "aura" in cmdline
+                ) and "python" not in name and "node" not in name:
                     return True
         except Exception:
             pass
@@ -221,46 +214,51 @@ class AuraEngine:
             else:
                 emit({"type": "error", "message": f"App executable not found at {exe}"})
         else:
-            print(
-                "[AURA] Development mode: wake word detected, but Electron not running.",
-                file=sys.stderr,
-            )
-            emit({"type": "status", "state": "dev_mode_waiting", "lang": self.lang})
+            print("[AURA] Dev mode: Electron not detected; emitting wake_word.", file=sys.stderr)
+            emit({"type": "wake_word", "text": "hey aura", "lang": self.lang, "action": "trigger"})
+            self.armed = True
+            self.armed_start_time = time.monotonic()
+            emit({"type": "status", "state": "armed", "lang": self.lang})
 
-    # ── audio callback (runs on sounddevice's internal thread) ───────────
-    # MUST return in << one block period.  Do NOT run inference here.
+    # ─── Audio callback ──────────────────────────────────────────────────────
 
     def audio_callback(self, indata, frames, time_info, status):
         if status:
-            # Only print overflow once per run to avoid flooding stderr.
             print(f"[AURA] Audio status: {status}", file=sys.stderr)
 
         audio_np = np.frombuffer(bytes(indata), dtype=np.int16)
-        self.audio_buffer.extend(audio_np)
+        self._cb_count += 1
 
-        if len(self.audio_buffer) >= WINDOW_SAMPLES:
-            # Only submit to the inference thread when not in suppress window.
-            if time.monotonic() >= self.suppress_until:
-                window = np.array(self.audio_buffer, dtype=np.int16)
-                # Non-blocking put: drop frame if inference thread is busy.
-                try:
-                    self._infer_queue.put_nowait(window)
-                except queue.Full:
-                    pass  # inference still running – skip this window
+        # ── Diagnostic every 10 seconds ──
+        now_diag = time.monotonic()
+        if now_diag - self._last_diag_time >= 10.0:
+            rms = float(np.sqrt(np.mean(audio_np.astype(np.float32) ** 2)))
+            qsize = self._audio_queue.qsize()
+            print(
+                f"[AURA-DIAG] callbacks={self._cb_count} "
+                f"queue_size={qsize} "
+                f"rms={rms:.1f} "
+                f"armed={self.armed} suppress_remaining={max(0.0, self.suppress_until - now_diag):.1f}s",
+                file=sys.stderr,
+            )
+            self._cb_count = 0
+            self._last_diag_time = now_diag
 
-            # Slide the accumulator forward by half a window so adjacent
-            # windows overlap and we don't miss wake words at block boundaries.
-            discard = WINDOW_SAMPLES // 2
-            for _ in range(min(len(self.audio_buffer), discard)):
-                self.audio_buffer.popleft()
+        # ── Only enqueue if not suppressed and not recording ──
+        if time.monotonic() < self.suppress_until or self.js_recording:
+            return
 
-        # Armed timeout check is O(1) – safe inside the callback.
+        try:
+            self._audio_queue.put_nowait(audio_np)
+        except queue.Full:
+            # Drop chunk if queue is full – worker is busy
+            pass
+
         self.check_armed_timeout()
 
-    # ── stdin command listener ────────────────────────────────────────────
+    # ── stdin command listener ──────────────────────────────────────────────
 
     def cmd_listener(self):
-        """Read single-line commands from Electron via stdin."""
         while not self.stop_event.is_set():
             try:
                 line = sys.stdin.readline()
@@ -269,10 +267,16 @@ class AuraEngine:
                 cmd = line.strip().lower()
                 if cmd == "disarm":
                     self.disarm()
+                elif cmd == "recording_start":
+                    self.js_recording = True
+                    self._flush_audio()
+                elif cmd == "recording_end":
+                    self.js_recording = False
+                    self.disarm()
             except Exception:
                 break
 
-    # ── main loop ─────────────────────────────────────────────────────────
+    # ── main loop ────────────────────────────────────────────────────────────
 
     def run_continuous(self):
         threading.Thread(target=self.cmd_listener, daemon=True, name="aura-cmd").start()
@@ -291,20 +295,17 @@ class AuraEngine:
             emit({"type": "error", "message": f"Microphone error: {exc}"})
             raise
 
-
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="AURA sidecar – openWakeWord only")
+    parser = argparse.ArgumentParser(description="AURA sidecar – openWakeWord")
     parser.add_argument("--lang", choices=["ar", "en"], default="en")
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
     engine = AuraEngine(lang=args.lang)
     engine.run_continuous()
-
 
 if __name__ == "__main__":
     try:

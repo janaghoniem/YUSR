@@ -20,6 +20,7 @@ from routes.device_routes import router as device_router
 from routes.thinking import router as thinking_router
 from routes.voice import router as voice_router
 from routes.websocket import router as websocket_router
+from routes.api_keys import router as byok_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,6 +47,7 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(thinking_router)
 app.include_router(websocket_router)
+app.include_router(byok_router)  
 
 logger.info("✅ Memory API routes registered at /api/memory")
 

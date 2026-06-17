@@ -1,6 +1,7 @@
 // SettingsModal.jsx — Claude-inspired settings, ARIA-first
 import React, { useState, useEffect, useRef } from "react";
-import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { X, User, Brain, Trash2, RefreshCw, Eye, EyeOff, Key } from "lucide-react";
+import BYOKPanel from "./BYOKPanel";
 
 const API_BASE_URL = "";
 
@@ -25,7 +26,7 @@ const SettingsModal = ({
   const [deviceId, setDeviceId] = useState(initialDeviceId);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileStatus, setProfileStatus] = useState("");
-  
+
   // ✅ Long-term memory (preferences) stats
   const [memoryStats, setMemoryStats] = useState({
     total_preferences: 0,
@@ -43,13 +44,8 @@ const SettingsModal = ({
   const closeBtnRef = useRef(null);
 
   useEffect(() => {
-    // Focus close button on mount
     closeBtnRef.current?.focus();
-
-    // Escape closes
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose();
-    };
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -148,7 +144,6 @@ const SettingsModal = ({
     setProfileData({ ...profileData, [field]: value });
   };
 
-
   const handleSave = async () => {
     setProfileLoading(true);
     setProfileStatus("");
@@ -169,7 +164,6 @@ const SettingsModal = ({
         setProfileLoading(false);
         return;
       }
-      // Update localStorage with new username
       if (profileData.username) {
         localStorage.setItem("userName", profileData.username);
         console.log("[SettingsModal] Saved username to localStorage:", profileData.username);
@@ -178,10 +172,8 @@ const SettingsModal = ({
         onDeviceIdChange(deviceId.trim());
       }
       setProfileStatus("✅ Profile saved successfully");
-      
       console.log("[SettingsModal] Calling onSave with:", profileData);
       onSave(profileData);
-      
       setTimeout(onClose, 800);
     } catch (e) {
       setProfileStatus(`❌ ${e.message}`);
@@ -191,15 +183,16 @@ const SettingsModal = ({
   };
 
   const navItems = [
-    { id: "profile", label: "Profile", icon: <User size={15} aria-hidden="true" /> },
-    { id: "memory",  label: "Memory",  icon: <Brain size={15} aria-hidden="true" /> },
+    { id: "profile", label: "Profile",  icon: <User size={15} aria-hidden="true" /> },
+    { id: "memory",  label: "Memory",   icon: <Brain size={15} aria-hidden="true" /> },
+    { id: "apikeys", label: "API Keys", icon: <Key   size={15} aria-hidden="true" /> },
   ];
 
   const statCards = [
-    { label: "Total preferences",   value: memoryStats.total_preferences,    color: "var(--pink-400)" },
-    { label: "Personal info",        value: memoryStats.personal_info_count,  color: "var(--pink-300)" },
-    { label: "App preferences",      value: memoryStats.app_preferences_count, color: "var(--pink-200)" },
-    { label: "Storage used",         value: `${memoryStats.storage_size_mb} MB`, color: "var(--text-secondary)" },
+    { label: "Total preferences",    value: memoryStats.total_preferences,     color: "var(--pink-400)" },
+    { label: "Personal info",         value: memoryStats.personal_info_count,   color: "var(--pink-300)" },
+    { label: "App preferences",       value: memoryStats.app_preferences_count, color: "var(--pink-200)" },
+    { label: "Storage used",          value: `${memoryStats.storage_size_mb} MB`, color: "var(--text-secondary)" },
   ];
 
   return (
@@ -247,6 +240,7 @@ const SettingsModal = ({
 
           {/* ── Right content ────────────────────── */}
           <div className="settings-content">
+
             {/* ── PROFILE ── */}
             {activeSection === "profile" && (
               <section className="settings-section settings-profile-section" aria-labelledby="profile-heading">
@@ -329,7 +323,7 @@ const SettingsModal = ({
                         placeholder="e.g., windows-work-laptop"
                       />
                       <small style={{ color: "var(--text-muted)", lineHeight: 1.5 }}>
-                        Used for cross-platform task sync. Change only if you know what you’re doing.
+                        Used for cross-platform task sync. Change only if you know what you're doing.
                       </small>
                     </label>
                   </div>
@@ -538,24 +532,54 @@ const SettingsModal = ({
               </section>
             )}
 
+            {/* ── API KEYS (BYOK) ── */}
+            {activeSection === "apikeys" && (
+              <section className="settings-section" aria-labelledby="apikeys-heading">
+                <h2 className="section-title" id="apikeys-heading">API Keys</h2>
+                <p style={{ fontSize: "14px", color: "var(--text-secondary)", marginBottom: "20px", lineHeight: "1.6" }}>
+                  Connect your own model provider keys. AURA will use them instead of built-in models,
+                  routing all requests securely through the server — your key never touches the browser.
+                </p>
+                <BYOKPanel userId={localStorage.getItem("userId") || ""} />
+              </section>
+            )}
+
             {profileStatus && (
               <div style={{ padding: "10px", fontSize: "13px", color: "rgba(255,255,255,0.9)" }}>
                 {profileStatus}
               </div>
             )}
-            <div className="settings-actions">
-              {onLogout && (
-                <button className="settings-btn-logout" onClick={onLogout}>
-                  Log out
+
+            {/* Only show Save/Cancel on profile tab — BYOK has its own save flow */}
+            {activeSection !== "apikeys" && (
+              <div className="settings-actions">
+                {onLogout && (
+                  <button className="settings-btn-logout" onClick={onLogout}>
+                    Log out
+                  </button>
+                )}
+                <button className="settings-btn-save" onClick={handleSave} disabled={profileLoading}>
+                  {profileLoading ? "Saving..." : "Save Changes"}
                 </button>
-              )}
-              <button className="settings-btn-save" onClick={handleSave} disabled={profileLoading}>
-                {profileLoading ? "Saving..." : "Save Changes"}
-              </button>
-              <button className="settings-btn-cancel" onClick={onClose}>
-                Cancel
-              </button>
-            </div>
+                <button className="settings-btn-cancel" onClick={onClose}>
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {/* On API Keys tab, just show a close button */}
+            {activeSection === "apikeys" && (
+              <div className="settings-actions">
+                {onLogout && (
+                  <button className="settings-btn-logout" onClick={onLogout}>
+                    Log out
+                  </button>
+                )}
+                <button className="settings-btn-cancel" onClick={onClose}>
+                  Done
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

@@ -10,6 +10,7 @@ Enhancements:
   - Personalization-aware communication prompt (tone adaptation)
 """
 
+import datetime
 import os, re, json, uuid, time, sys
 from typing import List, Dict, Optional, Tuple, Any
 import asyncio
@@ -1085,84 +1086,6 @@ class LanguageAgent:
         except Exception as e:
             logger.warning(f"⚠️ Failed to schedule memory save: {e}")
 
-    # def parse_response(self, response: str) -> Tuple[str, bool, Optional[str], str]:
-    #     """
-    #     Parse LLM response.
-    #     Returns: (response_text, is_complete, personal_info, output_language)
-
-    #     Handles truncated JSON caused by token limits — e.g. an unterminated string
-    #     inside response_text when the LLM generates a long story inside the JSON value.
-    #     """
-    #     def _attempt_repair(raw: str) -> Optional[str]:
-    #         """
-    #         Try to close a truncated JSON object by appending the minimal suffix
-    #         needed to make it parseable.  Only used when json.loads fails.
-    #         """
-    #         s = raw.strip()
-    #         # Count open/close braces to decide what to append
-    #         opens  = s.count('{') - s.count('}')
-    #         quotes = s.count('"') % 2  # odd number of quotes → unclosed string
-    #         suffix = ""
-    #         if quotes:
-    #             suffix += '"'     # close the open string
-    #         # Close any remaining open objects
-    #         suffix += "}" * max(opens, 0)
-    #         repaired = s + suffix
-    #         try:
-    #             json.loads(repaired)
-    #             return repaired
-    #         except Exception:
-    #             return None
-
-    #     try:
-    #         cleaned_response = response.replace("\\\\", "/").replace("\\", "/")
-    #         # Primary parse attempt
-    #         try:
-    #             parsed_raw = json.loads(cleaned_response)
-    #         except json.JSONDecodeError:
-    #             # Attempt to repair a truncated JSON response before giving up
-    #             repaired = _attempt_repair(cleaned_response)
-    #             if repaired:
-    #                 logger.warning("⚠️ JSON was truncated — repaired and retrying parse")
-    #                 parsed_raw = json.loads(repaired)
-    #             else:
-    #                 raise
-    #         parsed = parsed_raw
-    #         is_complete = parsed.get("is_complete", False)
-    #         response_text = parsed.get("response_text", "")
-    #         personal_info = parsed.get("personal_info", None)
-    #         if personal_info and str(personal_info).lower() == "null":
-    #             personal_info = None
-    #         # Extract output_language override
-    #         output_language = parsed.get("output_language", self.preferred_language)
-    #         if output_language not in ("en", "ar"):
-    #             output_language = self.preferred_language
-    #         return response_text, is_complete, personal_info, output_language
-    #     except json.JSONDecodeError as e:
-    #         logger.error(f"⚠️ JSON parse error: {e}")
-    #         logger.error(f"⚠️ Raw response: {response}")
-    #         try:
-    #             match = re.search(r'"response_text":\s*"([^"]+)"', response)
-    #             if match:
-    #                 return match.group(1), False, None, self.preferred_language
-    #         except:
-    #             pass
-    #         fallback_text = (
-    #             "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟"
-    #             if self.preferred_language == "ar"
-    #             else "I'm sorry, I didn't quite understand. Could you clarify?"
-    #         )
-    #         return fallback_text, False, None, self.preferred_language
-    #     except Exception as e:
-    #         logger.warning(f"⚠️ Failed to parse response: {e}")
-    #         fallback_text = (
-    #             "عذرًا، لم أفهم ذلك جيدًا. هل يمكنك التوضيح؟"
-    #             if self.preferred_language == "ar"
-    #             else "I'm sorry, I didn't quite understand. Could you clarify?"
-    #         )
-    #         return fallback_text, False, None, self.preferred_language
-
-
     def parse_response(self, response: str) -> Tuple[str, bool, Optional[str], str]:
         """
         Parse LLM response — HARDENED.
@@ -1505,6 +1428,24 @@ async def start_language_agent(broker):
         _enforce_active_agent_limit()
         return active_agents[agent_key]
 
+    # Helper to deduplicate and sanitise device candidates
+    def _prepare_device_candidates(candidates: List[Dict]) -> List[Dict]:
+        """Remove duplicates by device_id and convert datetime to ISO strings."""
+        seen = set()
+        unique = []
+        for c in candidates:
+            dev_id = c.get("device_id")
+            if not dev_id or dev_id in seen:
+                continue
+            seen.add(dev_id)
+            # Convert datetime objects to ISO strings for JSON serialization
+            c_copy = c.copy()
+            for key, value in list(c_copy.items()):
+                if isinstance(value, datetime):
+                    c_copy[key] = value.isoformat()
+            unique.append(c_copy)
+        return unique
+
     async def handle_user_input(message: dict):
         """Handle user input from HTTP API"""
         payload_data = message.payload if hasattr(message, 'payload') else message.get('payload', {})
@@ -1734,6 +1675,7 @@ async def start_language_agent(broker):
 
             if agent.awaiting_user_response.get("type") == "device_selection":
                 context = agent.awaiting_user_response
+                # Ensure candidates are sanitised (already done when stored)
                 candidates = context.get("candidates") or []
                 pending_payload = dict(context.get("pending_payload") or {})
                 selection_text = normalize_arabic(input_text)
@@ -2111,11 +2053,13 @@ async def start_language_agent(broker):
 
                 mgr = get_cross_platform_manager()
                 if mgr:
-                    candidates = await mgr._registry.get_matching_devices(  # noqa: SLF001 - language agent needs registry lookup
+                    raw_candidates = await mgr._registry.get_matching_devices(  # noqa: SLF001 - language agent needs registry lookup
                         user_id=user_id,
                         target_platform=cross_platform_intent.get("target_platform"),
                         exclude_device_id=(message.payload or {}).get("device_id") or session_id,
                     )
+                    # Deduplicate and sanitise candidates
+                    candidates = _prepare_device_candidates(raw_candidates)
                     if len(candidates) > 1:
                         candidate_lines = []
                         for idx, candidate in enumerate(candidates, start=1):
@@ -2149,13 +2093,14 @@ async def start_language_agent(broker):
                             "first_input": input_text,
                             "user_profile": agent.user_profile,
                         }
+                        # Store sanitised candidates in awaiting_user_response (already serializable)
                         agent.awaiting_user_response = {
                             "type": "device_selection",
                             "question": clarification_text,
                             "original_request": input_text,
                             "response_to": http_request_id,
                             "pending_payload": pending_payload,
-                            "candidates": candidates,
+                            "candidates": candidates,  # now clean
                             "user_language": agent.preferred_language,
                             "output_language": output_language,
                             "user_profile": agent.user_profile,
@@ -2177,6 +2122,23 @@ async def start_language_agent(broker):
                             }
                         )
                         await broker.publish(Channels.LANGUAGE_OUTPUT, clarification_msg)
+
+                        # Also publish a broadcast message so that the WebSocket handler
+                        # can forward it to the frontend (if it listens to ws_type)
+                        broadcast_payload = {
+                            "ws_type": "clarification",
+                            "question": clarification_text,
+                            "device_type": device_type,
+                            "user_language": agent.preferred_language,
+                        }
+                        broadcast_msg = AgentMessage(
+                            message_type=MessageType.CLARIFICATION_REQUEST,
+                            sender=AgentType.LANGUAGE,
+                            receiver=AgentType.BROADCAST,
+                            session_id=session_id,
+                            payload=broadcast_payload,
+                        )
+                        await broker.publish(Channels.BROADCAST, broadcast_msg)
                         return
 
             await ThinkingStepManager.update_step(

@@ -91,6 +91,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 return
         if message.session_id == session_id or message.session_id is None:
             payload = message.payload or {}
+
+            # Forward thinking updates
             if payload.get("action") == "thinking_update":
                 await ws_manager.send_to_session(session_id, {
                     "type": "thinking_step",
@@ -102,7 +104,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await ws_manager.send_to_session(session_id, {
                     "type": "thinking_clear"
                 })
-            elif payload.get("ws_type") == "task_progress":
+            # NEW: Forward any message that has a ws_type field (clarification, task_progress, etc.)
+            elif payload.get("ws_type"):
+                # The frontend expects certain type names; we can pass the whole payload
+                # or map ws_type to a known type. We'll send the payload as-is.
+                await ws_manager.send_to_session(session_id, payload)
+            # Legacy: keep task_progress forwarding (though now covered by ws_type)
+            elif payload.get("type") == "task_progress":
                 await ws_manager.send_to_session(session_id, payload)
 
     broker.subscribe(Channels.BROADCAST, ws_broadcast_handler)
@@ -174,7 +182,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 from routes.cross_platform_manager import get_cross_platform_manager
                 if not user_text:
                     continue
-
 
                 # Cache session -> device linkage so we can update device online status on disconnect.
                 interrupt_action = detect_interrupt(user_text)

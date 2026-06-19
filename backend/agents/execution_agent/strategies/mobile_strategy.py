@@ -1,5 +1,5 @@
 """
-mobile_strategy_codegen.py  —  Fixed version
+mobile_strategy_codegen.py  —  Fixed version (Gemini edition)
 See CHANGES section at the bottom for a summary of every fix.
 """
 
@@ -67,7 +67,7 @@ APP_PACKAGES: Dict[str, str] = {
     "maps":            "com.google.android.apps.maps",
     "google docs":     "com.google.android.apps.docs",
     "google sheets":   "com.google.android.apps.spreadsheets",
-    "google slides":   "com.google.android.apps.presentations", 
+    "google slides":   "com.google.android.apps.presentations",
     "google drive":    "com.google.android.apps.docs",
     "google photos":   "com.google.android.apps.photos",
     "google meet":     "com.google.android.apps.meetings",
@@ -180,9 +180,6 @@ class TaskParameters:
         for k, v in self.raw.items():
             result = result.replace(f"{{{k}}}", str(v))
         # Post-injection: fix any unquoted numeric args to set_text()
-        # e.g. set_text(05) → set_text("05")
-        # This happens when PlaceholderExtractor captured a value inside
-        # a numeric context rather than a string literal.
         result = re.sub(
             r"\.set_text\((\d+)\)",
             lambda m: f'.set_text("{m.group(1)}")',
@@ -265,7 +262,6 @@ class TemplateCache:
     def __init__(self, cache_file: Path = CACHE_FILE) -> None:
         self._path:    Path                    = cache_file
         self._store:   Dict[str, CodeTemplate] = {}
-        # Embedding cache: template_id → numpy vector (lazy, computed on first lookup)
         self._embeds:  Dict[str, Any]          = {}
         self._load()
         logger.info(
@@ -312,56 +308,43 @@ class TemplateCache:
             return 0.0
         return len(a & b) / len(a | b)
 
-    # Synonym map: normalize variant phrasings to canonical forms
-    # before keyword extraction so Jaccard similarity is higher for
-    # semantically equivalent task descriptions.
     _SYNONYMS: Dict[str, str] = {
-        "address":   "search",    # "address bar" ↔ "search bar"
-        "browser":   "chrome",    # "open browser" ↔ "open chrome"
-        "press":     "click",     # "press button" ↔ "click button"
+        "address":   "search",
+        "browser":   "chrome",
+        "press":     "click",
         "tap":       "click",
         "hit":       "click",
         "submit":    "click",
         "execute":   "click",
-        "launch":    "open",      # "launch app" ↔ "open app"
+        "launch":    "open",
         "start":     "open",
-        "go":        "navigate",  # "go to page" ↔ "navigate to page"
+        "go":        "navigate",
         "load":      "navigate",
         "visit":     "navigate",
-        "query":     "search",    # "enter query" ↔ "enter search"
+        "query":     "search",
         "keyword":   "search",
-        "mail":      "email",     # "open mail" ↔ "open email"
+        "mail":      "email",
         "inbox":     "email",
         "compose":   "email",
-        "write":     "fill",      # "write subject" ↔ "fill subject"
-        "enter":     "type",      # "enter text" ↔ "type text"
+        "write":     "fill",
+        "enter":     "type",
         "input":     "type",
         "insert":    "type",
     }
 
     @classmethod
     def _kw_query(cls, text: str) -> Set[str]:
-        """
-        Keywords for a QUERY (incoming task text).
-        1. Letters only (strips digits/colons) — templates use placeholders
-           like "alarm_time" not "5:40", so numbers never match.
-        2. Synonym normalization — maps variant words to canonical forms
-           so "address bar" and "search bar" produce identical keywords.
-        """
-        tokens = re.findall(r"[a-z]+", text.lower())  # letters only, no digits
-        # Apply synonym normalization
+        tokens = re.findall(r"[a-z]+", text.lower())
         tokens = [cls._SYNONYMS.get(t, t) for t in tokens]
         return {t for t in tokens if t not in cls._STOPWORDS and len(t) >= 2}
 
     def _embed(self, text: str) -> Any:
-        """Return sentence embedding for text, using the global model."""
         if not _SEMANTIC_CACHE_AVAILABLE or _SENTENCE_MODEL is None:
             return None
         return _SENTENCE_MODEL.encode(text, normalize_embeddings=True)
 
     @staticmethod
     def _cosine(a: Any, b: Any) -> float:
-        """Cosine similarity between two normalized embedding vectors."""
         if a is None or b is None:
             return 0.0
         return float(np.dot(a, b))
@@ -375,27 +358,19 @@ class TemplateCache:
         best_sim: float = 0.0
 
         if _SEMANTIC_CACHE_AVAILABLE and _SENTENCE_MODEL is not None:
-            # ── Semantic similarity path ──────────────────────────────────
-            # Embed the query once; embed each template lazily (cached).
             query_vec = self._embed(task_text)
             for t in self._store.values():
-                # Lazy-compute and cache template embedding
                 if t.template_id not in self._embeds:
                     self._embeds[t.template_id] = self._embed(t.task_pattern)
                 tmpl_vec = self._embeds[t.template_id]
                 sim = self._cosine(query_vec, tmpl_vec)
-                # Cross-app penalty: wrong app → halve similarity
                 if app_lower and t.app.lower() != app_lower:
                     sim *= 0.4
-                # Reliability penalty: templates that fail often
                 if t.reliability < 0.5 and (t.success_count + t.failure_count) >= 3:
                     sim *= 0.6
                 if sim > best_sim:
                     best_sim = sim
                     best_t   = t
-            # Semantic similarity is naturally in [0,1].
-            # 0.60 is the right floor — same-app variants score 0.60-0.75 and
-            # should hit cache. The cross-app 0.4x penalty prevents misfires.
             sem_threshold = max(threshold, 0.60)
             if best_t is not None and best_sim >= sem_threshold:
                 logger.info(
@@ -410,7 +385,6 @@ class TemplateCache:
             return None
 
         else:
-            # ── Jaccard fallback path (no sentence-transformers) ──────────
             query_kw = self._kw_query(task_text)
             for t in self._store.values():
                 sim = self._jaccard(query_kw, set(t.keywords))
@@ -472,10 +446,6 @@ class ParameterExtractor:
         ParameterExtractor._extract_time(text, params)
         ParameterExtractor._extract_email(text, params)
 
-        # Extract doc_title BEFORE _extract_query and _extract_quoted so the
-        # value maps to doc_title, not search_query.
-        # Handles: "Type the title 'synapse' in the document title field"
-        #          "Set the document title to 'synapse'"
         _doc_title_re = re.compile(
             r"(?:title|name|rename)[^\'\"]*[\'\"]([ \w-]{1,100})[\'\"]"
             r"|[\'\"]([ \w-]{1,100})[\'\"][^\'\"]*(?:title|document name)",
@@ -487,8 +457,6 @@ class ParameterExtractor:
             if _dt_val and _dt_val.lower() not in _TASK_LABEL_WORDS:
                 params.set("doc_title", _dt_val)
 
-        # Extract message_text before _extract_quoted to avoid the value being
-        # mapped to search_query when the task is about sending an SMS/WhatsApp.
         _msg_re = re.compile(
             r'(?:type|send|write|enter)\s+(?:the\s+)?(?:message\s+)?[\'\"](.*?)[\'\"]'
             r'(?:\s+in\s+(?:the\s+)?(?:message|chat|field))?',
@@ -499,7 +467,7 @@ class ParameterExtractor:
             _mg_val = _mg.group(1).strip()
             if _mg_val and _mg_val.lower() not in _TASK_LABEL_WORDS and len(_mg_val) >= 2:
                 params.set("message_text", _mg_val)
-        ParameterExtractor._extract_query(text, params)  # FIX #1/#2 applied inside
+        ParameterExtractor._extract_query(text, params)
 
         pm = _PHONE_RE.search(text)
         if pm:
@@ -509,7 +477,7 @@ class ParameterExtractor:
         ParameterExtractor._extract_quoted(text, params)
 
         for k, v in extra.items():
-            if k in _INTERNAL_KEYS or v is None:  # FIX #3: _INTERNAL_KEYS now includes input_content
+            if k in _INTERNAL_KEYS or v is None:
                 continue
             val = str(v).strip()
             if not val:
@@ -527,7 +495,7 @@ class ParameterExtractor:
                 "event":        "event_title",
                 "title":        "event_title",
                 "value":        "input_value",
-                "url":          "target_url",   # FIX: url is a useful param, not internal
+                "url":          "target_url",
             }.get(k, k)
             params.set(canonical, val)
 
@@ -537,17 +505,7 @@ class ParameterExtractor:
             p = params.get("alarm_period", "AM")
             params.set("alarm_time", f"{int(h)}:{m} {p}")
 
-        # ── Parse email JSON from input_content OR overall_goal context ────
-        # When a reasoning agent produces {"SUBJECT": "...", "BODY": "..."},
-        # it's stored as task_1 output. The coordinator injects it as
-        # input_content ONLY if task_1 is in the current task's depends_on.
-        # If it's not (e.g. the decomposer dropped the dependency), we try
-        # to find it in all extra_params values — the coordinator sometimes
-        # passes it under input_content from a previous task in the chain.
-        # As a final fallback: parse overall_goal for explicit subject/body markers.
         input_content = (extra.get("input_content") or "").strip()
-        # If input_content looks like metadata (Template cache..., Code generated...),
-        # try to find actual JSON elsewhere in extra_params.
         if not input_content.startswith("{"):
             for val in extra.values():
                 if isinstance(val, str) and val.strip().startswith('{"SUBJECT"'):
@@ -556,7 +514,6 @@ class ParameterExtractor:
         if input_content and input_content.startswith("{"):
             try:
                 parsed = json.loads(input_content)
-                # Map common keys from reasoning agent output → canonical param names
                 key_map = {
                     "SUBJECT": "email_subject",
                     "subject": "email_subject",
@@ -566,31 +523,23 @@ class ParameterExtractor:
                     "to":      "recipient_email",
                     "CC":      "cc_email",
                     "cc":      "cc_email",
-                    "result":  None,  # nested result object — recurse one level
+                    "result":  None,
                 }
-                # Handle {"result": {"SUBJECT": ..., "BODY": ...}} wrapping
                 if "result" in parsed and isinstance(parsed["result"], dict):
                     parsed = parsed["result"]
                 for src_key, dst_key in key_map.items():
                     if dst_key and src_key in parsed and parsed[src_key]:
-                        if not params.has(dst_key):  # don't overwrite regex-extracted values
+                        if not params.has(dst_key):
                             params.set(dst_key, str(parsed[src_key]).strip())
                             logger.debug(f"[PARAMS] Injected from input_content JSON: {dst_key}={str(parsed[src_key])[:40]!r}")
             except (json.JSONDecodeError, TypeError):
-                pass  # input_content is plain text, not JSON — ignore
+                pass
 
-        # Also try extracting email fields from higher-level context such as
-        # the overall goal or other coordinator-provided extras when the
-        # task text itself lacks them. Useful when decomposer/coordinator
-        # placed the subject/body in `overall_goal`.
         for ctx_key in ("overall_goal", "goal"):
             ctx_val = extra.get(ctx_key)
             if isinstance(ctx_val, str) and ctx_val:
                 ParameterExtractor._extract_email(ctx_val, params)
-        
-        # Additional fallback: if alarm params are still missing but text
-        # contains time patterns, try extraction from task text one more time
-        # with a looser heuristic (some coordinators phrase times differently).
+
         if not params.has("alarm_hour") and any(w in (text or "").lower() for w in ("alarm", "set time", "timer")):
             ParameterExtractor._extract_time(text, params)
 
@@ -617,7 +566,6 @@ class ParameterExtractor:
         params.set("alarm_minute", f"{minute:02d}")
         params.set("alarm_period", period)
         params.set("alarm_time",   f"{hour}:{minute:02d} {period}")
-        # Also store single-digit hour variant for template matching flexibility
         params.set("alarm_hour_no_pad", str(hour))
 
     @staticmethod
@@ -630,8 +578,6 @@ class ParameterExtractor:
         sm = _SUBJECT_RE.search(text)
         if sm:
             val = sm.group(1).strip()
-            # Guard: reject if this looks like a task instruction rather than a real subject.
-            # Real subjects are short (<60 chars) and don't contain instruction words.
             instruction_words = {"field", "value", "from", "composed", "fill", "with", "the"}
             val_words = set(val.lower().split())
             if len(val) <= 80 and not val_words.intersection(instruction_words):
@@ -641,14 +587,11 @@ class ParameterExtractor:
         bm = _BODY_RE.search(text)
         if bm:
             val = bm.group(1).strip()
-            # Same guard for body
             instruction_words = {"field", "value", "from", "composed", "fill", "with"}
             val_words = set(val.lower().split())
             if len(val) <= 200 and not val_words.intersection(instruction_words):
                 params.set("email_body", val)
 
-    # Pattern: "Enter/Type/Write X in the <field> field" — extracts actual param values
-    # from task descriptions like "Enter hello world in the Subject field"
     _ENTER_IN_FIELD_RE = re.compile(
         r"(?:enter|type|write|put|fill(?:\s+in)?|input)\s+"
         r"(?P<value>.+?)\s+in(?:\s+the)?\s+"
@@ -678,7 +621,6 @@ class ParameterExtractor:
             logger.debug(f"[PARAMS] Skipping query extraction for navigation task: {text[:60]}")
             return
 
-        # ── "Enter X in the Subject/Body/To field" pattern ──────────────
         m = ParameterExtractor._ENTER_IN_FIELD_RE.search(text)
         if m:
             value     = m.group("value").strip().strip("'\"")
@@ -692,7 +634,7 @@ class ParameterExtractor:
                 if not params.has(param_key):
                     params.set(param_key, value)
                     logger.debug(f"[PARAMS] 'Enter X in field': {param_key}={value!r}")
-                return  # don't also run _QUERY_RE
+                return
 
         qm = _QUERY_RE.search(text)
         if qm:
@@ -702,13 +644,6 @@ class ParameterExtractor:
 
     @staticmethod
     def _extract_quoted(text: str, params: TaskParameters) -> None:
-        # Use smarter quote extraction that handles apostrophes in contractions.
-        # The old _QUOTED_RE fired on the apostrophe in "you're", truncating
-        # "heyy haya hope you're doing well" to "heyy haya hope you".
-        #
-        # Strategy: double-quoted strings are always safe. Single-quoted strings
-        # only match when the opening quote is preceded by a word boundary and
-        # the closing quote is followed by whitespace/punctuation/end-of-string.
         double_quoted = re.findall(r'"([^"]{2,300})"', text)
         single_quoted = re.findall(
             r"(?:(?<=\s)|(?<=^))\'([^\']{2,300})\'(?=\s|$|[,.:;!?])", text
@@ -726,7 +661,7 @@ class ParameterExtractor:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PLACEHOLDER EXTRACTOR  (unchanged)
+#  PLACEHOLDER EXTRACTOR
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PlaceholderExtractor:
@@ -784,29 +719,6 @@ def build_ui_snapshot(
     max_interactive: int = 80,
     max_labels: int = 40,
 ) -> str:
-    """
-    Two-pass UI snapshot builder.
-
-    Pass 1 — INTERACTIVE ELEMENTS (selectors the LLM can use directly):
-      clickable=true OR focusable=true OR scrollable=true
-      Rendered as:  CLASS  rid=X  text=Y  desc=Z  @(x%,y%)  [CLK/FOC/SCR]
-
-    Pass 2 — VISIBLE TEXT LABELS (content only, not directly actionable):
-      visible TextViews/Labels that have non-empty text but are NOT interactive.
-      These tell the LLM what content is on screen (e.g. video titles, alarm
-      times, list item labels) so it can reference them in selectors like
-      d(text="AgentForce in Salesforce") even on a parent container.
-      Rendered as:  LABEL  text=Y  @(x%,y%)
-
-    Why two passes?
-      Android RecyclerView items often have a clickable parent ViewGroup with
-      non-interactive TextView children that carry the actual title text.
-      Without pass 2, the LLM sees "ViewGroup [CLK]" but has no idea what
-      text is inside it — it can't click by title and has to guess by index.
-
-    Budget: max_interactive interactive lines + max_labels label lines.
-    Labels beyond the budget are dropped (they're for context, not selectors).
-    """
     if not xml_dump:
         return "(no UI data available)"
     if isinstance(xml_dump, bytes):
@@ -862,7 +774,6 @@ def build_ui_snapshot(
                 visit(child)
             return
 
-        # ── Pass 1: interactive elements ──────────────────────────────────
         if (clickable or focusable or scrollable) and len(interactive_lines) < max_interactive:
             parts: List[str] = [cls]
             if rid:   parts.append(f'rid="{rid}"')
@@ -876,20 +787,16 @@ def build_ui_snapshot(
             flag_str = f"  [{','.join(flags)}]" if flags else ""
             interactive_lines.append("  ".join(parts) + _coord(bounds) + flag_str)
 
-        # ── Pass 2: text labels on non-interactive nodes ──────────────────
-        # Capture text from TextView / text-bearing nodes that are NOT
-        # interactive themselves. These are the titles, subtitles, and
-        # content values the LLM needs to know are on screen.
         elif (
             not clickable and not focusable and not scrollable
-            and text                                    # must have actual text
-            and len(text) >= 3                          # skip trivial labels
-            and len(text) <= 200                        # skip huge blobs
+            and text
+            and len(text) >= 3
+            and len(text) <= 200
             and len(label_lines) < max_labels
             and cls in (
                 "TextView", "EditText", "Button", "CheckedTextView",
                 "AppCompatTextView", "MaterialTextView",
-                "SubtitleCollapsingTextHelper",         # YouTube video duration etc.
+                "SubtitleCollapsingTextHelper",
             )
         ):
             label_lines.append(f'LABEL  text="{text}"' + _coord(bounds))
@@ -952,8 +859,6 @@ class CodeExecutor:
         param_block = ("\n".join(param_lines) + "\n\n") if param_lines else ""
         return header + param_block + textwrap.dedent(code)
 
-    # FIX #8: Pre-execution syntax check — catch SyntaxError before we even
-    # spin up the device. Returns error string or "" if clean.
     @staticmethod
     def _syntax_check(script: str) -> str:
         try:
@@ -969,7 +874,6 @@ class CodeExecutor:
     ) -> "ExecutionOutcome":
         full_script = self._build_script(code, params)
 
-        # FIX #8: Reject scripts with syntax errors immediately
         syntax_err = self._syntax_check(full_script)
         if syntax_err:
             logger.warning(f"[EXEC] Syntax check failed — skipping device run: {syntax_err}")
@@ -1038,9 +942,7 @@ class CodeExecutor:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  APP PLAYBOOKS — injected dynamically, one per task
-#  These replace the hardcoded sections in the old monolithic prompt.
-#  Add new apps here without touching the base prompt.
+#  APP PLAYBOOKS
 # ══════════════════════════════════════════════════════════════════════════════
 
 _APP_PLAYBOOKS: Dict[str, str] = {
@@ -1102,7 +1004,6 @@ Open compose FAB:
   elif d(resourceId="com.google.android.gm:id/fab").exists(timeout=3):
       d(resourceId="com.google.android.gm:id/fab").click()
   else:
-      # Last resort: tap bottom-right FAB area
       d.click(0.9, 0.9)
   time.sleep(2.0)
 
@@ -1136,7 +1037,6 @@ Open search bar:
   elif d(resourceId="com.google.android.youtube:id/toolbar_search_button").exists(timeout=3):
       d(resourceId="com.google.android.youtube:id/toolbar_search_button").click()
   else:
-      # Tap top-right search area by coordinate
       d.click(0.92, 0.05)
   time.sleep(1.0)
 
@@ -1152,13 +1052,11 @@ Type query (search input field):
   d.press("search"); time.sleep(2.5)
 
 Click first video result (titles are in LABEL section of snapshot):
-  # Try textContains with first few words of the query
   words = search_query.split()[:3]
   for w in words:
       if d(textContains=w, clickable=True).exists(timeout=2):
           d(textContains=w, clickable=True)[0].click(); break
   else:
-      # Fallback: first clickable ViewGroup below search bar
       d(className="android.view.ViewGroup", clickable=True)[2].click()
 """,
 
@@ -1192,25 +1090,18 @@ Save: d(text="Save") or d(description="Save")
 }
 
 def _get_app_playbook(app: str) -> str:
-    """Return the playbook for the given app, or empty string for unknown apps."""
     key = app.lower().replace(" ", "_").replace("-", "_")
-    # Try exact match first, then partial match
     if key in _APP_PLAYBOOKS:
         return _APP_PLAYBOOKS[key]
     for k, v in _APP_PLAYBOOKS.items():
         if k in key or key in k:
             return v
-    return ""   # Unknown app — LLM reasons from snapshot alone
+    return ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  LLM SYSTEM PROMPT
 # ══════════════════════════════════════════════════════════════════════════════
-
-# FIX #4: Added explicit "NEVER use desc=" rule — uiautomator2 uses description=
-# FIX #5: Added Chrome-specific enter/search pattern
-# FIX #6: Strengthened .exists() guard rule
-# FIX #7: Added hard MAX LINES rule
 
 _CODEGEN_BASE_PROMPT = textwrap.dedent(
     """    You are an expert Android automation engineer.
@@ -1298,15 +1189,6 @@ _CODEGEN_BASE_PROMPT = textwrap.dedent(
 
 
 def _build_codegen_system_prompt(app: str) -> str:
-    """
-    Build the system prompt for a specific app by combining the base prompt
-    with the app-specific playbook (if one exists).
-
-    This replaces the old 300-line monolith:
-    - Base prompt: ~70 lines of reasoning principles, valid for ALL apps
-    - Playbook: 10-20 lines of app-specific patterns, injected only when needed
-    - Unknown apps: no playbook — LLM reads snapshot and reasons from scratch
-    """
     playbook = _get_app_playbook(app)
     if playbook:
         playbook_section = (
@@ -1319,7 +1201,6 @@ def _build_codegen_system_prompt(app: str) -> str:
     return _CODEGEN_BASE_PROMPT
 
 
-# Keep backward-compat alias pointing at the base (used in tests/logging)
 _CODEGEN_SYSTEM_PROMPT = _CODEGEN_BASE_PROMPT
 
 
@@ -1330,7 +1211,7 @@ _CODEGEN_SYSTEM_PROMPT = _CODEGEN_BASE_PROMPT
 class MobileCodeGenStrategy:
     """
     Code-generation strategy for Android UI automation.
-    (Architecture unchanged — see module docstring)
+    Uses Google Gemini (gemini-2.5-flash) as the sole LLM provider.
     """
 
     def __init__(
@@ -1338,12 +1219,12 @@ class MobileCodeGenStrategy:
         device_id:        str            = "default_device",
         uiautomator_host: str            = "http://localhost",
         uiautomator_port: int            = 9008,
-        llm_provider:     str            = "cerebras",
+        llm_provider:     str            = "gemini",   # ← default changed to gemini
         cache_file:       Optional[Path] = None,
     ) -> None:
         self.device_id            = device_id
         self.uiautomator_base_url = f"{uiautomator_host.rstrip('/')}:{uiautomator_port}"
-        self.llm_provider         = (llm_provider or "cerebras").strip().lower()
+        self.llm_provider         = "gemini"   # always gemini, ignore argument
         self.current_task:        Optional[MobileTaskRequest] = None
         self.token_usage:         Dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         self.total_llm_calls:     int            = 0
@@ -1353,7 +1234,6 @@ class MobileCodeGenStrategy:
         self.param_extractor = ParameterExtractor()
         self.placeholderizer = PlaceholderExtractor()
         self._executor:      Optional[CodeExecutor] = None
-        # action_history: referenced by mobile_action_handler.py for step logging.
         self.action_history: List[Tuple[str, bool]] = []
 
         self._init_llm()
@@ -1362,35 +1242,57 @@ class MobileCodeGenStrategy:
             f"llm={self.llm_provider} | {self.cache.stats()}"
         )
 
+    # ── LLM initialisation ─────────────────────────────────────────────────
+
     def _init_llm(self) -> None:
-        if self.llm_provider == "cerebras":
-            try:
-                from cerebras.cloud.sdk import Cerebras
-                self.llm_client = Cerebras(api_key=os.getenv("CEREBRAS_API_KEY", ""))
-                self.model      = "llama3.1-8b"   # 120B params, 3000 t/s — much better code quality
-                logger.info("✅ Cerebras: llama3.1-8b")
-            except ImportError:
-                raise RuntimeError("Install cerebras-cloud-sdk: pip install cerebras-cloud-sdk")
-        else:
-            from groq import AsyncGroq
-            self.llm_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY", ""))
-            self.model      = "llama3.1-8b"
-            logger.info("✅ Groq: llama3.1-8b")
+        """Initialise Google Gemini as the sole LLM provider."""
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+            self.llm_client = genai.GenerativeModel("gemini-2.5-flash")
+            self.model      = "gemini-2.5-flash"
+            logger.info("✅ Gemini: gemini-2.5-flash")
+        except ImportError:
+            raise RuntimeError(
+                "google-generativeai is not installed. "
+                "Run: pip install google-generativeai"
+            )
 
     async def _llm_chat(self, **kwargs: Any) -> Any:
-        fn = self.llm_client.chat.completions.create
-        if inspect.iscoroutinefunction(fn):
-            return await fn(**kwargs)
-        result = await asyncio.to_thread(lambda: fn(**kwargs))
-        return await result if inspect.isawaitable(result) else result
+        """
+        Call Gemini's generate_content API.
+
+        The caller passes OpenAI-style kwargs (messages, temperature, max_tokens).
+        We combine the system + user messages into a single prompt string and
+        map the generation config to Gemini's format.
+        """
+        messages    = kwargs.get("messages", [])
+        system_msg  = next((m["content"] for m in messages if m["role"] == "system"), "")
+        user_msg    = next((m["content"] for m in messages if m["role"] == "user"),   "")
+        combined    = f"{system_msg}\n\n{user_msg}" if system_msg else user_msg
+
+        generation_config = {
+            "temperature":      kwargs.get("temperature", 0.1),
+            "max_output_tokens": kwargs.get("max_tokens", 1200),
+        }
+
+        def _call() -> Any:
+            return self.llm_client.generate_content(
+                combined,
+                generation_config=generation_config,
+            )
+
+        result = await asyncio.to_thread(_call)
+        return result
 
     def _track_usage(self, response: Any) -> None:
+        """Track token usage from Gemini's usage_metadata field."""
         try:
-            u = getattr(response, "usage", None)
+            u = getattr(response, "usage_metadata", None)
             if u:
-                self.token_usage["prompt"]     += int(getattr(u, "prompt_tokens",     0) or 0)
-                self.token_usage["completion"] += int(getattr(u, "completion_tokens", 0) or 0)
-                self.token_usage["total"]      += int(getattr(u, "total_tokens",      0) or 0)
+                self.token_usage["prompt"]     += int(getattr(u, "prompt_token_count",     0) or 0)
+                self.token_usage["completion"] += int(getattr(u, "candidates_token_count", 0) or 0)
+                self.token_usage["total"]      += int(getattr(u, "total_token_count",      0) or 0)
             self.total_llm_calls += 1
         except Exception:
             pass
@@ -1452,7 +1354,6 @@ class MobileCodeGenStrategy:
             return ""
 
     async def _is_app_foreground(self, package: str) -> bool:
-        """Return True if `package` is currently the foreground app."""
         if not package:
             return False
         serial = self._resolve_serial()
@@ -1470,30 +1371,17 @@ class MobileCodeGenStrategy:
             return False
 
     async def _launch_app_and_wait(self, package: str, min_elements: int = 8) -> None:
-        """
-        Launch `package` via ADB and poll until the app UI is actually loaded.
-
-        IMPORTANT: If the app is already in the foreground, skip app_start().
-        Calling app_start() when Gmail has a compose screen open will save the
-        draft and return to the inbox — destroying any partially-filled form.
-
-        Strategy: check foreground first. If already there, just verify elements
-        are loaded. If not, start the app and poll until ready.
-        """
         if not package:
             return
         serial = self._resolve_serial()
 
-        # ── Skip app_start if already in foreground ───────────────────────
         already_running = await self._is_app_foreground(package)
         if already_running:
-            # Verify the screen has enough elements to be usable
             xml  = await self._fetch_xml_dump()
             snap = build_ui_snapshot(xml)
             if snap.count("\n") >= min_elements:
                 logger.info(f"[LAUNCH] ✅ {package} already in foreground — skipping app_start")
                 return
-            # App is in foreground but screen is loading — brief wait
             logger.info(f"[LAUNCH] {package} in foreground but screen loading — waiting 1.5s")
             await asyncio.sleep(1.5)
             return
@@ -1508,14 +1396,12 @@ class MobileCodeGenStrategy:
             logger.warning(f"[LAUNCH] app_start({package}) error: {e}")
             return
 
-        pkg_tail = package.split(".")[-1].lower()  # e.g. "chrome", "deskclock"
+        pkg_tail = package.split(".")[-1].lower()
         for poll in range(6):
             await asyncio.sleep(2.0)
             xml  = await self._fetch_xml_dump()
             snap = build_ui_snapshot(xml)
             elem_count = snap.count("\n")
-            # App is ready when its own package name appears in the snapshot
-            # (meaning its views are in the hierarchy, not just the launcher)
             pkg_visible = pkg_tail in snap.lower() or package.lower() in snap.lower()
             logger.info(
                 f"[LAUNCH] Poll {poll+1}/6 | ~{elem_count} elems | "
@@ -1524,7 +1410,6 @@ class MobileCodeGenStrategy:
             if pkg_visible and elem_count >= min_elements:
                 logger.info(f"[LAUNCH] ✅ {package} ready after {(poll+1)*2}s")
                 return
-            # Fallback: if there are lots of elements, app is probably loaded
             if elem_count >= min_elements * 4:
                 logger.info(f"[LAUNCH] ✅ {package} loaded ({elem_count} elements, no pkg check)")
                 return
@@ -1617,7 +1502,6 @@ class MobileCodeGenStrategy:
             f"params={list(params.raw.keys())} | retry={'yes' if error_ctx else 'no'}"
         )
         logger.debug(f"[LLM] USER_PROMPT:\n{user_prompt}")
-        # Use the dynamic system prompt (base + app playbook)
         system_prompt = _build_codegen_system_prompt(app)
         logger.debug(f"[LLM] System prompt: {len(system_prompt)} chars | app={app}")
 
@@ -1631,7 +1515,9 @@ class MobileCodeGenStrategy:
             max_tokens=1200,
         )
         self._track_usage(response)
-        raw  = response.choices[0].message.content or ""
+
+        # ── Gemini response extraction ─────────────────────────────────────
+        raw  = response.text or ""
         code = self._clean_generated_code(raw)
         logger.info(f"[LLM] Generated {len(code.splitlines())} lines")
         logger.debug(f"[LLM] CODE:\n{code}")
@@ -1700,8 +1586,6 @@ class MobileCodeGenStrategy:
         params = ParameterExtractor.extract(task.ai_prompt, task.extra_params)
         logger.info(f"[PARAMS] {params}")
 
-        # Respect explicit app_name from coordinator first, then fall back to
-        # shared inference that knows about messages/whatsapp and other apps.
         explicit_app = (task.extra_params or {}).get("app_name", "").strip()
         app, package = infer_app(task.ai_prompt, explicit_app)
         logger.info(f"[APP] app={app!r} | package={package!r}")
@@ -1715,9 +1599,6 @@ class MobileCodeGenStrategy:
             missing = self.cache._placeholderizer.missing_keys(
                 template.code_template, params.raw
             )
-            # Also respect stored parameter_schema: some templates may reference
-            # params as variables (email_subject) rather than {placeholders}.
-            # Ensure required schema keys are present at runtime.
             schema_keys = set()
             try:
                 schema_keys = set(getattr(template, "parameter_schema", {}) or {})
@@ -1730,11 +1611,6 @@ class MobileCodeGenStrategy:
                 logger.info(f"[T1] Cache hit (sim={score:.2f}) — injecting {len(params.raw)} params → executing")
                 injected = params.inject(template.code_template)
 
-                # FIX 4: Pre-validate the injected code doesn't reference
-                # undefined variables. NameError on a cached template means
-                # the template was stored with hardcoded variables from a
-                # different task context (e.g. recipient_email in a
-                # "navigate to email" template from a prior session).
                 syntax_err = CodeExecutor._syntax_check(
                     CodeExecutor(self._resolve_serial())._build_script(injected, params)
                 )
@@ -1746,11 +1622,6 @@ class MobileCodeGenStrategy:
                     if outcome.success:
                         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-                        # Verify outcome for tasks where cached code can silently
-                        # produce wrong results (e.g. alarm set to default time).
-                        # For clock/alarm tasks, the old cached template may have
-                        # been stored before the mode-switch fix and still taps a
-                        # dial that ignores set_text(). We catch this here.
                         needs_verify = app == "clock" or any(
                             k in task.ai_prompt.lower()
                             for k in ("alarm", "set the alarm", "time to")
@@ -1768,12 +1639,10 @@ class MobileCodeGenStrategy:
                                     f"— invalidating template and regenerating"
                                 )
                                 self.cache.mark_failure(template.template_id)
-                                # Force reliability below threshold so it won't be used again
                                 t = self.cache._store.get(template.template_id)
                                 if t:
-                                    t.failure_count += 3   # penalise heavily
+                                    t.failure_count += 3
                                     self.cache._save()
-                                # Fall through to LLM generation below
                             else:
                                 self.cache.mark_success(template.template_id)
                                 logger.info(f"✅ [T1] Cache hit success + verified | {elapsed_ms}ms | {reason}")
@@ -1797,7 +1666,6 @@ class MobileCodeGenStrategy:
                                 completion_reason=cr,
                             )
                     elif "NameError" in (outcome.error_summary or ""):
-                        # Stale template references an undefined variable
                         logger.warning(
                             f"[T1] Cached code has NameError — template is stale, marking failed: "
                             f"{outcome.error_summary[:80]}"
@@ -1809,20 +1677,19 @@ class MobileCodeGenStrategy:
             else:
                 logger.info(f"[T1] Cache hit but missing params {missing} — falling through to LLM")
 
-        # Email apps (gmail) need more elements before we consider the screen ready
         _snap_min = 15 if app in ("gmail", "email") else _MIN_SNAPSHOT_ELEMENTS
 
         async def _live_snapshot(label: str, min_elems: int = _snap_min) -> str:
-            # More retries and longer waits for email app which loads slowly
             max_tries = 5 if app in ("gmail", "email") else 3
             for snap_try in range(max_tries):
                 xml  = await self._fetch_xml_dump()
-                snap = build_ui_snapshot(xml)
+                gmail_cap = 30 if app in ("gmail", "email") else 80
+                snap = build_ui_snapshot(xml, max_interactive=gmail_cap)
                 elem_count = snap.count("\n")
                 if elem_count >= min_elems or snap_try == max_tries - 1:
                     logger.info(f"[DEVICE] {label} snapshot: ~{elem_count} elements (try {snap_try + 1})")
                     return snap
-                wait = _SNAPSHOT_RETRY_DELAY * (snap_try + 1)  # progressive backoff
+                wait = _SNAPSHOT_RETRY_DELAY * (snap_try + 1)
                 logger.warning(
                     f"[DEVICE] {label} snapshot has only ~{elem_count} elements "
                     f"— retrying in {wait:.1f}s"
@@ -1834,10 +1701,6 @@ class MobileCodeGenStrategy:
         error_ctx = ""
         outcome:  Optional[ExecutionOutcome] = None
 
-        # ── App launch with proper wait ───────────────────────────────────
-        # Detect "open/launch app" tasks — these just need app_start + wait,
-        # no LLM code generation required. This also ensures the app is fully
-        # loaded before we take the first snapshot for subsequent tasks.
         task_lower = task.ai_prompt.lower()
         is_launch_task = (
             package
@@ -1864,7 +1727,6 @@ class MobileCodeGenStrategy:
                 completion_reason=f"App launched: {package}",
             )
 
-        # Non-launch task: ensure app is running before first snapshot
         if package:
             await self._launch_app_and_wait(package)
 
@@ -1901,8 +1763,6 @@ class MobileCodeGenStrategy:
             outcome = await executor.execute(code, params)
 
             if outcome.success:
-                # Guard: if stdout contains MODE_SWITCH_FAILED the script signalled
-                # a soft failure (was using exit() before sys.exit(1) fix) — treat as failure
                 if "MODE_SWITCH_FAILED" in (outcome.stdout or ""):
                     logger.warning(f"[T2/T3] stdout contains MODE_SWITCH_FAILED — treating as failure")
                     outcome = ExecutionOutcome(
@@ -1919,10 +1779,6 @@ class MobileCodeGenStrategy:
                     )
                     continue
                 logger.info(f"✅ [T2] Code executed successfully ({label})")
-                # Wait for UI to fully settle before snapshotting for verification.
-                # Chrome search results and Clock alarm list both need ~1.5s to render.
-                # Without this wait, verifier snapshots a loading/transitioning screen
-                # and produces false negatives, causing the agent to re-run the task.
                 _settle = 2.5 if app in ("chrome", "youtube") else 1.5
                 logger.info(f"[VERIFY] Settling {_settle}s before snapshot...")
                 await asyncio.sleep(_settle)
@@ -1954,10 +1810,7 @@ class MobileCodeGenStrategy:
             except Exception as e:
                 logger.warning(f"[CACHE] Template storage failed (non-fatal): {e}")
 
-            # FIX: If stdout contains real content beyond TASK_COMPLETE, use it
-            # as completion_reason so the coordinator can pass it downstream.
             stdout_content = (outcome.stdout or "").strip()
-            # Remove the TASK_COMPLETE signal and any blank lines
             content_lines = [
                 l for l in stdout_content.splitlines()
                 if l.strip() and l.strip() != "TASK_COMPLETE"
@@ -1979,7 +1832,7 @@ class MobileCodeGenStrategy:
         return self._build_error_result(task.task_id, err, elapsed_ms)
 
     # ══════════════════════════════════════════════════════════════════════
-    #  TASK VERIFICATION  (unchanged)
+    #  TASK VERIFICATION
     # ══════════════════════════════════════════════════════════════════════
 
     async def _verify_task_completion(
@@ -1988,21 +1841,6 @@ class MobileCodeGenStrategy:
         app:       str,
         params:    TaskParameters,
     ) -> Tuple[bool, str]:
-        """
-        Verify task completion by inspecting the live UI after execution.
-
-        Design principles:
-        1. PREFER FALSE POSITIVE over FALSE NEGATIVE for tasks that are
-           inherently hard to verify precisely (typing, navigation).
-           A false negative causes the agent to re-run the task, which is
-           always worse than trusting a successful rc=0 execution.
-        2. Only return False when there is STRONG evidence of failure
-           (error dialog, time picker still open, wrong time on alarm list).
-        3. For "intermediate" tasks (type a query, navigate to page),
-           trust the script's rc=0 + TASK_COMPLETE signal — don't require
-           the final result to be visible yet.
-        4. For "outcome" tasks (alarm set, email sent), verify the outcome.
-        """
         try:
             xml_dump = await self._fetch_xml_dump()
             snap     = build_ui_snapshot(xml_dump)
@@ -2011,24 +1849,19 @@ class MobileCodeGenStrategy:
             elem_count = snap.count("\n")
             pkg_name = APP_PACKAGES.get(app, "")
 
-            # ── Hard failure: crash dialog ────────────────────────────────
             if any(s in snap_low for s in ("unfortunately", "has stopped")):
                 return False, "App crash dialog visible"
 
-            # ══════════════════════════════════════════════════════════════
-            #  CLOCK / ALARM
-            # ══════════════════════════════════════════════════════════════
+            # ── CLOCK / ALARM ─────────────────────────────────────────────
             if app == "clock" or any(k in task_low for k in ("alarm", "clock", "timer")):
                 task_is_set_time = any(k in task_low for k in (
                     "set", "time", "alarm time", "5:", "6:", "7:", "8:", "9:",
                     "10:", "11:", "12:",
                 ))
 
-                # Time picker still open → definite failure
                 if "input_hour" in snap_low or "input_minute" in snap_low:
                     return False, "Time picker still open — alarm not saved"
 
-                # Dial picker (no text fields visible but clock is shown) → failure
                 if "timepicker" in snap_low and "add alarm" not in snap_low:
                     return False, "Clock dial still showing — alarm not saved"
 
@@ -2036,14 +1869,12 @@ class MobileCodeGenStrategy:
                 has_switch    = "switch" in snap_low or "togglebutton" in snap_low.replace("hour", "")
 
                 if has_add_alarm and has_switch and task_is_set_time:
-                    # We're on the alarm list. Check if correct time is there.
                     alarm_hour   = params.get("alarm_hour",   "")
                     alarm_minute = params.get("alarm_minute", "")
                     alarm_period = params.get("alarm_period", "")
 
                     if alarm_hour and alarm_minute:
                         h_int = int(alarm_hour)
-                        # All ways the time could appear in the snapshot labels
                         expected = [
                             f"{h_int}:{alarm_minute}",
                             f"{alarm_hour}:{alarm_minute}",
@@ -2056,38 +1887,27 @@ class MobileCodeGenStrategy:
                         if any(v in snap_low for v in expected):
                             return True, f"Correct alarm time {h_int}:{alarm_minute} visible on list"
 
-                        # Not found — look at what times ARE on screen
                         times_on_screen = re.findall(r"\b\d{1,2}:\d{2}\b", snap)
-                        # Filter out the default times that appear regardless (system clock etc.)
                         non_default = [t for t in times_on_screen
                                        if t not in ("12:00", "00:00") and t != f"{h_int}:00"]
                         if non_default:
-                            # There's a real alarm time visible but it's not ours
                             return False, (
                                 f"Wrong alarm time on list — expected {h_int}:{alarm_minute}, "
                                 f"found {non_default[:2]}"
                             )
-                        # Only default times (12:00) visible — no alarm was actually created
-                        # OR the alarm was created but label hasn't rendered yet.
-                        # Give benefit of the doubt on first attempt:
                         logger.info(f"[VERIFY] Only default times visible: {times_on_screen[:3]} — trusting script")
                         return True, "Alarm list visible, times not yet rendered — trusting rc=0"
 
-                # On alarm list but not a set-time task (e.g. "Open Clock", "Confirm OK")
                 if has_add_alarm:
                     return True, "Alarm list screen visible"
 
-                # On some other clock screen (timers, stopwatch, etc.)
                 return True, "Clock app visible — trusting rc=0"
 
-            # ══════════════════════════════════════════════════════════════
-            #  CHROME / BROWSER
-            # ══════════════════════════════════════════════════════════════
+            # ── CHROME / BROWSER ──────────────────────────────────────────
             if app == "chrome" or any(k in task_low for k in ("chrome", "search", "browser")):
                 query      = params.get("search_query", "")
                 target_url = params.get("target_url", "")
 
-                # Hard failure: still on new-tab start page
                 still_on_newtab = (
                     "search or type url" in snap_low
                     and "google" not in snap_low
@@ -2096,19 +1916,13 @@ class MobileCodeGenStrategy:
                 if still_on_newtab:
                     return False, "Chrome still on new-tab page — action had no effect"
 
-                # ── "type" / "search for" tasks ───────────────────────────
-                # These just need the query to have been submitted — we don't
-                # need full results rendered. Trust rc=0 unless still on newtab.
                 if any(k in task_low for k in ("type", "search for", "search in", "enter")):
-                    # Best signal: query text appears anywhere in snapshot
                     if query and query.lower() in snap_low:
                         return True, f"Query '{query[:30]}' visible in snapshot"
-                    # Next best: page changed (not new-tab, has content)
                     if elem_count >= 10:
                         return True, f"Page has content ({elem_count} elements) — query likely submitted"
                     return False, "Chrome appears empty after type task"
 
-                # ── navigation tasks ──────────────────────────────────────
                 if any(k in task_low for k in ("navigate", "go to", "load")):
                     if target_url:
                         domain = re.search(r"https?://([^/]+)", target_url)
@@ -2118,19 +1932,15 @@ class MobileCodeGenStrategy:
                         return True, f"Chrome page loaded ({elem_count} elements)"
                     return False, "Chrome navigation: page still empty"
 
-                # ── "click search button" / submit tasks ─────────────────
                 if any(k in task_low for k in ("click", "press", "submit", "button")):
-                    # After clicking search, results page should have substantial content
                     if query and query.lower() in snap_low:
                         return True, f"Results visible for '{query[:25]}'"
                     if elem_count >= 15:
                         return True, f"Results page loaded ({elem_count} elements)"
-                    # Even with few elements, if we're not on newtab, it worked
                     if elem_count >= 8 and "search or type url" not in snap_low:
                         return True, f"Page changed after click ({elem_count} elements)"
                     return False, "Search button click: no results visible"
 
-                # ── generic Chrome task ───────────────────────────────────
                 chrome_active = any(s in snap_low for s in (
                     "com.android.chrome", "url_bar", "location_bar", "omnibox",
                     "google", "chrome",
@@ -2139,21 +1949,15 @@ class MobileCodeGenStrategy:
                     return True, f"Chrome active ({elem_count} elements)"
                 return False, "Chrome not confirmed active"
 
-            # ══════════════════════════════════════════════════════════════
-            #  GMAIL
-            # ══════════════════════════════════════════════════════════════
+            # ── GMAIL ─────────────────────────────────────────────────────
             if app == "gmail" or any(k in task_low for k in ("email", "gmail", "compose", "send")):
-                # Distinguish task intent: compose (open compose screen) vs send (close it)
                 task_is_send = any(k in task_low for k in ("send", "click send", "press send"))
                 task_is_compose_open = any(k in task_low for k in (
                     "compose", "new email", "navigate to email", "open email",
                     "open gmail", "fill", "subject", "body", "recipient",
                 ))
 
-                # For "send" tasks: first validate fields, then check compose is gone
                 if task_is_send:
-                    # Pre-send check: look for empty required fields warning
-                    # Gmail shows "Please add a recipient" or leaves compose open
                     error_indicators = [
                         "please add a recipient",
                         "add a recipient",
@@ -2164,17 +1968,31 @@ class MobileCodeGenStrategy:
                         if err in snap_low:
                             return False, f"Gmail validation error visible: {err}"
 
-                    compose_gone = "to" not in snap_low[:200] and "subject" not in snap_low[:200]
-                    has_compose_btn = "compose" in snap_low
-                    if compose_gone and has_compose_btn:
-                        return True, "Compose screen closed — email sent"
-                    if "send" in snap_low and ("to" in snap_low or "subject" in snap_low):
-                        return False, "Compose screen still visible — check all fields are filled"
-                    return True, "Gmail screen changed after send"
+                    if any(s in snap_low for s in ("com.android.chrome", "url_bar", "omnibox", "location_bar")):
+                        return False, "Chrome opened after send attempt — Gmail flow diverged"
 
-                # For "compose/fill/open" tasks: compose screen OPEN is success
+                    compose_open = any(s in snap_low for s in (
+                        "com.google.android.gm:id/send",
+                        "com.google.android.gm:id/to",
+                        "com.google.android.gm:id/subject",
+                        "recipient",
+                        "compose email",
+                    ))
+                    if compose_open:
+                        return False, "Compose screen still visible after send attempt"
+
+                    gmail_visible = any(s in snap_low for s in (
+                        "com.google.android.gm",
+                        "gmail",
+                        "inbox",
+                        "mail",
+                    ))
+                    if gmail_visible:
+                        return True, "Compose screen closed and Gmail inbox visible — email sent"
+
+                    return False, "Gmail not visible after send — unexpected navigation"
+
                 if task_is_compose_open:
-                    # Compose screen is open if subject or to fields are visible
                     compose_open = any(s in snap_low for s in (
                         "subject", '"to"', "recipient", "compose email",
                         "com.google.android.gm:id/subject",
@@ -2182,17 +2000,15 @@ class MobileCodeGenStrategy:
                     ))
                     if compose_open:
                         return True, "Compose screen open — compose task succeeded"
-                    # Check if we at least have a Gmail screen with content
                     if elem_count >= 10:
                         return True, f"Gmail active with {elem_count} elements"
                     return True, "Gmail screen visible — trusting rc=0"
 
-                # Generic Gmail task — just check we're in Gmail
                 if elem_count >= 8:
                     return True, f"Gmail active ({elem_count} elements)"
                 return True, "Gmail screen changed"
 
-            # ── MESSAGES ─────────────────────────────────────────────────
+            # ── MESSAGES ──────────────────────────────────────────────────
             if app == "messages" or any(k in task_low for k in (
                 "messages app", "message thread", "sms", "send a message",
                 "in the messages",
@@ -2208,13 +2024,13 @@ class MobileCodeGenStrategy:
                     return True, f"Messages app active ({elem_count} elements)"
                 return False, "Messages: UI not confirmed — package not in hierarchy"
 
-            # ── WHATSAPP ─────────────────────────────────────────────────
+            # ── WHATSAPP ──────────────────────────────────────────────────
             if app == "whatsapp" or "whatsapp" in task_low:
                 if "com.whatsapp" not in snap_low and "whatsapp" not in snap_low:
                     return False, "WhatsApp not in UI hierarchy"
                 return True, f"WhatsApp active ({elem_count} elements)"
 
-            # ── GENERIC FALLBACK ─────────────────────────────────────────
+            # ── GENERIC FALLBACK ──────────────────────────────────────────
             if pkg_name and pkg_name in snap_low:
                 return True, f"Package {pkg_name} confirmed in hierarchy"
 
@@ -2271,7 +2087,7 @@ MobileReActStrategy = MobileCodeGenStrategy
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INTEGRATION FUNCTION  (unchanged)
+#  INTEGRATION FUNCTION
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def execute_mobile_task(
@@ -2316,56 +2132,17 @@ async def execute_mobile_task(
 #  CHANGE LOG
 # ══════════════════════════════════════════════════════════════════════════════
 #
-#  FIX #1  _QUERY_RE rewrite
-#          Old: fired on any sentence containing search/type/find/google/look up
-#          New: requires quoted string OR explicit search-intent verb; rejects
-#               single nouns extracted from navigation sentences like "bar"
+#  GEMINI MIGRATION (this edit):
+#  - _init_llm: replaced Cerebras/Groq with google-generativeai GenerativeModel
+#    using "gemini-2.5-flash". No fallback providers.
+#  - llm_provider hardcoded to "gemini" in __init__; constructor argument ignored.
+#  - _llm_chat: extracts system + user messages, combines into single string,
+#    calls generate_content() with generation_config temperature/max_output_tokens.
+#  - _track_usage: reads usage_metadata.prompt_token_count,
+#    candidates_token_count, total_token_count (Gemini field names).
+#  - _generate_code: reads response.text instead of
+#    response.choices[0].message.content.
+#  - Install: pip install google-generativeai
+#  - Env var: GEMINI_API_KEY
 #
-#  FIX #2  _extract_query() early-return for navigation tasks
-#          Tasks starting with Navigate/Click/Press/Tap/Open/Go now skip query
-#          extraction entirely, preventing "button to get the results" being set
-#          as search_query when the task is "Click the search button..."
-#
-#  FIX #3  "input_content" added to _INTERNAL_KEYS
-#          Stops the coordinator output from previous tasks leaking into
-#          generated scripts as a declared Python variable
-#
-#  FIX #4  System prompt: desc= → description=
-#          Added explicit rule and capitalized warning:
-#          NEVER use desc=, ALWAYS use description= for content-desc fields
-#
-#  FIX #5  System prompt: Chrome enter/search pattern
-#          Added dedicated CHROME section explaining that there is NO Enter
-#          button in Chrome's UI tree. LLM must use d.press("enter") or
-#          d.press("search") — never look for a clickable Enter element.
-#
-#  FIX #6  System prompt: .wait() / .exists() guard rule strengthened
-#          Moved the !! warning to a prominent position and added it to the
-#          error_ctx hint so retries specifically call out the cause.
-#
-#  FIX #7  System prompt: hard MAX 25 LINES rule
-#          Old scripts were 60-100 lines with unnecessary fallback chains.
-#          Hard cap forces the LLM to write concise scripts.
-#
-#  FIX #8  CodeExecutor: pre-execution syntax check via compile()
-#          Syntax errors (unterminated string, unclosed paren) are now caught
-#          in ~0ms without a subprocess spawn or device connection attempt.
-#          The error is fed back to the LLM as error_ctx for the next attempt.
-#
-#  FIX #9  build_ui_snapshot: element count in header
-#          Header now says "CONFIRMED INTERACTIVE ELEMENTS: N found".
-#          This signals to the LLM that the list is complete and it should
-#          not invent additional selectors.
-#
-#  FIX #10 System prompt: app-specific patterns
-#          Added CLOCK/ALARM section showing the exact "switch to text input
-#          mode" pattern needed to avoid the clock-dial (which caused the
-#          alarm to stay at 11:00 instead of being set to 5:45).
-#
-#  FIX #11 System prompt: YouTube section
-#          Added correct YouTube search and "click first result" patterns
-#          with working resourceId fallback chain.
-#
-#  FIX #12 shared infer_app: messages/whatsapp and explicit app handling
-#          App inference now comes from mobile_template_cache.infer_app(),
-#          which correctly handles explicit app_name plus messages/whatsapp.
+#  Original fixes (FIX #1–#12) preserved unchanged — see original file header.

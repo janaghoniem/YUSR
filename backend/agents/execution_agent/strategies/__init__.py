@@ -1,5 +1,9 @@
 from .local_strategy import LocalStrategy
-from .web_strategy import WebStrategy
 from .system_strategy import SystemStrategy
+
+try:
+	from .web_strategy import WebStrategy
+except ImportError:
+	WebStrategy = None
 
 __all__ = ['LocalStrategy', 'WebStrategy', 'SystemStrategy']

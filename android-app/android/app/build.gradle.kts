@@ -7,10 +7,10 @@ plugins {
 
 android {
     namespace = "com.example.aura_project"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     
-    // FIXED: Explicitly set to the version required by your plugins
-    ndkVersion = "28.2.13676358"
+    // Use the installed NDK version that is available locally.
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         // Updated to 17 for better compatibility with NDK 27/AGP 8+
@@ -26,8 +26,8 @@ android {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.aura_project"
         
-        // Ensure these are at least 21 and 34 respectively for modern plugins
-        minSdk = flutter.minSdkVersion
+        // flutter_tts requires Android 24+.
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         
         versionCode = flutter.versionCode

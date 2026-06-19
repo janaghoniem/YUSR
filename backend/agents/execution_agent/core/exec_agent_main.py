@@ -31,10 +31,14 @@ from ..layers.exec_agent_vision import VisionLayer
 from ..layers.exec_agent_action import ActionLayer
 from ..layers.exec_agent_safety import SafetyLayer
 from ..strategies.local_strategy import LocalStrategy
-from ..strategies.web_strategy import WebStrategy
 from ..strategies.system_strategy import SystemStrategy
 from ..strategies.mobile_strategy import MobileStrategy  # ← NEW: Mobile strategy
 from ..utils import setup_logging
+
+try:
+    from ..strategies.web_strategy import WebStrategy
+except ImportError:
+    WebStrategy = None
 
 import logging
 logger = logging.getLogger(__name__)
@@ -87,14 +91,18 @@ class ExecutionAgent:
         
         self.strategies = {
             ExecutionContext.LOCAL.value: local_strategy,
-            ExecutionContext.WEB.value: WebStrategy(
-                self.logger, self.safety_layer
-            ),
             ExecutionContext.SYSTEM.value: SystemStrategy(
                 self.logger, self.safety_layer
             ),
             "mobile": mobile_strategy  # ← NEW: Mobile context
         }
+
+        if WebStrategy is not None:
+            self.strategies[ExecutionContext.WEB.value] = WebStrategy(
+                self.logger, self.safety_layer
+            )
+        else:
+            self.logger.warning("Web strategy module is unavailable; WEB context disabled")
         
         # Check dependencies
         self.dependencies = check_dependencies(self.logger)

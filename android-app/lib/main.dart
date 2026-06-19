@@ -3532,7 +3532,7 @@ class _AutomationDemoState extends State<AutomationDemo>
           Switch(
             value: value,
             onChanged: onChanged,
-            activeThumbColor: accent,
+            activeColor: accent,
             activeTrackColor: accent.withOpacity(0.3),
             inactiveThumbColor: Colors.white.withOpacity(0.4),
             inactiveTrackColor: Colors.white.withOpacity(0.1),
